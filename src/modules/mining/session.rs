@@ -17,6 +17,8 @@ use super::gamelog::{LogTime, MiningEvent, TimedMiningEvent};
 pub struct TrackerSettings {
     /// Size of the ore hold in m³ (from Show Info in game, with skills).
     /// `None` until the user has entered it; fill alerts are off until then.
+    /// The settings layer fills in the global default (11,500 m³) or the
+    /// character's own value.
     pub hold_capacity_m3: Option<f64>,
     /// Alert when the hold is at least this full, in percent (default 70).
     pub fill_alert_percent: f64,
@@ -108,10 +110,13 @@ pub struct FinishedSession {
     pub started: LogTime,
     /// Time of the last mining cycle.
     pub ended: LogTime,
-    /// Units mined per ore name (critical bonuses included) that made it
-    /// into the hold.
+    /// Units mined per ore name, as the log reports them (critical bonuses
+    /// included). This is what the session is valued by.
     pub mined_units: BTreeMap<String, u64>,
-    /// Units mined while the hold was full. EVE discards them.
+    /// Of those, the units that probably didn't fit in the hold and were
+    /// discarded by EVE. Only an estimate: it relies on the user clicking
+    /// "Emptied" after each unload, so it is shown as information and not
+    /// subtracted from the session's value.
     pub voided_units: BTreeMap<String, u64>,
     pub cycles: u64,
 }
@@ -121,9 +126,10 @@ pub struct FinishedSession {
 pub struct ActiveSession {
     pub started: LogTime,
     pub last_cycle: LogTime,
-    /// Units that made it into the hold, per ore name.
+    /// Units mined per ore name, as the log reports them.
     pub mined_units: BTreeMap<String, u64>,
-    /// Units mined while the hold was full, which EVE discards.
+    /// Estimated units discarded because the hold was full (see
+    /// [`FinishedSession::voided_units`]).
     pub voided_units: BTreeMap<String, u64>,
     pub cycles: u64,
 }
@@ -283,7 +289,8 @@ impl CharacterTracker {
                 // A cycle after a long gap: the old session is over.
                 finished = self.end_session_if_gap(event.time);
 
-                // Ore that doesn't fit in the hold is discarded by EVE.
+                // Ore that doesn't fit in the hold is discarded by EVE, so it
+                // never reaches the hold count below.
                 let kept = self.units_that_fit(ore, *units, volumes);
                 let voided = units - kept;
 
@@ -295,9 +302,7 @@ impl CharacterTracker {
                     cycles: 0,
                 });
                 session.last_cycle = event.time;
-                if kept > 0 {
-                    *session.mined_units.entry(ore.clone()).or_insert(0) += kept;
-                }
+                *session.mined_units.entry(ore.clone()).or_insert(0) += units;
                 if voided > 0 {
                     *session.voided_units.entry(ore.clone()).or_insert(0) += voided;
                 }
@@ -667,7 +672,8 @@ mod tests {
         assert_eq!(alerts, vec![Alert::HoldFull]);
         assert_eq!(t.hold_units().get("Rock"), Some(&100));
         let session = t.session().unwrap();
-        assert_eq!(session.mined_units.get("Rock"), Some(&100));
+        // The session keeps what the log says; voiding is only an estimate.
+        assert_eq!(session.mined_units.get("Rock"), Some(&115));
         assert_eq!(session.voided_units.get("Rock"), Some(&15));
         // Completely full: everything is voided.
         t.apply(&mined(20, 10, "Rock"), &v);
