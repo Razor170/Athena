@@ -6,7 +6,15 @@
 //! - [`session`]: adds those events up into per-character mining sessions.
 //!
 //! The dashboard panel (the `Module` impl) comes in a later PR, once Kevin has
-//! said what the module should show.
+//! approved the mockup.
+//!
+//! Notes for wiring this up:
+//! - Pass EVE time (UTC) to `CharacterTracker::tick`, never local time.
+//! - On startup Athena reads today's logs from the start. During that
+//!   catch-up, don't show alerts, and skip finished sessions that are already
+//!   in the history (same character and start time), or they are stored twice.
+//! - The hold contents must be saved across restarts, since an unload at a
+//!   station leaves no trace in the log.
 
 // Nothing outside the tests uses this code yet, so the compiler would warn
 // about "dead code". Remove this line when the panel is wired in.

@@ -5,8 +5,10 @@
 //! character, plus a regular "what time is it now" tick for the alerts that
 //! depend on time passing (idle, miner stopped, session end). It does no I/O
 //! and knows nothing about the UI.
+//!
+//! All times are EVE time, which is UTC, like the log itself.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use super::gamelog::{LogTime, MiningEvent, TimedMiningEvent};
 
@@ -21,9 +23,11 @@ pub struct TrackerSettings {
     /// Alert when the hold is at least this full, in percent, as "full".
     /// Slightly under 100 because the last cycle rarely fits exactly.
     pub full_percent: f64,
-    /// "Miner stopped" when no cycle finished for this many seconds while a
-    /// session is running.
-    pub miner_stopped_after_secs: i64,
+    /// The shortest wait before "miner stopped". The real wait is worked
+    /// out from the character's own cycle rhythm (see
+    /// [`CharacterTracker::miner_stopped_after_secs`]), because a strip miner
+    /// or ice harvester cycles far slower than a mining laser.
+    pub miner_stopped_min_secs: i64,
     /// "Idle" alert after this many seconds without a cycle.
     pub idle_after_secs: i64,
     /// A session ends after this many seconds without a cycle.
@@ -36,7 +40,7 @@ impl Default for TrackerSettings {
             hold_capacity_m3: None,
             fill_alert_percent: 90.0,
             full_percent: 99.0,
-            miner_stopped_after_secs: 90,
+            miner_stopped_min_secs: 60,
             idle_after_secs: 5 * 60,
             session_gap_secs: 15 * 60,
         }
@@ -128,6 +132,9 @@ pub struct CharacterTracker {
     /// with [`CharacterTracker::mark_emptied`].
     hold_units: BTreeMap<String, u64>,
     session: Option<ActiveSession>,
+    /// Times of the most recent cycles (distinct seconds, oldest first), to
+    /// learn how often this character's miners normally finish a cycle.
+    recent_cycles: VecDeque<LogTime>,
     /// Alerts already raised, so each one fires once instead of every tick.
     /// They re-arm when the situation changes (hold emptied, mining resumes).
     raised_fill: bool,
@@ -143,6 +150,7 @@ impl CharacterTracker {
             settings,
             hold_units: BTreeMap::new(),
             session: None,
+            recent_cycles: VecDeque::new(),
             raised_fill: false,
             raised_full: false,
             raised_stopped: false,
@@ -157,6 +165,40 @@ impl CharacterTracker {
 
     pub fn session(&self) -> Option<&ActiveSession> {
         self.session.as_ref()
+    }
+
+    /// How many seconds without a cycle count as "miner stopped".
+    ///
+    /// Twice the longest gap between the last few cycles, but at least
+    /// `miner_stopped_min_secs`. With several modules the gaps are short;
+    /// with one slow strip miner they are long, and the limit follows.
+    /// `None` until enough cycles were seen to tell; until then only the
+    /// "deactivates" log line and the idle alert apply.
+    pub fn miner_stopped_after_secs(&self) -> Option<i64> {
+        const MIN_GAPS: usize = 3;
+        if self.recent_cycles.len() < MIN_GAPS + 1 {
+            return None;
+        }
+        let longest_gap = self
+            .recent_cycles
+            .iter()
+            .zip(self.recent_cycles.iter().skip(1))
+            .map(|(earlier, later)| later.seconds_since(*earlier))
+            .max()?;
+        Some((longest_gap * 2).max(self.settings.miner_stopped_min_secs))
+    }
+
+    /// Remembers a cycle time for [`Self::miner_stopped_after_secs`].
+    fn record_cycle_time(&mut self, time: LogTime) {
+        const KEEP: usize = 9;
+        // Several modules finishing in the same second count as one.
+        if self.recent_cycles.back() == Some(&time) {
+            return;
+        }
+        self.recent_cycles.push_back(time);
+        while self.recent_cycles.len() > KEEP {
+            self.recent_cycles.pop_front();
+        }
     }
 
     /// The user unloaded the hold at a station.
@@ -209,7 +251,11 @@ impl CharacterTracker {
         let mut finished = None;
 
         match &event.event {
-            MiningEvent::Mined { units, ore, .. } => {
+            MiningEvent::Mined {
+                units,
+                ore,
+                critical,
+            } => {
                 // A cycle after a long gap: the old session is over.
                 finished = self.end_session_if_gap(event.time);
 
@@ -221,7 +267,12 @@ impl CharacterTracker {
                 });
                 session.last_cycle = event.time;
                 *session.mined_units.entry(ore.clone()).or_insert(0) += units;
-                session.cycles += 1;
+                // A critical success is a bonus on a cycle that already has
+                // its own "You mined" line, so it is not a cycle of its own.
+                if !critical {
+                    session.cycles += 1;
+                    self.record_cycle_time(event.time);
+                }
 
                 *self.hold_units.entry(ore.clone()).or_insert(0) += units;
 
@@ -259,6 +310,9 @@ impl CharacterTracker {
 
     /// Called regularly (e.g. every few seconds) with the current time, for
     /// the alerts that come from nothing happening.
+    ///
+    /// `now` must be EVE time (UTC), not the PC's local time, since the log
+    /// times it is compared with are UTC.
     pub fn tick(&mut self, now: LogTime) -> (Vec<Alert>, Option<FinishedSession>) {
         let mut alerts = Vec::new();
         let Some(session) = &self.session else {
@@ -266,7 +320,9 @@ impl CharacterTracker {
         };
         let quiet_secs = now.seconds_since(session.last_cycle);
 
-        if quiet_secs >= self.settings.miner_stopped_after_secs && !self.raised_stopped {
+        let stopped_after = self.miner_stopped_after_secs();
+        let stopped = stopped_after.is_some_and(|limit| quiet_secs >= limit);
+        if stopped && !self.raised_stopped {
             self.raised_stopped = true;
             alerts.push(Alert::MinerStopped {
                 reason: format!("no mining cycle for {quiet_secs} seconds"),
@@ -291,6 +347,8 @@ impl CharacterTracker {
         }
         // `take` moves the session out and leaves `None` behind.
         let session = self.session.take()?;
+        // The gap to the next session says nothing about cycle times.
+        self.recent_cycles.clear();
         Some(FinishedSession {
             character: self.character.clone(),
             started: session.started,
@@ -489,17 +547,20 @@ mod tests {
     fn time_based_alerts_and_session_end() {
         let v = volumes();
         let mut t = tracker(10_000.0);
-        t.apply(&mined(0, 10, "Rock"), &v);
-        t.apply(&mined(60, 10, "Rock"), &v);
+        // Four cycles 20 s apart: the stop limit becomes the 60 s minimum.
+        for secs in [0, 20, 40, 60] {
+            t.apply(&mined(secs, 10, "Rock"), &v);
+        }
+        assert_eq!(t.miner_stopped_after_secs(), Some(60));
 
         let (alerts, finished) = t.tick(at(100));
         assert!(alerts.is_empty());
         assert!(finished.is_none());
 
-        // 90 s after the last cycle: miner stopped.
-        let (alerts, _) = t.tick(at(150));
+        // 60 s after the last cycle: miner stopped.
+        let (alerts, _) = t.tick(at(120));
         assert!(matches!(alerts[..], [Alert::MinerStopped { .. }]));
-        assert!(t.tick(at(151)).0.is_empty());
+        assert!(t.tick(at(121)).0.is_empty());
 
         // 5 min: idle.
         let (alerts, _) = t.tick(at(60 + 300));
@@ -510,11 +571,72 @@ mod tests {
         let finished = finished.unwrap();
         assert_eq!(finished.started, at(0));
         assert_eq!(finished.ended, at(60));
-        assert_eq!(finished.cycles, 2);
-        assert_eq!(finished.mined_units.get("Rock"), Some(&20));
+        assert_eq!(finished.cycles, 4);
+        assert_eq!(finished.mined_units.get("Rock"), Some(&40));
         assert!(t.session().is_none());
         // The hold is not touched by a session ending.
-        assert_eq!(t.hold_units().get("Rock"), Some(&20));
+        assert_eq!(t.hold_units().get("Rock"), Some(&40));
+    }
+
+    #[test]
+    fn slow_cycles_do_not_look_stopped() {
+        // One strip miner with a 180 s cycle.
+        let v = volumes();
+        let mut t = tracker(100_000.0);
+        for i in 0..5 {
+            t.apply(&mined(i * 180, 10, "Rock"), &v);
+        }
+        assert_eq!(t.miner_stopped_after_secs(), Some(360));
+        // Between two normal cycles: no alert.
+        assert!(t.tick(at(4 * 180 + 179)).0.is_empty());
+        // Two whole cycles missed: stopped.
+        let (alerts, _) = t.tick(at(4 * 180 + 360));
+        assert!(
+            alerts
+                .iter()
+                .any(|a| matches!(a, Alert::MinerStopped { .. }))
+        );
+    }
+
+    #[test]
+    fn no_time_based_stop_before_rhythm_is_known() {
+        let v = volumes();
+        let mut t = tracker(10_000.0);
+        t.apply(&mined(0, 10, "Rock"), &v);
+        t.apply(&mined(30, 10, "Rock"), &v);
+        assert_eq!(t.miner_stopped_after_secs(), None);
+        assert!(t.tick(at(200)).0.is_empty());
+    }
+
+    #[test]
+    fn modules_in_the_same_second_count_once_for_rhythm() {
+        let v = volumes();
+        let mut t = tracker(10_000.0);
+        for secs in [0, 0, 100, 100, 200, 200, 300, 300] {
+            t.apply(&mined(secs, 10, "Rock"), &v);
+        }
+        assert_eq!(t.miner_stopped_after_secs(), Some(200));
+        assert_eq!(t.session().unwrap().cycles, 8);
+    }
+
+    #[test]
+    fn critical_success_adds_units_but_not_a_cycle() {
+        let v = volumes();
+        let mut t = tracker(10_000.0);
+        t.apply(&mined(0, 100, "Rock"), &v);
+        let crit = TimedMiningEvent {
+            time: at(0),
+            event: MiningEvent::Mined {
+                units: 20,
+                ore: "Rock".to_string(),
+                critical: true,
+            },
+        };
+        t.apply(&crit, &v);
+        let session = t.session().unwrap();
+        assert_eq!(session.cycles, 1);
+        assert_eq!(session.mined_units.get("Rock"), Some(&120));
+        assert_eq!(t.hold_units().get("Rock"), Some(&120));
     }
 
     #[test]

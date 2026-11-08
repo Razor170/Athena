@@ -15,6 +15,9 @@
 //! The text part contains EVE's markup tags (`<color=...>`, `<font ...>`),
 //! which we strip before matching. Everything here is plain functions on
 //! strings, so it can be tested without files.
+//!
+//! All matching is on the English log text. If an EVE client is switched to
+//! another language, its mining lines will not be recognised.
 
 /// A point in time as written in the log (EVE time, which is UTC).
 ///
@@ -181,7 +184,7 @@ fn parse_mining_message(message: &str) -> Option<MiningEvent> {
     }
     // "Additional 12 units depleted from asteroid as residue"
     if let Some(after) = message.strip_prefix("Additional ") {
-        let (number, tail) = after.split_once(' ')?;
+        let (number, tail) = after.split_once(" units ")?;
         if !tail.contains("residue") {
             return None;
         }
@@ -214,7 +217,12 @@ fn parse_notify_message(message: &str) -> Option<MiningEvent> {
     // Only mining modules: other modules (e.g. a hardener) also "deactivate".
     if let Some((module, reason)) = message.split_once(" deactivates ") {
         let lower = module.to_lowercase();
-        let is_miner = lower.contains("miner") || lower.contains("harvester");
+        // "Strip Miner", "Miner II", "Deep Core Mining Laser", "Ice Harvester",
+        // "Gas Cloud Harvester" / "Gas Cloud Scoop".
+        let is_miner = lower.contains("miner")
+            || lower.contains("mining")
+            || lower.contains("harvester")
+            || lower.contains("scoop");
         if !is_miner {
             return None;
         }
@@ -275,8 +283,12 @@ fn strip_tags(text: &str) -> String {
 #[derive(Debug, Default)]
 pub struct GameLogReader {
     header: Option<GameLogHeader>,
-    /// Text seen so far while the header is still incomplete.
+    /// True once the header block is over (whether or not it was valid).
+    header_done: bool,
+    /// Header lines collected until the header block is over.
     header_text: String,
+    /// How many header lines we have collected, to give up on a broken file.
+    header_lines: usize,
     /// Bytes of a line whose end hasn't been written yet.
     partial_line: Vec<u8>,
 }
@@ -308,13 +320,7 @@ impl GameLogReader {
         // `lines()` splits on '\n' and drops one '\r' before it. EVE sometimes
         // writes "\r\r\n"; the extra '\r' is removed by `trim` in the parsers.
         for line in complete.lines() {
-            if self.header.is_none() {
-                self.header_text.push_str(line);
-                self.header_text.push('\n');
-                self.header = parse_header(&self.header_text);
-                if self.header.is_some() {
-                    self.header_text.clear();
-                }
+            if !self.header_done && !self.push_header_line(line) {
                 continue;
             }
             if let Some(event) = parse_mining_line(line) {
@@ -322,6 +328,30 @@ impl GameLogReader {
             }
         }
         events
+    }
+
+    /// Collects one line of the header block. Returns true if the line is
+    /// not part of the header and should be parsed as an event instead.
+    ///
+    /// The header ends with a "-----" line after the `Listener:` line, or at
+    /// the first "[ time ]" event line. A file that never shows either gives
+    /// up after a few lines, so `header_text` can't grow without limit.
+    fn push_header_line(&mut self, line: &str) -> bool {
+        const MAX_HEADER_LINES: usize = 10;
+        let trimmed = line.trim();
+        let is_event_line = trimmed.starts_with('[');
+        if !is_event_line {
+            self.header_text.push_str(trimmed);
+            self.header_text.push('\n');
+            self.header_lines += 1;
+        }
+        let closing_line = trimmed.starts_with("---") && self.header_text.contains("Listener:");
+        if is_event_line || closing_line || self.header_lines >= MAX_HEADER_LINES {
+            self.header = parse_header(&self.header_text);
+            self.header_done = true;
+            self.header_text = String::new();
+        }
+        is_event_line
     }
 }
 
@@ -415,6 +445,8 @@ mod tests {
                 other => panic!("unexpected event {other:?}"),
             }
         }
+        let laser = "[ 2026.11.08 07:33:00 ] (notify) Deep Core Mining Laser I deactivates as it finds the resource it was harvesting a pale shadow of its former glory.";
+        assert!(parse_mining_line(laser).is_some());
         let not_a_miner =
             "[ 2026.11.08 07:33:00 ] (notify) Shield Hardener deactivates for some reason.";
         assert!(parse_mining_line(not_a_miner).is_none());
@@ -431,6 +463,37 @@ mod tests {
     }
 
     #[test]
+    fn header_without_closing_line() {
+        // The first event line also ends the header.
+        let mut reader = GameLogReader::new();
+        let events = reader.push(
+            b"  Listener: Test Pilot\n  Session Started: 2026.11.08 07:30:12\n[ 2026.11.08 07:31:10 ] (mining) You mined 5 units of Veldspar\n",
+        );
+        let header = reader.header().unwrap();
+        assert_eq!(header.session_started, Some(t("2026.11.08 07:30:12")));
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn broken_header_gives_up() {
+        let mut reader = GameLogReader::new();
+        for _ in 0..50 {
+            reader.push(b"garbage\n");
+        }
+        assert!(reader.header().is_none());
+        assert!(reader.header_text.is_empty());
+    }
+
+    #[test]
+    fn residue_with_space_separator() {
+        let line = "[ 2026.11.08 07:31:12 ] (mining) Additional 1 572 units depleted from asteroid as residue";
+        assert_eq!(
+            parse_mining_line(line).unwrap().event,
+            MiningEvent::Residue { units: 1572 }
+        );
+    }
+
+    #[test]
     fn unit_separators() {
         assert_eq!(parse_units("1,234"), Some(1234));
         assert_eq!(parse_units("1.234"), Some(1234));
@@ -443,7 +506,9 @@ mod tests {
     fn reader_handles_whole_file() {
         let mut reader = GameLogReader::new();
         let events = reader.push(SAMPLE.as_bytes());
-        assert_eq!(reader.header().unwrap().character, "Test Pilot");
+        let header = reader.header().unwrap();
+        assert_eq!(header.character, "Test Pilot");
+        assert_eq!(header.session_started, Some(t("2026.11.08 07:30:12")));
         // mined, critical, residue, compressed, miner stopped
         assert_eq!(events.len(), 5);
     }
@@ -457,14 +522,16 @@ mod tests {
         for piece in SAMPLE.as_bytes().chunks(7) {
             events.extend(reader.push(piece));
         }
-        assert_eq!(reader.header().unwrap().character, "Test Pilot");
+        let header = reader.header().unwrap();
+        assert_eq!(header.character, "Test Pilot");
+        assert_eq!(header.session_started, Some(t("2026.11.08 07:30:12")));
         assert_eq!(events, GameLogReader::new().push(SAMPLE.as_bytes()));
     }
 
     #[test]
     fn reader_handles_split_utf8_character() {
         let mut reader = GameLogReader::new();
-        reader.push(b"  Listener: Test Pilot\n");
+        reader.push(b"  Listener: Test Pilot\n------\n");
         let line = "[ 2026.11.08 07:31:10 ] (mining) You mined 5 units of Veldspär\n";
         let bytes = line.as_bytes();
         // Split inside the two-byte 'ä'.
