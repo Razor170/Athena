@@ -195,8 +195,9 @@ fn toolbar(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
         {
             module.toggle_mute();
         }
-        if module.is_muted() {
-            // Counts down once a second while muted (and visible).
+        let minimized = ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
+        if module.is_muted() && !minimized {
+            // Counts down once a second while muted and visible.
             ui.ctx().request_repaint_after(Duration::from_secs(1));
         }
     });

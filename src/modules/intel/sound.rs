@@ -12,9 +12,14 @@
 //!
 //! Sounds play on their own background thread, one after the other and
 //! synchronously, so the second play of a loud alert isn't cut off and the
-//! UI thread never waits.
+//! UI thread never waits. When several alerts arrive while one plays, only
+//! the closest of them plays next, so busy intel doesn't build a backlog.
+//!
+//! The file is read again for every alert (it's small, and this is the
+//! background thread), so a replaced file is heard without a restart.
+//! `PlaySoundW` trusts the sizes inside the file, so a file whose sizes
+//! don't fit its length plays the beep instead.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -98,9 +103,12 @@ impl SoundPlayer {
 /// The sound thread: plays requests one after the other until the module
 /// drops its handle.
 fn play_loop(receive: Receiver<PlayRequest>, folder: Option<PathBuf>) {
-    // Each WAV is read from disk once, the first time it's needed.
-    let mut files: HashMap<u32, Option<Vec<u8>>> = HashMap::new();
-    while let Ok(request) = receive.recv() {
+    while let Ok(first) = receive.recv() {
+        // Everything else waiting: keep only the most urgent request.
+        let mut request = first;
+        while let Ok(next) = receive.try_recv() {
+            request = more_urgent(request, next);
+        }
         let times = if request.loud { 2 } else { 1 };
         let volume = if request.loud {
             1.0
@@ -108,11 +116,9 @@ fn play_loop(receive: Receiver<PlayRequest>, folder: Option<PathBuf>) {
             request.volume.clamp(0.0, 1.0)
         };
         let wav = match (request.kind, &folder) {
-            (SoundKind::Voice, Some(folder)) => files
-                .entry(request.jumps)
-                .or_insert_with(|| read_wav(folder, request.jumps))
-                .as_ref()
-                .map(|bytes| scale_wav(bytes, volume).unwrap_or_else(|| bytes.clone())),
+            (SoundKind::Voice, Some(folder)) => read_wav(folder, request.jumps)
+                .filter(|bytes| wav_sizes_fit(bytes))
+                .map(|bytes| scale_wav(&bytes, volume).unwrap_or(bytes)),
             _ => None,
         };
         for _ in 0..times {
@@ -122,6 +128,43 @@ fn play_loop(receive: Receiver<PlayRequest>, folder: Option<PathBuf>) {
             }
         }
     }
+}
+
+/// Of two queued requests, the one to play: loud before quiet, then the
+/// fewest jumps, then the newer one.
+pub fn more_urgent(a: PlayRequest, b: PlayRequest) -> PlayRequest {
+    if (a.loud, std::cmp::Reverse(a.jumps)) > (b.loud, std::cmp::Reverse(b.jumps)) {
+        a
+    } else {
+        b
+    }
+}
+
+/// True if the RIFF size and every chunk up to and including "data" fit
+/// inside the file, so `PlaySoundW` can't read past the end of it.
+pub fn wav_sizes_fit(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return false;
+    }
+    let riff_size = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    if riff_size.saturating_add(8) > bytes.len() {
+        return false;
+    }
+    let mut at = 12;
+    while at + 8 <= bytes.len() {
+        let id = &bytes[at..at + 4];
+        let size = u32::from_le_bytes([bytes[at + 4], bytes[at + 5], bytes[at + 6], bytes[at + 7]])
+            as usize;
+        let end = (at + 8).saturating_add(size);
+        if end > bytes.len() {
+            return false;
+        }
+        if id == b"data" {
+            return true;
+        }
+        at = end + (size % 2);
+    }
+    false
 }
 
 fn read_wav(folder: &Path, jumps: u32) -> Option<Vec<u8>> {
@@ -276,6 +319,32 @@ mod tests {
         let mut eight_bit = wav(&[1, 2]);
         eight_bit[34] = 8; // bits per sample
         assert!(scale_wav(&eight_bit, 0.5).is_none());
+    }
+
+    #[test]
+    fn sizes_must_fit_the_file() {
+        let good = wav(&[1, 2, 3]);
+        assert!(wav_sizes_fit(&good));
+        // Cut short: the data chunk claims more than is there.
+        assert!(!wav_sizes_fit(&good[..good.len() - 2]));
+        // RIFF size too big.
+        let mut big = good.clone();
+        big[4..8].copy_from_slice(&1000u32.to_le_bytes());
+        assert!(!wav_sizes_fit(&big));
+        assert!(!wav_sizes_fit(b"RIFF"));
+    }
+
+    #[test]
+    fn the_closest_queued_alert_plays() {
+        let request = |jumps, loud| PlayRequest {
+            jumps,
+            kind: SoundKind::Voice,
+            volume: 0.5,
+            loud,
+        };
+        assert_eq!(more_urgent(request(4, false), request(2, false)).jumps, 2);
+        assert_eq!(more_urgent(request(1, true), request(3, false)).jumps, 1);
+        assert_eq!(more_urgent(request(3, false), request(1, true)).jumps, 1);
     }
 
     #[test]

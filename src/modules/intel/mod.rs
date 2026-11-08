@@ -241,8 +241,10 @@ impl IntelSupervisor {
                 if catch_up && now.seconds_since(line.time) > self.fade_seconds() {
                     continue;
                 }
-                if self.add_report(channel, line) && !catch_up {
-                    self.check_alert();
+                if let Some(at) = self.add_report(channel, line)
+                    && !catch_up
+                {
+                    self.check_alert(at);
                 }
             }
         }
@@ -419,10 +421,11 @@ impl IntelSupervisor {
         };
     }
 
-    /// The newest report just arrived live: raise an alert if it is close
-    /// enough to an own pilot.
-    fn check_alert(&mut self) {
-        let Some(report) = self.reports.front() else {
+    /// The report at `at` just arrived live: raise an alert if it is close
+    /// enough to an own pilot. (It may not be the newest one: another
+    /// channel or pilot's log can be read a moment later.)
+    fn check_alert(&mut self, at: usize) {
+        let Some(report) = self.reports.get(at) else {
             return;
         };
         let alert_jumps = self.alert_jumps();
@@ -529,14 +532,14 @@ impl IntelSupervisor {
     }
 
     /// Reads one message from an intel channel and keeps it, unless it's a
-    /// copy of one we already have. True if it was kept and is the newest.
-    fn add_report(&mut self, channel: &str, line: ChatLine) -> bool {
+    /// copy of one we already have. Returns where it was put in `reports`.
+    fn add_report(&mut self, channel: &str, line: ChatLine) -> Option<usize> {
         // The channel's message of the day and similar.
         if line.sender == EVE_SYSTEM {
-            return false;
+            return None;
         }
         if !self.deduper.is_new(line.time, &line.sender, &line.text) {
-            return false;
+            return None;
         }
         let message = match self.universe() {
             Some(universe) => parser::parse(
@@ -564,7 +567,7 @@ impl IntelSupervisor {
             .unwrap_or(self.reports.len());
         self.reports.insert(at, report);
         self.reports.truncate(REPORTS_KEPT);
-        at == 0
+        (at < REPORTS_KEPT).then_some(at)
     }
 
     /// A channel was ticked or unticked in Settings.
@@ -903,6 +906,27 @@ mod tests {
             false,
         );
         assert!(m.alert.is_none());
+    }
+
+    #[test]
+    fn a_live_report_older_than_the_newest_still_alerts() {
+        let mut m = module();
+        jump(&mut m, "Pilot Alpha", 60, "A1-XYZ");
+        m.handle_lines(
+            "Region Intel",
+            "Pilot Alpha",
+            vec![line(5, "Scout", "hi")],
+            false,
+        );
+        // Read a moment later from the other channel, but written earlier.
+        m.handle_lines(
+            "Branch Intel",
+            "Pilot Alpha",
+            vec![line(8, "Scout", "A2-XYZ")],
+            false,
+        );
+        assert_eq!(m.reports[1].message.systems, [102]);
+        assert_eq!(m.alert.as_ref().map(|a| a.system_id), Some(102));
     }
 
     #[test]
