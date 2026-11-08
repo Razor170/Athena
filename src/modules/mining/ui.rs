@@ -122,68 +122,17 @@ fn live_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
         );
     }
     let mut emptied = None;
-    // Drag and drop: a card can be dragged onto another one. Dropped on its
-    // top half it goes before that card, on the bottom half after it.
-    // (dragged name, target name, after)
-    let mut dropped: Option<(String, String, bool)> = None;
-    let pointer_y = ui.ctx().pointer_interact_pos().map(|p| p.y);
     ui.spacing_mut().item_spacing.y = 4.0;
     for name in &names {
-        let Some(tracker) = module.trackers.get(name) else {
-            continue;
-        };
-        // The whole card is the drag handle. Its drag area is registered
-        // before the card is drawn, using where the card was last frame, so
-        // the Emptied button (drawn later, so on top) still gets its clicks.
-        let drag_id = egui::Id::new(("mining_card", name));
-        let last_rect = ui.ctx().data(|d| d.get_temp::<egui::Rect>(drag_id));
-        if let Some(last_rect) = last_rect {
-            let handle = ui
-                .interact(last_rect, drag_id, Sense::drag())
-                .on_hover_cursor(egui::CursorIcon::Grab);
-            // The payload is the dragged card's character name.
-            handle.dnd_set_drag_payload(name.clone());
-        }
-        let being_dragged = ui.ctx().is_being_dragged(drag_id);
-        let card = ui.scope(|ui| {
-            if being_dragged {
-                // Faded while it's being moved.
-                ui.multiply_opacity(0.4);
-            }
-            character_card(module, tracker, ui, now)
-        });
-        if card.inner {
-            emptied = Some(name.clone());
-        }
-        let rect = card.response.rect;
-        ui.ctx().data_mut(|d| d.insert_temp(drag_id, rect));
-        let after = pointer_y.is_some_and(|y| y > rect.center().y);
-        if let Some(dragged) = card.response.dnd_hover_payload::<String>()
-            && *dragged != *name
+        if let Some(tracker) = module.trackers.get(name)
+            && character_card(module, tracker, ui, now)
         {
-            // Show where the card will land.
-            let y = if after {
-                rect.bottom() + 2.0
-            } else {
-                rect.top() - 2.0
-            };
-            ui.painter()
-                .hline(rect.x_range(), y, Stroke::new(2.0, BRIGHT));
-        }
-        if let Some(dragged) = card.response.dnd_release_payload::<String>() {
-            dropped = Some(((*dragged).clone(), name.clone(), after));
+            emptied = Some(name.clone());
         }
     }
     ui.spacing_mut().item_spacing.y = 6.0;
     if let Some(name) = emptied {
         module.mark_emptied(&name);
-    }
-    if let Some((dragged, target, after)) = dropped {
-        let known: Vec<String> = module.trackers.keys().cloned().collect();
-        module
-            .settings
-            .place_character(&known, &dragged, &target, after);
-        module.settings_edited();
     }
 
     alert_list(module, ui);
@@ -212,6 +161,7 @@ fn summary_bar(module: &mut MiningSupervisor, ui: &mut egui::Ui, now: LogTime) {
     let hours = seconds as f64 / 3600.0;
 
     let mut end_clicked = false;
+    let mut empty_all_clicked = false;
     section_frame()
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
@@ -244,6 +194,21 @@ fn summary_bar(module: &mut MiningSupervisor, ui: &mut egui::Ui, now: LogTime) {
                     {
                         end_clicked = true;
                     }
+                    // A hold EVE called full counts too, even if Athena saw
+                    // none of its ore (e.g. loaded before Athena ran).
+                    let anything_in_holds = module
+                        .trackers
+                        .values()
+                        .any(|t| !t.hold_units().is_empty() || t.hold_reported_full());
+                    if ui
+                        .add_enabled(anything_in_holds, egui::Button::new(small("Empty all")))
+                        .on_hover_text(
+                            "Click after unloading everyone at a station: empties every ore hold at once.",
+                        )
+                        .clicked()
+                    {
+                        empty_all_clicked = true;
+                    }
                     if started.is_some() {
                         ui.label(RichText::new(duration_text(seconds)).color(DIM));
                     }
@@ -252,6 +217,9 @@ fn summary_bar(module: &mut MiningSupervisor, ui: &mut egui::Ui, now: LogTime) {
         });
     if end_clicked {
         module.end_session();
+    }
+    if empty_all_clicked {
+        module.mark_all_emptied();
     }
 }
 
@@ -313,7 +281,14 @@ fn character_card(
         ("Hold full".to_string(), RED, border)
     } else if idle {
         let quiet = duration_text(quiet_secs.unwrap_or(0));
-        (format!("Idle {quiet}"), SOFT, Border::Solid(BORDER))
+        // Still dashed red when a miner reported stopping (e.g. rock
+        // depleted) and nothing was mined since.
+        let border = if tracker.stopped_by_log() {
+            Border::Dashed(RED)
+        } else {
+            Border::Solid(BORDER)
+        };
+        (format!("Idle {quiet}"), SOFT, border)
     } else if guard == GuardState::Stopped {
         ("Miner stopped".to_string(), RED, Border::Dashed(RED))
     } else if let GuardState::CrystalBroken { rate_percent } = guard {
@@ -323,7 +298,7 @@ fn character_card(
         (
             "Crystal broke".to_string(),
             LIGHT_PURPLE,
-            Border::Solid(PURPLE),
+            Border::Dashed(PURPLE),
         )
     } else if tracker.session().is_some() {
         ("Mining".to_string(), GREEN, Border::Solid(BORDER))
@@ -1020,62 +995,106 @@ fn settings_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
         ui.set_width(ui.available_width());
         ui.label(RichText::new("Characters").color(BRIGHT).strong());
         ui.label(
-            small("Found in your game logs. Leave a field empty to use the default above. Drag the cards on the Live view to change the order.")
+            small("Found in your game logs. Leave a field empty to use the default above. Drag a row by its handle to change the order on the Live view.")
                 .color(DIM),
         );
-        let names = settings.ordered(module.trackers.keys());
+        let known: Vec<String> = module.trackers.keys().cloned().collect();
+        let names = settings.ordered(known.iter());
         if names.is_empty() {
             ui.label(small("None yet.").color(DIM));
         }
         let hold_hint = thousands(settings.hold_m3);
         let alert_hint = format!("{:.0}", settings.alert_percent);
-        egui::Grid::new("characters")
-            .num_columns(4)
-            .spacing([8.0, 6.0])
-            .show(ui, |ui| {
-                ui.label("");
-                ui.label(small("Character").color(DIM));
-                ui.label(small("Ore hold m³").color(DIM));
-                ui.label(small("Alert %").color(DIM));
-                ui.end_row();
-                for name in &names {
-                    let mut own = settings.character(name);
-                    if ui
-                        .checkbox(&mut own.show, "")
-                        .on_hover_text(format!("Show {name} on the Live view"))
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    ui.label(name);
-                    if let Some(value) = number_field(
-                        ui,
-                        buffers,
-                        &format!("hold:{name}"),
-                        own.hold_m3,
-                        &hold_hint,
-                        92.0,
-                    ) {
-                        own.hold_m3 = value;
-                        changed = true;
-                    }
-                    if let Some(value) = number_field(
-                        ui,
-                        buffers,
-                        &format!("alert:{name}"),
-                        own.alert_percent,
-                        &alert_hint,
-                        64.0,
-                    ) {
-                        own.alert_percent = value.map(|v| v.min(100.0));
-                        changed = true;
-                    }
-                    ui.end_row();
-                    if own != settings.character(name) {
-                        settings.characters.insert(name.clone(), own);
-                    }
+
+        // One row per character: drag handle, "show" box, name, hold, alert.
+        // Fixed widths keep the columns lined up.
+        const NAME_COLUMN: f32 = 170.0;
+        ui.horizontal(|ui| {
+            ui.add_space(14.0 + 24.0 + ui.spacing().item_spacing.x * 2.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(NAME_COLUMN, 14.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.set_min_width(NAME_COLUMN);
+                    ui.label(small("Character").color(DIM));
+                },
+            );
+            ui.add_sized([92.0, 14.0], egui::Label::new(small("Ore hold m³").color(DIM)));
+            ui.add_sized([64.0, 14.0], egui::Label::new(small("Alert %").color(DIM)));
+        });
+
+        // Drag and drop: (dragged name, target name, after the target).
+        let mut dropped: Option<(String, String, bool)> = None;
+        let pointer_y = ui.ctx().pointer_interact_pos().map(|p| p.y);
+        for name in &names {
+            let mut own = settings.character(name);
+            let drag_id = egui::Id::new(("mining_order", name));
+            let being_dragged = ui.ctx().is_being_dragged(drag_id);
+            let row = ui.horizontal(|ui| {
+                if being_dragged {
+                    // Faded while it's being moved.
+                    ui.multiply_opacity(0.4);
+                }
+                let handle = drag_handle(ui, drag_id);
+                // The payload is the dragged row's character name.
+                handle.dnd_set_drag_payload(name.clone());
+                if ui
+                    .checkbox(&mut own.show, "")
+                    .on_hover_text(format!("Show {name} on the Live view"))
+                    .changed()
+                {
+                    changed = true;
+                }
+                name_cell(ui, name, NAME_COLUMN);
+                if let Some(value) = number_field(
+                    ui,
+                    buffers,
+                    &format!("hold:{name}"),
+                    own.hold_m3,
+                    &hold_hint,
+                    92.0,
+                ) {
+                    own.hold_m3 = value;
+                    changed = true;
+                }
+                if let Some(value) = number_field(
+                    ui,
+                    buffers,
+                    &format!("alert:{name}"),
+                    own.alert_percent,
+                    &alert_hint,
+                    64.0,
+                ) {
+                    own.alert_percent = value.map(|v| v.min(100.0));
+                    changed = true;
                 }
             });
+            if own != settings.character(name) {
+                settings.characters.insert(name.clone(), own);
+            }
+
+            let rect = row.response.rect;
+            let after = pointer_y.is_some_and(|y| y > rect.center().y);
+            if let Some(dragged) = row.response.dnd_hover_payload::<String>()
+                && *dragged != *name
+            {
+                // Show where the row will land.
+                let y = if after {
+                    rect.bottom() + 2.0
+                } else {
+                    rect.top() - 2.0
+                };
+                ui.painter()
+                    .hline(rect.x_range(), y, Stroke::new(2.0, BRIGHT));
+            }
+            if let Some(dragged) = row.response.dnd_release_payload::<String>() {
+                dropped = Some(((*dragged).clone(), name.clone(), after));
+            }
+        }
+        if let Some((dragged, target, after)) = dropped {
+            settings.place_character(&known, &dragged, &target, after);
+            changed = true;
+        }
     });
 
     section_frame().show(ui, |ui| {
@@ -1178,6 +1197,43 @@ fn settings_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
     if changed {
         module.settings_edited();
     }
+}
+
+/// The grip at the start of a character row in Settings: three short
+/// lines, painted (the default font has no grip glyph). Drag it to move the
+/// row.
+fn drag_handle(ui: &mut egui::Ui, id: egui::Id) -> egui::Response {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 18.0), Sense::hover());
+    let response = ui
+        .interact(rect, id, Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::Grab)
+        .on_hover_text("Drag to change the order");
+    let color = if response.hovered() || response.dragged() {
+        BRIGHT
+    } else {
+        DIM
+    };
+    for dy in [-4.0, 0.0, 4.0] {
+        let y = rect.center().y + dy;
+        ui.painter().hline(
+            (rect.left() + 2.0)..=(rect.right() - 2.0),
+            y,
+            Stroke::new(1.5, color),
+        );
+    }
+    response
+}
+
+/// A character name in a fixed-width cell, cut off when too long.
+fn name_cell(ui: &mut egui::Ui, name: &str, width: f32) {
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 18.0),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.set_min_width(width);
+            ui.add(egui::Label::new(name).truncate());
+        },
+    );
 }
 
 /// A right-aligned number field. Returns `Some(new value)` once the user

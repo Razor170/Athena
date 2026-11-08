@@ -202,10 +202,11 @@ impl MiningSupervisor {
             hold_units,
             session,
             hold_reported_full,
+            stopped_by_log,
         } in saved.characters
         {
             let mut tracker = CharacterTracker::new(&name, settings.tracker_settings(&name));
-            tracker.restore(hold_units, session, hold_reported_full);
+            tracker.restore(hold_units, session, hold_reported_full, stopped_by_log);
             tracker.settle_fill_alerts(&volumes);
             trackers.insert(name, tracker);
         }
@@ -374,6 +375,14 @@ impl MiningSupervisor {
         self.save_state();
     }
 
+    /// The "Empty all" button: everyone unloaded at a station.
+    fn mark_all_emptied(&mut self) {
+        for tracker in self.trackers.values_mut() {
+            tracker.mark_emptied();
+        }
+        self.save_state();
+    }
+
     /// The "Emptied" button on a card.
     fn mark_emptied(&mut self, character: &str) {
         if let Some(tracker) = self.trackers.get_mut(character) {
@@ -404,6 +413,7 @@ impl MiningSupervisor {
                     hold_units: tracker.hold_units().clone(),
                     session: tracker.session().cloned(),
                     hold_reported_full: tracker.hold_reported_full(),
+                    stopped_by_log: tracker.stopped_by_log(),
                 })
                 .collect(),
             files: self.offsets.values().cloned().collect(),

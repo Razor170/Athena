@@ -34,16 +34,16 @@ another log folder in Athena's settings):
 
 - **Hold bar:** purple is compressed ore, green normal ore, yellow above your alert level,
   red when full. EVE writes nothing when you unload at a station, so click **Emptied**
-  afterwards.
-- **Borders:** red dashed means the miners stopped (or the hold is full), purple means a
-  mining crystal broke.
-- **Order:** drag a card up or down to change the order of the characters.
+  afterwards, or **Empty all** at the top when everyone unloaded.
+- **Borders:** red dashed means the miners stopped (for example the asteroid is depleted)
+  or the hold is full, purple dashed means a mining crystal broke.
 - **Belt scan:** copy a Mining Survey Scanner result in EVE (Ctrl+A, Ctrl+C) and it shows up
   in the panel. Copy another one later to see how fast the belt is going.
 - **End session** ends mining for all characters at once and stores it in History, valued
   with the Jita prices of that moment. That value never changes afterwards.
 - **Settings:** hold size and alert level for everyone (11,500 m³ and 70% by default),
-  with per-character overrides, Jita buy or sell, and the refining yields.
+  with per-character overrides, Jita buy or sell, and the refining yields. Drag a
+  character row by its handle to change the order of the cards.
 
 Files in the data folder: `mining.toml` (settings), `mining_state.toml` (hold contents
 and the running session), `mining.sqlite` (history), `jita_prices.toml` (price cache).

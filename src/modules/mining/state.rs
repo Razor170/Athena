@@ -27,6 +27,8 @@ pub struct SavedCharacter {
     pub session: Option<ActiveSession>,
     /// EVE said the hold is full and nothing has freed room since.
     pub hold_reported_full: bool,
+    /// A miner reported stopping (e.g. asteroid depleted), no cycle since.
+    pub stopped_by_log: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -87,6 +89,7 @@ mod tests {
                     cycles: 3,
                 }),
                 hold_reported_full: true,
+                stopped_by_log: true,
             }],
             files: vec![FileOffset {
                 file: "20261108_073012_1.txt".to_string(),
