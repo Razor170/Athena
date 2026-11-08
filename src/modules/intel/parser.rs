@@ -33,7 +33,8 @@ const STOP_WORDS: &[&str] = &[
     "is", "are", "was", "a", "an", "x", "plus", "+", "pod", "pods", "cloaky", "cloaked", "cloak",
     "afk", "status", "stat", "pls", "ty", "o7", "lol", "same", "still", "now", "here", "there",
     "near", "probes", "probing", "combat", "scan", "dscan", "d-scan", "warp", "warped", "warping",
-    "landed", "pinged", "ping", "tackle", "tackled",
+    "landed", "pinged", "ping", "tackle", "tackled", "anyone", "someone", "any", "around", "eyes",
+    "intel", "help",
 ];
 
 /// What one intel message says.
