@@ -512,6 +512,7 @@ mod tests {
     fn threshold_and_full_alerts_fire_once() {
         let v = volumes();
         let mut t = tracker(1_000.0);
+        t.settings.fill_alert_percent = 90.0;
         // 80% -> nothing
         let (alerts, _) = t.apply(&mined(0, 80, "Rock"), &v);
         assert!(alerts.is_empty());
