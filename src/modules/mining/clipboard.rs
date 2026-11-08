@@ -21,6 +21,15 @@ const CHECK_EVERY: Duration = Duration::from_millis(500);
 /// Bigger clipboard text can't be a belt scan (a huge belt is a few KB).
 const MAX_TEXT_BYTES: usize = 256 * 1024;
 
+/// Reads the clipboard text once, if there is text of at most
+/// `max_bytes`. Used by the Intel tag import. Always `None` off Windows.
+pub fn read_text_once(max_bytes: usize) -> Option<String> {
+    match win::read_text(max_bytes) {
+        ClipboardText::Text(text) => Some(text),
+        _ => None,
+    }
+}
+
 /// Whether clipboard watching works on this system.
 pub fn is_supported() -> bool {
     cfg!(windows)

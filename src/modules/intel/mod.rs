@@ -13,14 +13,16 @@
 //! - [`map`]: draws a region map with pan and zoom.
 //! - [`alerts`]: report colours on the map, and which reports raise an alert.
 //! - [`sound`]: plays the alert voice lines or a beep on its own thread.
+//! - [`tags`]: labels on systems, in RIFT's text format.
 //! - [`ui`]: draws the panel.
 //!
 //! This file holds the [`IntelSupervisor`] module: it owns the watcher,
 //! drains its channel in `update`, and keeps the reports and where each own
 //! pilot is.
 //!
-//! So far (PR 4 of 6) the panel has the map with the own pilots and the
-//! reports, the intel list, and alerts with sound; tags come next.
+//! So far (PR 5 of 6) the panel has the map with the own pilots, the
+//! reports and system tags, the intel list, and alerts with sound; the
+//! zKillboard links and the ESI tint come next.
 
 pub mod alerts;
 pub mod chatlog;
@@ -29,6 +31,7 @@ pub mod dedupe;
 pub mod map;
 pub mod parser;
 pub mod sound;
+pub mod tags;
 mod ui;
 pub mod watcher;
 
@@ -45,6 +48,7 @@ use self::dedupe::Deduper;
 use self::map::MapView;
 use self::parser::{IntelMessage, ParseContext};
 use self::sound::{PlayRequest, SoundPlayer};
+use self::tags::Tag;
 use self::watcher::{ChatLogWatcher, LOCAL, WatchEvent, last_downtime};
 use super::{Module, ModuleContext, SharedStaticData};
 use crate::modules::mining::gamelog::LogTime;
@@ -60,6 +64,8 @@ const REPORTS_KEPT: usize = 200;
 const DISTANCE_LIMIT: u32 = 30;
 /// "Mute 5 min".
 const MUTE_SECS: i64 = 5 * 60;
+/// Tag text bigger than this on the clipboard isn't read.
+const MAX_IMPORT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Which view of the panel is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +91,18 @@ pub struct Report {
     pub sender: String,
     pub text: String,
     pub message: IntelMessage,
+}
+
+/// The "Add tag…" window's fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TagDialog {
+    pub system_id: i64,
+    pub label: String,
+    pub group: String,
+    /// The group box is a text field for a new group.
+    pub new_group: bool,
+    pub color: egui::Color32,
+    pub icon: String,
 }
 
 /// The alert banner over the map: the newest report that raised an alert.
@@ -137,6 +155,14 @@ pub struct IntelSupervisor {
     muted_until: Option<LogTime>,
     /// The clear words box in Settings while it is being typed in.
     clear_words_text: String,
+    /// System tags, sorted by system and label.
+    tags: Vec<Tag>,
+    /// The "Add tag…" window, while it is open.
+    tag_dialog: Option<TagDialog>,
+    /// The group of the last tag added with that window.
+    last_tag_group: Option<String>,
+    /// What the last tag import or export did, shown in Settings.
+    tag_message: Option<String>,
 
     /// Things the user should know about, by source.
     problems: BTreeMap<&'static str, String>,
@@ -186,6 +212,20 @@ impl IntelSupervisor {
             egui_ctx.clone(),
         );
         let clear_words_text = settings.clear_words.join(", ");
+        let (tags, tag_message) = match &shared.data {
+            Some(data) => {
+                let parsed = tags::load(data_dir, &data.universe);
+                let message = (parsed.skipped > 0).then(|| {
+                    format!(
+                        "{} lines of {} couldn't be read and were left out.",
+                        parsed.skipped,
+                        tags::file_path(data_dir).display()
+                    )
+                });
+                (parsed.tags, message)
+            }
+            None => (Vec::new(), None),
+        };
         IntelSupervisor {
             egui_ctx: egui_ctx.clone(),
             data_dir: data_dir.to_path_buf(),
@@ -206,6 +246,10 @@ impl IntelSupervisor {
             alert: None,
             muted_until: None,
             clear_words_text,
+            tags,
+            tag_dialog: None,
+            last_tag_group: None,
+            tag_message,
             problems,
             view: View::Map,
             map: MapView::default(),
@@ -456,13 +500,21 @@ impl IntelSupervisor {
             }
             None => Vec::new(),
         };
-        self.alert = Some(Alert {
-            report: report.clone(),
-            system_id,
-            jumps: level.jumps,
-            pilots,
-            loud: level.loud,
-        });
+        // A report read late that is older than the banner's and further
+        // away doesn't replace it; it still sounds.
+        let keep_banner = self
+            .alert
+            .as_ref()
+            .is_some_and(|shown| shown.jumps < level.jumps && shown.report.time >= report.time);
+        if !keep_banner {
+            self.alert = Some(Alert {
+                report: report.clone(),
+                system_id,
+                jumps: level.jumps,
+                pilots,
+                loud: level.loud,
+            });
+        }
         if self.is_muted() {
             return;
         }
@@ -479,6 +531,178 @@ impl IntelSupervisor {
                     egui::UserAttentionType::Critical,
                 ));
         }
+    }
+
+    /// Opens the "Add tag…" window for a system. It starts with the group
+    /// used for the last tag added here (else the first group), and that
+    /// group's colour and icon.
+    fn open_tag_dialog(&mut self, system_id: i64) {
+        let group = self
+            .last_tag_group
+            .clone()
+            .filter(|g| self.tags.iter().any(|t| &t.group == g))
+            .or_else(|| tags::groups(&self.tags).into_iter().next())
+            .unwrap_or_default();
+        let color = tags::group_color(&self.tags, &group)
+            .unwrap_or(egui::Color32::from_rgb(0xdc, 0xdc, 0xdc));
+        // An icon Athena doesn't draw (from an import) becomes the dot.
+        let icon = self
+            .tags
+            .iter()
+            .rev()
+            .find(|t| t.group == group)
+            .map(|t| t.icon.clone())
+            .filter(|icon| tags::ICONS.iter().any(|(known, _)| known == icon))
+            .unwrap_or_else(|| "dot".to_string());
+        self.tag_dialog = Some(TagDialog {
+            system_id,
+            label: String::new(),
+            new_group: group.is_empty() && self.tags.is_empty(),
+            group,
+            color,
+            icon,
+        });
+    }
+
+    /// "Add" in the "Add tag…" window.
+    fn add_tag_from_dialog(&mut self) {
+        let Some(dialog) = self.tag_dialog.take() else {
+            return;
+        };
+        let label = dialog.label.trim().replace(';', ",");
+        let Some(name) = self
+            .universe()
+            .and_then(|u| u.system(dialog.system_id))
+            .map(|s| s.name.clone())
+        else {
+            return;
+        };
+        if label.is_empty() {
+            return;
+        }
+        let tag = Tag {
+            system_id: dialog.system_id,
+            system_name: name,
+            label,
+            color: dialog.color,
+            icon: dialog.icon,
+            flag: "false".to_string(),
+            group: dialog.group.trim().replace(';', ","),
+            extra: Vec::new(),
+        };
+        self.last_tag_group = Some(tag.group.clone());
+        tags::merge(&mut self.tags, vec![tag]);
+        self.save_tags();
+    }
+
+    fn remove_tag(&mut self, index: usize) {
+        if index < self.tags.len() {
+            self.tags.remove(index);
+            self.save_tags();
+        }
+    }
+
+    /// "Import": adds the tags on the clipboard (RIFT's format).
+    fn import_tags(&mut self) {
+        let Some(text) = crate::modules::mining::clipboard::read_text_once(MAX_IMPORT_BYTES) else {
+            self.tag_message = Some("The clipboard has no text to import.".to_string());
+            return;
+        };
+        self.import_tag_text(&text);
+    }
+
+    fn import_tag_text(&mut self, text: &str) {
+        let Some(universe) = self.universe() else {
+            return;
+        };
+        let parsed = tags::parse(text, universe);
+        let found = parsed.tags.len();
+        let added = tags::merge(&mut self.tags, parsed.tags);
+        let mut message = format!("Imported {added} tags");
+        if added < found {
+            message += &format!(" ({} were already there)", found - added);
+        }
+        if parsed.skipped > 0 {
+            message += &format!("; {} lines weren't tags and were skipped", parsed.skipped);
+        }
+        self.tag_message = Some(message + ".");
+        if added > 0 {
+            self.save_tags();
+        }
+    }
+
+    /// "Export": copies all tags to the clipboard.
+    fn export_tags(&mut self) {
+        self.egui_ctx.copy_text(tags::format(&self.tags));
+        self.tag_message = Some(format!("Copied {} tags to the clipboard.", self.tags.len()));
+    }
+
+    /// A tag group was ticked or unticked under "Show groups on map".
+    fn set_tag_group_shown(&mut self, group: &str, shown: bool) {
+        self.settings.hidden_tag_groups.retain(|g| g != group);
+        if !shown {
+            self.settings.hidden_tag_groups.push(group.to_string());
+        }
+        self.save_settings();
+    }
+
+    fn save_tags(&mut self) {
+        self.saver
+            .save(tags::file_path(&self.data_dir), tags::format(&self.tags));
+    }
+
+    /// Something picked in the map's right-click menu.
+    fn map_action(&mut self, action: map::MapAction) {
+        match action {
+            map::MapAction::AddTag(system) => self.open_tag_dialog(system),
+            map::MapAction::MarkClear(system) => self.mark_clear(system),
+            map::MapAction::OpenOnDotlan(system) => {
+                let Some(name) = self
+                    .universe()
+                    .and_then(|u| u.system(system))
+                    .map(|s| s.name.clone())
+                else {
+                    return;
+                };
+                let url = format!(
+                    "https://evemaps.dotlan.net/system/{}",
+                    name.replace(' ', "_")
+                );
+                match crate::shell::open_url(&url) {
+                    Ok(()) => {
+                        self.problems.remove("browser");
+                    }
+                    Err(problem) => {
+                        self.problems.insert("browser", problem);
+                    }
+                }
+            }
+        }
+    }
+
+    /// "Mark clear": a clear report from the user, which turns the system
+    /// green like a "clr" in an intel channel.
+    fn mark_clear(&mut self, system: i64) {
+        let Some(name) = self
+            .universe()
+            .and_then(|u| u.system(system))
+            .map(|s| s.name.clone())
+        else {
+            return;
+        };
+        let report = Report {
+            time: now(),
+            channel: "Athena".to_string(),
+            sender: "You".to_string(),
+            text: format!("{name} marked clear"),
+            message: IntelMessage {
+                systems: vec![system],
+                clear: true,
+                ..IntelMessage::default()
+            },
+        };
+        self.reports.push_front(report);
+        self.reports.truncate(REPORTS_KEPT);
     }
 
     /// Plays the sound for a distance, from the play buttons in Settings.
@@ -927,6 +1151,67 @@ mod tests {
         );
         assert_eq!(m.reports[1].message.systems, [102]);
         assert_eq!(m.alert.as_ref().map(|a| a.system_id), Some(102));
+    }
+
+    #[test]
+    fn an_older_further_report_keeps_the_closer_banner() {
+        let mut m = module();
+        jump(&mut m, "Pilot Alpha", 60, "A1-XYZ");
+        m.handle_lines(
+            "Branch Intel",
+            "Pilot Alpha",
+            vec![line(5, "Scout", "A1-XYZ")],
+            false,
+        );
+        m.handle_lines(
+            "Region Intel",
+            "Pilot Alpha",
+            vec![line(8, "Scout", "A2-XYZ")],
+            false,
+        );
+        assert_eq!(m.alert.as_ref().map(|a| a.system_id), Some(101));
+    }
+
+    #[test]
+    fn tags_import_add_and_remove() {
+        let mut m = module();
+        m.import_tag_text("A1-XYZ;POS;#F5FF83;structure_skyhook;false;POS\nnot a tag\n");
+        assert_eq!(m.tags.len(), 1);
+        assert!(m.tag_message.as_ref().unwrap().contains("Imported 1 tags"));
+        // Importing again adds nothing.
+        m.import_tag_text("A1-XYZ;POS;#F5FF83;structure_skyhook;false;POS");
+        assert_eq!(m.tags.len(), 1);
+        // The dialog starts from the newest tag's group, colour and icon.
+        m.open_tag_dialog(201);
+        let dialog = m.tag_dialog.as_mut().unwrap();
+        assert_eq!(dialog.group, "POS");
+        assert_eq!(dialog.icon, "structure_skyhook");
+        dialog.label = "Ice; belt".into();
+        m.add_tag_from_dialog();
+        assert!(m.tag_dialog.is_none());
+        assert_eq!(
+            m.tags[1].to_line(),
+            "B1;Ice, belt;#F5FF83;structure_skyhook;false;POS"
+        );
+        m.set_tag_group_shown("POS", false);
+        assert!(tags::by_system(&m.tags, &m.settings.hidden_tag_groups).is_empty());
+        m.remove_tag(0);
+        assert_eq!(m.tags.len(), 1);
+    }
+
+    #[test]
+    fn mark_clear_turns_the_system_green() {
+        let mut m = module();
+        m.handle_lines(
+            "Branch Intel",
+            "Pilot Alpha",
+            vec![line(30, "Scout", "A2-XYZ")],
+            false,
+        );
+        m.mark_clear(102);
+        let refs: Vec<&Report> = m.reports.iter().collect();
+        let marks = alerts::system_marks(&refs, now(), 600, &HashMap::new());
+        assert_eq!(marks[&102].color, alerts::GREEN);
     }
 
     #[test]

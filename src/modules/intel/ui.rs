@@ -13,6 +13,7 @@ use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke, Vec2};
 
 use super::alerts::{self, SystemMark};
 use super::sound::{self, SoundKind};
+use super::tags;
 use super::{IntelSupervisor, Report, View, map, now};
 
 /// The Settings view has the same width as the Mining panel.
@@ -245,17 +246,24 @@ fn map_and_list(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
     let now = now();
     let reports: Vec<&Report> = module.reports.iter().collect();
     let marks = alerts::system_marks(&reports, now, module.fade_seconds(), &module.distances);
+    let shown_tags = tags::by_system(&module.tags, &module.settings.hidden_tag_groups);
     let mut map_ui = ui.new_child(egui::UiBuilder::new().max_rect(map_rect));
-    module.map.show(
+    let action = module.map.show(
         &mut map_ui,
         &map::MapContent {
             pilots: &pilots,
             marks: &marks,
             alert_frame: module.alert.is_some() && module.settings.flash,
             fade_minutes: module.settings.fade_minutes,
+            tags: &shown_tags,
         },
     );
+    drop(shown_tags);
+    if let Some(action) = action {
+        module.map_action(action);
+    }
     alert_banner(module, ui, map_rect);
+    tag_dialog(module, ui);
     schedule_fade_repaint(module, ui, &marks);
 
     // The handle: a short bar in the middle, dragged sideways.
@@ -547,6 +555,229 @@ fn settings_view(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
             .color(DIM),
         );
     });
+
+    tags_settings(module, ui);
+}
+
+/// The "System tags" box in Settings: Import, Export, the list of tags,
+/// and which groups show on the map.
+fn tags_settings(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
+    let mut import = false;
+    let mut export = false;
+    let mut remove: Option<usize> = None;
+    let mut group_toggled: Option<(String, bool)> = None;
+    section_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("System tags ({})", module.tags.len()))
+                    .color(BRIGHT)
+                    .strong(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                export = ui
+                    .button("Export")
+                    .on_hover_text("Copies all tags to the clipboard.")
+                    .clicked();
+                import = ui
+                    .button("Import")
+                    .on_hover_text("Adds the tags on the clipboard.")
+                    .clicked();
+            });
+        });
+        ui.label(
+            small(
+                "Same text format as RIFT (System;Label;Colour;Icon;…;Group), so you can paste \
+                 your RIFT export straight in. Import reads the clipboard; export copies to it. \
+                 Right-click a system on the map to add a tag.",
+            )
+            .color(DIM),
+        );
+        if let Some(message) = &module.tag_message {
+            ui.label(small(message).color(YELLOW));
+        }
+        if module.tags.is_empty() {
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("intel_tags")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                egui::Grid::new("intel_tag_list")
+                    .num_columns(5)
+                    .spacing([10.0, 3.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for (index, tag) in module.tags.iter().enumerate() {
+                            ui.label(RichText::new(&tag.system_name).monospace().size(11.0));
+                            let (rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
+                            tags::paint_icon(
+                                ui.painter(),
+                                rect.center(),
+                                11.0,
+                                &tag.icon,
+                                tag.color,
+                            );
+                            ui.label(&tag.label);
+                            ui.label(small(&tag.group).color(DIM));
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("Remove this tag")
+                                .clicked()
+                            {
+                                remove = Some(index);
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(small("Show groups on map:").color(DIM));
+            for group in tags::groups(&module.tags) {
+                let mut shown = !module.settings.hidden_tag_groups.contains(&group);
+                let name = if group.is_empty() { "No group" } else { &group };
+                if ui.checkbox(&mut shown, small(name)).changed() {
+                    group_toggled = Some((group.clone(), shown));
+                }
+            }
+        });
+    });
+    if import {
+        module.import_tags();
+    }
+    if export {
+        module.export_tags();
+    }
+    if let Some(index) = remove {
+        module.remove_tag(index);
+    }
+    if let Some((group, shown)) = group_toggled {
+        module.set_tag_group_shown(&group, shown);
+    }
+}
+
+/// The "Add tag…" window, while it is open: label, group, colour, icon.
+fn tag_dialog(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
+    let Some(system_id) = module.tag_dialog.as_ref().map(|d| d.system_id) else {
+        return;
+    };
+    let system = module
+        .universe()
+        .and_then(|u| u.system(system_id))
+        .map(|s| s.name.clone())
+        .unwrap_or_default();
+    let groups = tags::groups(&module.tags);
+    let existing_tags = module.tags.clone();
+    let Some(dialog) = module.tag_dialog.as_mut() else {
+        return;
+    };
+    let mut add = false;
+    let mut cancel = false;
+    egui::Window::new(format!("Add tag · {system}"))
+        .id(egui::Id::new("intel_add_tag"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ui.ctx(), |ui| {
+            egui::Grid::new("intel_add_tag_grid")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Label");
+                    let label = ui.text_edit_singleline(&mut dialog.label);
+                    // Ready to type as soon as the window opens.
+                    if dialog.label.is_empty() && !label.has_focus() {
+                        label.request_focus();
+                    }
+                    ui.end_row();
+
+                    ui.label("Group");
+                    if dialog.new_group {
+                        ui.text_edit_singleline(&mut dialog.group);
+                    } else {
+                        let mut picked = None;
+                        egui::ComboBox::from_id_salt("intel_tag_group")
+                            .selected_text(dialog.group.clone())
+                            .show_ui(ui, |ui| {
+                                for group in &groups {
+                                    if ui.selectable_label(&dialog.group == group, group).clicked()
+                                    {
+                                        picked = Some(group.clone());
+                                    }
+                                }
+                                if ui.selectable_label(false, "New group…").clicked() {
+                                    dialog.new_group = true;
+                                    dialog.group.clear();
+                                }
+                            });
+                        // A picked group brings its colour along.
+                        if let Some(group) = picked {
+                            if let Some(color) = tags::group_color(&existing_tags, &group) {
+                                dialog.color = color;
+                            }
+                            dialog.group = group;
+                        }
+                    }
+                    ui.end_row();
+
+                    ui.label("Colour");
+                    ui.horizontal(|ui| {
+                        ui.color_edit_button_srgba(&mut dialog.color);
+                        ui.label(small(tags::color_text(dialog.color)).color(DIM));
+                    });
+                    ui.end_row();
+
+                    ui.label("Icon");
+                    ui.horizontal(|ui| {
+                        for (icon, name) in tags::ICONS {
+                            let selected = dialog.icon == icon;
+                            let (rect, response) =
+                                ui.allocate_exact_size(Vec2::new(30.0, 24.0), egui::Sense::click());
+                            let fill = if selected { CHIP_FILL } else { BOX_FILL };
+                            let stroke = if selected { CHIP_BORDER } else { BORDER };
+                            ui.painter().rect(
+                                rect,
+                                CornerRadius::same(4),
+                                fill,
+                                Stroke::new(1.0, stroke),
+                                egui::StrokeKind::Inside,
+                            );
+                            tags::paint_icon(ui.painter(), rect.center(), 14.0, icon, dialog.color);
+                            if response.on_hover_text(name).clicked() {
+                                dialog.icon = icon.to_string();
+                            }
+                        }
+                    });
+                    ui.end_row();
+                });
+            ui.add_space(4.0);
+            ui.label(small("Enter adds the tag, Esc cancels.").color(DIM));
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let ready = !dialog.label.trim().is_empty();
+                    add = ui.add_enabled(ready, egui::Button::new("Add")).clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+            let (enter, escape) = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::Enter),
+                    i.key_pressed(egui::Key::Escape),
+                )
+            });
+            if enter && !dialog.label.trim().is_empty() {
+                add = true;
+            }
+            if escape {
+                cancel = true;
+            }
+        });
+    if add {
+        module.add_tag_from_dialog();
+    } else if cancel {
+        module.tag_dialog = None;
+    }
 }
 
 /// Saves the settings once a number field is done changing: when a drag
