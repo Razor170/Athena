@@ -11,11 +11,14 @@
 //! the user docked it.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use eframe::egui;
 
 use crate::settings::Settings;
+use crate::static_data::StaticData;
 
+pub mod intel;
 pub mod mining;
 pub mod welcome;
 
@@ -71,11 +74,58 @@ pub fn create_all(
     settings: &Settings,
     data_dir: &Path,
 ) -> Vec<Box<dyn Module>> {
+    let static_data = SharedStaticData::load();
     vec![
-        Box::new(mining::MiningSupervisor::new(egui_ctx, settings, data_dir)),
+        Box::new(mining::MiningSupervisor::new(
+            egui_ctx,
+            settings,
+            data_dir,
+            &static_data,
+        )),
+        Box::new(intel::IntelSupervisor::new(
+            egui_ctx,
+            settings,
+            data_dir,
+            &static_data,
+        )),
         Box::new(welcome::Welcome),
         // Add new modules here, one line each.
     ]
+}
+
+/// `static.sqlite`, loaded once and shared by the modules that need it.
+pub struct SharedStaticData {
+    /// `Arc` ("atomically reference counted") lets several modules hold the
+    /// same data without copying it; it is freed when the last one drops it.
+    /// `None` if the file is missing or broken.
+    pub data: Option<Arc<StaticData>>,
+    /// Why `data` is `None`, to show in the modules.
+    pub problem: Option<String>,
+}
+
+impl SharedStaticData {
+    /// Reads the file. Runs once at startup, before the window shows.
+    fn load() -> SharedStaticData {
+        match StaticData::find_file() {
+            Some(path) => match StaticData::load(&path) {
+                Ok(data) => SharedStaticData {
+                    data: Some(Arc::new(data)),
+                    problem: None,
+                },
+                Err(e) => SharedStaticData {
+                    data: None,
+                    problem: Some(format!("Static game data could not be read: {e:#}")),
+                },
+            },
+            None => SharedStaticData {
+                data: None,
+                problem: Some(format!(
+                    "{} is missing next to Athena.exe, so ore data and the map are unknown.",
+                    crate::static_data::FILE_NAME
+                )),
+            },
+        }
+    }
 }
 
 #[cfg(test)]
