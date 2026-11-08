@@ -1,11 +1,12 @@
-//! Groups finished per-character sessions into the sessions shown in the
-//! History tab: everyone who mined at the same time counts as one session,
-//! which can be opened to see each pilot.
+//! The sessions shown in the History tab. "End session" ends every
+//! character's session at once; together they form one History entry, which
+//! can be opened to see each pilot.
 
 use super::gamelog::LogTime;
 use super::session::FinishedSession;
 
-/// One History entry: the pilots that mined together.
+/// One History entry: the pilots that mined together, ended with one click
+/// of "End session".
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupSession {
     pub started: LogTime,
@@ -14,33 +15,19 @@ pub struct GroupSession {
     pub pilots: Vec<FinishedSession>,
 }
 
-/// Groups sessions that overlap in time, or are less than `gap_secs`
-/// apart, into one entry. Returns the newest entry first, as History lists
-/// them.
-pub fn group_sessions(sessions: &[FinishedSession], gap_secs: i64) -> Vec<GroupSession> {
-    let mut sorted: Vec<&FinishedSession> = sessions.iter().collect();
-    sorted.sort_by_key(|session| session.started);
-
-    let mut groups: Vec<GroupSession> = Vec::new();
-    for session in sorted {
-        // `last_mut` gives the group that started most recently, which is
-        // the only one this session can join since we go in time order.
-        match groups.last_mut() {
-            Some(group) if session.started.seconds_since(group.ended) < gap_secs => {
-                if session.ended > group.ended {
-                    group.ended = session.ended;
-                }
-                group.pilots.push(session.clone());
-            }
-            _ => groups.push(GroupSession {
-                started: session.started,
-                ended: session.ended,
-                pilots: vec![session.clone()],
-            }),
-        }
+impl GroupSession {
+    /// Builds the History entry from the sessions ended together. `None` if
+    /// nobody mined.
+    pub fn from_pilots(mut pilots: Vec<FinishedSession>) -> Option<GroupSession> {
+        pilots.sort_by_key(|pilot| pilot.started);
+        let started = pilots.first()?.started;
+        let ended = pilots.iter().map(|pilot| pilot.ended).max()?;
+        Some(GroupSession {
+            started,
+            ended,
+            pilots,
+        })
     }
-    groups.reverse();
-    groups
 }
 
 #[cfg(test)]
@@ -67,33 +54,21 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_sessions_form_one_group() {
-        let sessions = vec![
+    fn group_spans_all_pilots() {
+        let group = GroupSession::from_pilots(vec![
             session("Pilot Bravo", 60, 7_200),
             session("Pilot Alpha", 0, 7_000),
-            // Joins late, but while the others still mine.
             session("Pilot Charlie", 3_600, 9_000),
-            // Starts 10 min after the group ended: still the same op.
-            session("Pilot Delta", 9_600, 10_000),
-            // The next evening: a new group.
-            session("Pilot Alpha", 86_400, 90_000),
-        ];
-        let groups = group_sessions(&sessions, 15 * 60);
-        assert_eq!(groups.len(), 2);
-        // Newest first.
-        assert_eq!(groups[0].pilots.len(), 1);
-        let op = &groups[1];
-        assert_eq!(op.started, at(0));
-        assert_eq!(op.ended, at(10_000));
-        let names: Vec<&str> = op.pilots.iter().map(|p| p.character.as_str()).collect();
-        assert_eq!(
-            names,
-            ["Pilot Alpha", "Pilot Bravo", "Pilot Charlie", "Pilot Delta"]
-        );
+        ])
+        .unwrap();
+        assert_eq!(group.started, at(0));
+        assert_eq!(group.ended, at(9_000));
+        let names: Vec<&str> = group.pilots.iter().map(|p| p.character.as_str()).collect();
+        assert_eq!(names, ["Pilot Alpha", "Pilot Bravo", "Pilot Charlie"]);
     }
 
     #[test]
-    fn empty_history() {
-        assert!(group_sessions(&[], 900).is_empty());
+    fn nobody_mined() {
+        assert!(GroupSession::from_pilots(Vec::new()).is_none());
     }
 }

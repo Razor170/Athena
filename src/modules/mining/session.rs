@@ -32,8 +32,6 @@ pub struct TrackerSettings {
     pub miner_stopped_min_secs: i64,
     /// "Idle" alert after this many seconds without a cycle.
     pub idle_after_secs: i64,
-    /// A session ends after this many seconds without a cycle.
-    pub session_gap_secs: i64,
 }
 
 impl Default for TrackerSettings {
@@ -44,7 +42,6 @@ impl Default for TrackerSettings {
             full_percent: 99.0,
             miner_stopped_min_secs: 60,
             idle_after_secs: 5 * 60,
-            session_gap_secs: 15 * 60,
         }
     }
 }
@@ -225,6 +222,15 @@ impl CharacterTracker {
         if self.recent_cycles.back() == Some(&time) {
             return;
         }
+        // A break longer than the idle time (moving to another belt,
+        // docking) says nothing about cycle times, so start learning again.
+        let long_break = self
+            .recent_cycles
+            .back()
+            .is_some_and(|last| time.seconds_since(*last) >= self.settings.idle_after_secs);
+        if long_break {
+            self.recent_cycles.clear();
+        }
         self.recent_cycles.push_back(time);
         while self.recent_cycles.len() > KEEP {
             self.recent_cycles.pop_front();
@@ -269,16 +275,13 @@ impl CharacterTracker {
         Some(self.hold_fill(volumes).total_m3() / capacity * 100.0)
     }
 
-    /// Applies one event from the log. Returns any alerts it caused, and the
-    /// previous session if this event came after a long enough gap to start
-    /// a new one.
-    pub fn apply(
-        &mut self,
-        event: &TimedMiningEvent,
-        volumes: &VolumeTable,
-    ) -> (Vec<Alert>, Option<FinishedSession>) {
+    /// Applies one event from the log and returns any alerts it caused.
+    ///
+    /// The first mined cycle starts a session. Sessions never end by
+    /// themselves: the user ends them with the "End session" button
+    /// ([`CharacterTracker::finish_session`]).
+    pub fn apply(&mut self, event: &TimedMiningEvent, volumes: &VolumeTable) -> Vec<Alert> {
         let mut alerts = Vec::new();
-        let mut finished = None;
 
         match &event.event {
             MiningEvent::Mined {
@@ -286,9 +289,6 @@ impl CharacterTracker {
                 ore,
                 critical,
             } => {
-                // A cycle after a long gap: the old session is over.
-                finished = self.end_session_if_gap(event.time);
-
                 // Ore that doesn't fit in the hold is discarded by EVE, so it
                 // never reaches the hold count below.
                 let kept = self.units_that_fit(ore, *units, volumes);
@@ -346,7 +346,7 @@ impl CharacterTracker {
         }
 
         alerts.extend(self.fill_alerts(volumes));
-        (alerts, finished)
+        alerts
     }
 
     /// Called regularly (e.g. every few seconds) with the current time, for
@@ -354,10 +354,10 @@ impl CharacterTracker {
     ///
     /// `now` must be EVE time (UTC), not the PC's local time, since the log
     /// times it is compared with are UTC.
-    pub fn tick(&mut self, now: LogTime) -> (Vec<Alert>, Option<FinishedSession>) {
+    pub fn tick(&mut self, now: LogTime) -> Vec<Alert> {
         let mut alerts = Vec::new();
         let Some(session) = &self.session else {
-            return (alerts, None);
+            return alerts;
         };
         let quiet_secs = now.seconds_since(session.last_cycle);
 
@@ -375,21 +375,18 @@ impl CharacterTracker {
                 minutes: quiet_secs / 60,
             });
         }
-        let finished = self.end_session_if_gap(now);
-        (alerts, finished)
+        alerts
     }
 
-    /// Ends the running session if nothing was mined for `session_gap_secs`
-    /// before `now`.
-    fn end_session_if_gap(&mut self, now: LogTime) -> Option<FinishedSession> {
-        let session = self.session.as_ref()?;
-        if now.seconds_since(session.last_cycle) < self.settings.session_gap_secs {
-            return None;
-        }
+    /// Ends the running session (the "End session" button) and hands it back
+    /// so the caller can value and store it. `None` if this character has not
+    /// mined since the last session ended.
+    pub fn finish_session(&mut self) -> Option<FinishedSession> {
         // `take` moves the session out and leaves `None` behind.
         let session = self.session.take()?;
-        // The gap to the next session says nothing about cycle times.
         self.recent_cycles.clear();
+        self.raised_stopped = false;
+        self.raised_idle = false;
         Some(FinishedSession {
             character: self.character.clone(),
             started: session.started,
@@ -519,22 +516,22 @@ mod tests {
         let mut t = tracker(1_000.0);
         t.settings.fill_alert_percent = 90.0;
         // 80% -> nothing
-        let (alerts, _) = t.apply(&mined(0, 80, "Rock"), &v);
+        let alerts = t.apply(&mined(0, 80, "Rock"), &v);
         assert!(alerts.is_empty());
         // 92% -> threshold alert
-        let (alerts, _) = t.apply(&mined(10, 12, "Rock"), &v);
+        let alerts = t.apply(&mined(10, 12, "Rock"), &v);
         assert!(matches!(alerts[..], [Alert::HoldAboveThreshold { .. }]));
         // 95% -> no repeat
-        let (alerts, _) = t.apply(&mined(20, 3, "Rock"), &v);
+        let alerts = t.apply(&mined(20, 3, "Rock"), &v);
         assert!(alerts.is_empty());
         // 100% -> full
-        let (alerts, _) = t.apply(&mined(30, 5, "Rock"), &v);
+        let alerts = t.apply(&mined(30, 5, "Rock"), &v);
         assert_eq!(alerts, vec![Alert::HoldFull]);
-        let (alerts, _) = t.apply(&mined(40, 0, "Rock"), &v);
+        let alerts = t.apply(&mined(40, 0, "Rock"), &v);
         assert!(alerts.is_empty());
         // Emptied re-arms both.
         t.mark_emptied();
-        let (alerts, _) = t.apply(&mined(50, 100, "Rock"), &v);
+        let alerts = t.apply(&mined(50, 100, "Rock"), &v);
         assert_eq!(alerts, vec![Alert::HoldFull]);
     }
 
@@ -542,10 +539,10 @@ mod tests {
     fn compressing_rearms_fill_alert() {
         let v = volumes();
         let mut t = tracker(1_000.0);
-        let (alerts, _) = t.apply(&mined(0, 95, "Rock"), &v);
+        let alerts = t.apply(&mined(0, 95, "Rock"), &v);
         assert_eq!(alerts.len(), 1);
         t.apply(&compressed(5, 95, "Rock"), &v);
-        let (alerts, _) = t.apply(&mined(10, 95, "Rock"), &v);
+        let alerts = t.apply(&mined(10, 95, "Rock"), &v);
         assert!(matches!(alerts[..], [Alert::HoldAboveThreshold { .. }]));
     }
 
@@ -553,7 +550,7 @@ mod tests {
     fn no_fill_alerts_without_capacity() {
         let v = volumes();
         let mut t = CharacterTracker::new("Test Pilot", TrackerSettings::default());
-        let (alerts, _) = t.apply(&mined(0, 1_000_000, "Rock"), &v);
+        let alerts = t.apply(&mined(0, 1_000_000, "Rock"), &v);
         assert!(alerts.is_empty());
         assert_eq!(t.fill_percent(&v), None);
     }
@@ -570,7 +567,7 @@ mod tests {
                 reason: "rock depleted".to_string(),
             },
         };
-        let (alerts, _) = t.apply(&stop, &v);
+        let alerts = t.apply(&stop, &v);
         assert_eq!(
             alerts,
             vec![Alert::MinerStopped {
@@ -578,11 +575,11 @@ mod tests {
             }]
         );
         // A second miner stopping right after doesn't alert again...
-        let (alerts, _) = t.apply(&stop, &v);
+        let alerts = t.apply(&stop, &v);
         assert!(alerts.is_empty());
         // ...until mining resumed.
         t.apply(&mined(60, 1, "Rock"), &v);
-        let (alerts, _) = t.apply(&stop, &v);
+        let alerts = t.apply(&stop, &v);
         assert_eq!(alerts.len(), 1);
     }
 
@@ -596,22 +593,22 @@ mod tests {
         }
         assert_eq!(t.miner_stopped_after_secs(), Some(60));
 
-        let (alerts, finished) = t.tick(at(100));
-        assert!(alerts.is_empty());
-        assert!(finished.is_none());
+        assert!(t.tick(at(100)).is_empty());
 
         // 60 s after the last cycle: miner stopped.
-        let (alerts, _) = t.tick(at(120));
+        let alerts = t.tick(at(120));
         assert!(matches!(alerts[..], [Alert::MinerStopped { .. }]));
-        assert!(t.tick(at(121)).0.is_empty());
+        assert!(t.tick(at(121)).is_empty());
 
         // 5 min: idle.
-        let (alerts, _) = t.tick(at(60 + 300));
+        let alerts = t.tick(at(60 + 300));
         assert_eq!(alerts, vec![Alert::Idle { minutes: 5 }]);
 
-        // 15 min: session over.
-        let (_, finished) = t.tick(at(60 + 900));
-        let finished = finished.unwrap();
+        // Sessions never end by themselves...
+        t.tick(at(60 + 7_200));
+        assert!(t.session().is_some());
+        // ...only when the user ends them.
+        let finished = t.finish_session().unwrap();
         assert_eq!(finished.started, at(0));
         assert_eq!(finished.ended, at(60));
         assert_eq!(finished.cycles, 4);
@@ -631,9 +628,9 @@ mod tests {
         }
         assert_eq!(t.miner_stopped_after_secs(), Some(360));
         // Between two normal cycles: no alert.
-        assert!(t.tick(at(4 * 180 + 179)).0.is_empty());
+        assert!(t.tick(at(4 * 180 + 179)).is_empty());
         // Two whole cycles missed: stopped.
-        let (alerts, _) = t.tick(at(4 * 180 + 360));
+        let alerts = t.tick(at(4 * 180 + 360));
         assert!(
             alerts
                 .iter()
@@ -648,7 +645,7 @@ mod tests {
         t.apply(&mined(0, 10, "Rock"), &v);
         t.apply(&mined(30, 10, "Rock"), &v);
         assert_eq!(t.miner_stopped_after_secs(), None);
-        assert!(t.tick(at(200)).0.is_empty());
+        assert!(t.tick(at(200)).is_empty());
     }
 
     #[test]
@@ -668,7 +665,7 @@ mod tests {
         let mut t = tracker(1_000.0);
         // 95 units = 950 m³; then 20 more but only 5 fit.
         t.apply(&mined(0, 95, "Rock"), &v);
-        let (alerts, _) = t.apply(&mined(10, 20, "Rock"), &v);
+        let alerts = t.apply(&mined(10, 20, "Rock"), &v);
         assert_eq!(alerts, vec![Alert::HoldFull]);
         assert_eq!(t.hold_units().get("Rock"), Some(&100));
         let session = t.session().unwrap();
@@ -702,15 +699,34 @@ mod tests {
     }
 
     #[test]
-    fn late_cycle_after_gap_starts_new_session() {
-        // E.g. Athena was closed, so no tick ended the session in time.
+    fn session_continues_after_a_break_until_ended() {
         let v = volumes();
         let mut t = tracker(10_000.0);
         t.apply(&mined(0, 10, "Rock"), &v);
-        let (_, finished) = t.apply(&mined(3_600, 5, "Rock"), &v);
-        assert_eq!(finished.unwrap().mined_units.get("Rock"), Some(&10));
+        t.apply(&mined(3_600, 5, "Rock"), &v);
         let session = t.session().unwrap();
-        assert_eq!(session.started, at(3_600));
-        assert_eq!(session.mined_units.get("Rock"), Some(&5));
+        assert_eq!(session.started, at(0));
+        assert_eq!(session.mined_units.get("Rock"), Some(&15));
+
+        let finished = t.finish_session().unwrap();
+        assert_eq!(finished.ended, at(3_600));
+        assert!(t.finish_session().is_none());
+        // The next cycle starts a fresh session.
+        t.apply(&mined(4_000, 1, "Rock"), &v);
+        assert_eq!(t.session().unwrap().started, at(4_000));
+    }
+
+    #[test]
+    fn long_break_resets_cycle_rhythm() {
+        let v = volumes();
+        let mut t = tracker(100_000.0);
+        for secs in [0, 20, 40, 60] {
+            t.apply(&mined(secs, 1, "Rock"), &v);
+        }
+        // A 30 min break (new belt), then normal cycles again.
+        for secs in [1_860, 1_880, 1_900, 1_920] {
+            t.apply(&mined(secs, 1, "Rock"), &v);
+        }
+        assert_eq!(t.miner_stopped_after_secs(), Some(60));
     }
 }
