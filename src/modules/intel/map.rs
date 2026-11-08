@@ -21,6 +21,7 @@ use eframe::egui::{
 };
 
 use super::alerts::{self, SystemMark};
+use super::lookup::SystemActivity;
 use super::tags::{self, Tag};
 use crate::universe::{Universe, drawing};
 
@@ -37,6 +38,8 @@ pub const PILOT_BLUE: Color32 = Color32::from_rgb(0x4e, 0xa1, 0xff);
 const PILOT_TEXT: Color32 = Color32::from_rgb(0x8f, 0xc3, 0xff);
 const LEGEND_TEXT: Color32 = Color32::from_rgb(0xa8, 0xa8, 0xa8);
 const TAG_TEXT: Color32 = Color32::from_rgb(0xcf, 0xcf, 0xcf);
+const KILLS_TINT: Color32 = Color32::from_rgb(0xb0, 0x4c, 0xd8);
+const JUMPS_TINT: Color32 = Color32::from_rgb(0x9a, 0xb4, 0xd0);
 
 /// Zoom limits. 1.0 is the size the xtask laid the map out for.
 const MIN_ZOOM: f32 = 0.3;
@@ -178,6 +181,8 @@ pub struct MapContent<'a> {
     pub fade_minutes: u32,
     /// Tags to show under system names (hidden groups already left out).
     pub tags: &'a HashMap<i64, Vec<&'a Tag>>,
+    /// ESI kills and jumps of the last hour; empty while the tint is off.
+    pub activity: &'a HashMap<i64, SystemActivity>,
 }
 
 /// Something picked in the map's right-click menu.
@@ -291,7 +296,22 @@ impl MapView {
             );
         }
         self.controls(ui, rect, bounds);
-        legend(&painter, rect, content.fade_minutes);
+        legend(
+            &painter,
+            rect,
+            content.fade_minutes,
+            !content.activity.is_empty(),
+        );
+        // With the tint on, hovering a system says what the tint means.
+        if !content.activity.is_empty()
+            && let Some(pointer) = response.hover_pos()
+            && let Some(system) = self.system_at(pointer, rect)
+            && let Some(activity) = content.activity.get(&system)
+        {
+            response.clone().on_hover_ui_at_pointer(|ui| {
+                ui.label(activity_text(activity));
+            });
+        }
         self.context_menu(&response, rect)
     }
 
@@ -403,6 +423,16 @@ impl MapView {
             let pilots = content.pilots.get(&node.id);
             let mark = content.marks.get(&node.id);
             let ring = dot_radius + 3.0 * zoom.max(0.6);
+            // The ESI tint: a soft glow behind the dot, bigger and
+            // stronger with more activity.
+            if let Some(activity) = content.activity.get(&node.id) {
+                let (color, strength) = activity_glow(activity);
+                painter.circle_filled(
+                    center,
+                    dot_radius + (4.0 + 10.0 * strength) * zoom.max(0.6),
+                    color.gamma_multiply(0.15 + 0.35 * strength),
+                );
+            }
             if let Some(mark) = mark {
                 // A soft ring in the report's colour; a blue edge if an own
                 // pilot is there too. Border systems show reports as well.
@@ -527,19 +557,57 @@ impl MapView {
     }
 }
 
+/// The tint colour and a 0–1 strength for a system's activity: purple for
+/// player kills (ships and pods), else grey-blue for jumps. Both scale
+/// with the logarithm, so 5 kills already shows and 50 isn't ten times
+/// louder.
+pub fn activity_glow(activity: &SystemActivity) -> (Color32, f32) {
+    let kills = activity.ship_kills + activity.pod_kills;
+    if kills > 0 {
+        let strength = ((kills as f32).ln_1p() / 30f32.ln_1p()).min(1.0);
+        (KILLS_TINT, strength.max(0.3))
+    } else {
+        let strength = ((activity.jumps as f32).ln_1p() / 300f32.ln_1p()).min(1.0);
+        (JUMPS_TINT, strength * 0.8)
+    }
+}
+
+/// "12 jumps · 3 ship kills · 1 pod kill · 40 NPC kills in the last hour".
+pub fn activity_text(activity: &SystemActivity) -> String {
+    let count = |n: u32, one: &str, many: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {many}")
+        }
+    };
+    format!(
+        "{} · {} · {} · {} in the last hour (ESI)",
+        count(activity.jumps, "jump", "jumps"),
+        count(activity.ship_kills, "ship kill", "ship kills"),
+        count(activity.pod_kills, "pod kill", "pod kills"),
+        count(activity.npc_kills, "NPC kill", "NPC kills"),
+    )
+}
+
 /// The colour key, bottom left.
-fn legend(painter: &egui::Painter, view: Rect, fade_minutes: u32) {
+/// `tint` adds the kills and jumps colours while the ESI tint is shown.
+fn legend(painter: &egui::Painter, view: Rect, fade_minutes: u32, tint: bool) {
     let font = FontId::proportional(11.0);
     let fading = format!("Fading ({fade_minutes} min)");
     // `None` is the hollow "other region" dot, `Some(None)` the hint text.
-    let entries: [(&str, Option<Option<Color32>>); 6] = [
+    let mut entries: Vec<(&str, Option<Option<Color32>>)> = vec![
         ("Reported now", Some(Some(alerts::RED))),
         (&fading, Some(Some(alerts::ORANGE))),
         ("Clear", Some(Some(alerts::GREEN))),
         ("My pilot", Some(Some(PILOT_BLUE))),
         ("Other region", Some(None)),
-        ("· drag to pan, wheel to zoom", None),
     ];
+    if tint {
+        entries.push(("Kills (1 h)", Some(Some(KILLS_TINT))));
+        entries.push(("Jumps (1 h)", Some(Some(JUMPS_TINT))));
+    }
+    entries.push(("· drag to pan, wheel to zoom", None));
     // Entries go left to right and wrap into a row below when they would
     // run into the zoom buttons (bottom right, about 170 points wide).
     let left = view.left() + 14.0;

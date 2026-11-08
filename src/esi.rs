@@ -16,15 +16,12 @@
 //! Requests block, so only use this from a background thread, never the UI
 //! thread.
 
-// Only the Mining Supervisor's price thread uses this so far, and that isn't
-// wired in yet. Remove this line when it is.
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use reqwest::StatusCode;
-use reqwest::blocking::{Client, Response};
+use reqwest::blocking::{Client, RequestBuilder, Response};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 const BASE_URL: &str = "https://esi.evetech.net";
@@ -86,19 +83,52 @@ impl EsiClient {
         etag: Option<&str>,
     ) -> Result<Fetched<T>> {
         let url = format!("{BASE_URL}{path}");
+        let response = self.send(&url, |http| {
+            let request = http.get(&url);
+            match etag {
+                Some(etag) => request.header("If-None-Match", etag),
+                None => request,
+            }
+        })?;
+        if response.status() == StatusCode::NOT_MODIFIED {
+            return Ok(Fetched::NotModified);
+        }
+        let etag = header_text(&response, "etag");
+        let pages = header_text(&response, "x-pages")
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(1);
+        let value = response
+            .json::<T>()
+            .with_context(|| format!("reading the answer from {url}"))?;
+        Ok(Fetched::Data { value, etag, pages })
+    }
+
+    /// POSTs `body` as JSON to `path` and parses the JSON answer into `T`.
+    /// Used for lookups such as `/universe/ids` (names to ids).
+    pub fn post_json<B: Serialize, T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let url = format!("{BASE_URL}{path}");
+        let response = self.send(&url, |http| http.post(&url).json(body))?;
+        response
+            .json::<T>()
+            .with_context(|| format!("reading the answer from {url}"))
+    }
+
+    /// Sends a request made by `build`, with the headers ESI wants, and
+    /// retries network hiccups, rate limits and server errors. Returns a
+    /// successful (or 304 "not modified") response.
+    fn send(&mut self, url: &str, build: impl Fn(&Client) -> RequestBuilder) -> Result<Response> {
         let mut attempt = 0;
         loop {
             attempt += 1;
             self.wait_for_error_limit();
 
-            let mut request = self
-                .http
-                .get(&url)
+            let request = build(&self.http)
                 .header("X-Compatibility-Date", COMPATIBILITY_DATE)
                 .header("Accept", "application/json");
-            if let Some(etag) = etag {
-                request = request.header("If-None-Match", etag);
-            }
             let response = match request.send() {
                 Ok(response) => response,
                 Err(_) if attempt < MAX_ATTEMPTS => {
@@ -106,23 +136,13 @@ impl EsiClient {
                     std::thread::sleep(Duration::from_secs(5));
                     continue;
                 }
-                Err(e) => return Err(e).with_context(|| format!("GET {url}")),
+                Err(e) => return Err(e).with_context(|| format!("request to {url}")),
             };
             self.read_limits(&response);
 
             let status = response.status();
-            if status == StatusCode::NOT_MODIFIED {
-                return Ok(Fetched::NotModified);
-            }
-            if status.is_success() {
-                let etag = header_text(&response, "etag");
-                let pages = header_text(&response, "x-pages")
-                    .and_then(|text| text.parse().ok())
-                    .unwrap_or(1);
-                let value = response
-                    .json::<T>()
-                    .with_context(|| format!("reading the answer from {url}"))?;
-                return Ok(Fetched::Data { value, etag, pages });
+            if status.is_success() || status == StatusCode::NOT_MODIFIED {
+                return Ok(response);
             }
 
             // 420 = error limit hit, 429 = token bucket empty. Both say how
@@ -137,7 +157,7 @@ impl EsiClient {
                 std::thread::sleep(Duration::from_secs(wait.clamp(1, 900)));
                 continue;
             }
-            bail!("GET {url} failed: HTTP {status}");
+            bail!("{url} failed: HTTP {status}");
         }
     }
 

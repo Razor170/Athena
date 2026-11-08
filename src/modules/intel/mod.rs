@@ -14,20 +14,20 @@
 //! - [`alerts`]: report colours on the map, and which reports raise an alert.
 //! - [`sound`]: plays the alert voice lines or a beep on its own thread.
 //! - [`tags`]: labels on systems, in RIFT's text format.
+//! - [`lookup`]: ESI on a background thread: which pilot-name guesses are
+//!   real characters (for zKillboard links), and the optional kills/jumps
+//!   tint.
 //! - [`ui`]: draws the panel.
 //!
 //! This file holds the [`IntelSupervisor`] module: it owns the watcher,
 //! drains its channel in `update`, and keeps the reports and where each own
 //! pilot is.
-//!
-//! So far (PR 5 of 6) the panel has the map with the own pilots, the
-//! reports and system tags, the intel list, and alerts with sound; the
-//! zKillboard links and the ESI tint come next.
 
 pub mod alerts;
 pub mod chatlog;
 pub mod config;
 pub mod dedupe;
+pub mod lookup;
 pub mod map;
 pub mod parser;
 pub mod sound;
@@ -45,6 +45,7 @@ use eframe::egui;
 use self::chatlog::{ChatLine, EVE_SYSTEM, local_system_change};
 use self::config::IntelSettings;
 use self::dedupe::Deduper;
+use self::lookup::{Answer, Lookup, SystemActivity};
 use self::map::MapView;
 use self::parser::{IntelMessage, ParseContext};
 use self::sound::{PlayRequest, SoundPlayer};
@@ -168,6 +169,16 @@ pub struct IntelSupervisor {
     tag_dialog: Option<TagDialog>,
     /// The group of the last tag added with that window.
     last_tag_group: Option<String>,
+
+    /// ESI lookups on a background thread.
+    lookup: Lookup,
+    /// Pilot-name guesses (lowercase) that ESI answered: the character,
+    /// or `None` if it isn't one.
+    characters: HashMap<String, Option<lookup::Character>>,
+    /// Names sent to ESI and not answered yet.
+    asked: HashSet<String>,
+    /// Kills and jumps of the last hour, while the tint is on.
+    activity: HashMap<i64, SystemActivity>,
     /// What the last tag import or export did, shown in Settings.
     tag_message: Option<String>,
 
@@ -219,6 +230,10 @@ impl IntelSupervisor {
             egui_ctx.clone(),
         );
         let clear_words_text = settings.clear_words.join(", ");
+        let lookup = Lookup::start(egui_ctx.clone());
+        if settings.esi_tint {
+            lookup.ask(lookup::Request::Activity(true));
+        }
         // If the tag file can't be read, it is never written either, so
         // nothing in it gets lost.
         let (tags, unread_tag_lines, tags_writable, tag_message) = match &shared.data {
@@ -268,6 +283,10 @@ impl IntelSupervisor {
             tags_writable,
             tag_dialog: None,
             last_tag_group: None,
+            lookup,
+            characters: HashMap::new(),
+            asked: HashSet::new(),
+            activity: HashMap::new(),
             tag_message,
             problems,
             view: View::Map,
@@ -727,6 +746,30 @@ impl IntelSupervisor {
         }
     }
 
+    /// Asks ESI about pilot-name guesses it hasn't been asked about.
+    fn look_up_names(&mut self, candidates: &[String]) {
+        let new: Vec<String> = candidates
+            .iter()
+            .map(|c| c.to_lowercase())
+            .filter(|c| !self.characters.contains_key(c) && !self.asked.contains(c))
+            .collect();
+        if new.is_empty() {
+            return;
+        }
+        self.asked.extend(new.iter().cloned());
+        self.lookup.ask(lookup::Request::Names(new));
+    }
+
+    /// The tint switch in Settings.
+    fn set_esi_tint(&mut self, on: bool) {
+        self.settings.esi_tint = on;
+        self.save_settings();
+        self.lookup.ask(lookup::Request::Activity(on));
+        if !on {
+            self.activity.clear();
+        }
+    }
+
     /// "Mark clear": a clear report from the user, which turns the system
     /// green like a "clr" in an intel channel.
     fn mark_clear(&mut self, system: i64) {
@@ -823,6 +866,7 @@ impl IntelSupervisor {
             ),
             None => IntelMessage::default(),
         };
+        self.look_up_names(&message.pilot_candidates);
         let report = Report {
             time: line.time,
             channel: channel.to_string(),
@@ -888,6 +932,33 @@ impl Module for IntelSupervisor {
                 }
                 WatchEvent::Problem(None) => {
                     self.problems.remove("chatlogs");
+                }
+            }
+        }
+        while let Ok(answer) = self.lookup.answers.try_recv() {
+            match answer {
+                Answer::Names(names) => {
+                    for (name, character) in names {
+                        self.asked.remove(&name);
+                        self.characters.insert(name, character);
+                    }
+                }
+                Answer::NotAnswered(names) => {
+                    // Forget them, so the next report with them asks again.
+                    for name in names {
+                        self.asked.remove(&name);
+                    }
+                }
+                Answer::Activity(activity) => {
+                    if self.settings.esi_tint {
+                        self.activity = activity;
+                    }
+                }
+                Answer::Problem(Some(text)) => {
+                    self.problems.insert("esi", text);
+                }
+                Answer::Problem(None) => {
+                    self.problems.remove("esi");
                 }
             }
         }

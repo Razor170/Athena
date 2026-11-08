@@ -1,10 +1,10 @@
 //! Draws the Intel Supervisor panel, following the approved mockup
 //! (<https://claude.ai/artifact/AAU2CByJPT4bJj9xbcFqeY>).
 //!
-//! So far (PR 4 of 6): the toolbar (region picker, Follow, pilot chips,
-//! alert range, Mute), the map with the alert banner, a draggable split,
-//! and the intel list. Settings has the "Intel channels", "Alerts" and
-//! "Map" boxes.
+//! The toolbar (region picker, Follow, pilot chips, alert range, Mute),
+//! the map with the alert banner and tags, a draggable split, and the
+//! intel list with zKillboard links. Settings has the "Intel channels",
+//! "Alerts", "Map" and "System tags" boxes.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -12,6 +12,7 @@ use std::time::Duration;
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke, Vec2};
 
 use super::alerts::{self, SystemMark};
+use super::lookup;
 use super::sound::{self, SoundKind};
 use super::tags;
 use super::{IntelSupervisor, Report, View, map, now};
@@ -29,6 +30,7 @@ const CHIP_TEXT: Color32 = Color32::from_rgb(0xcf, 0xe2, 0xff);
 const HANDLE: Color32 = Color32::from_rgb(0x4a, 0x4f, 0x57);
 const NOTE: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x8a);
 const TEXT: Color32 = Color32::from_rgb(0xc8, 0xc8, 0xc8);
+const PILOT_NAME: Color32 = Color32::from_rgb(0x8f, 0xba, 0xff);
 const SHIP_BORDER: Color32 = Color32::from_rgb(0x55, 0x55, 0x55);
 const SHIP_TEXT: Color32 = Color32::from_rgb(0xe8, 0xe8, 0xe8);
 // Report cards: new (red), faded, cleared, and past the fade time.
@@ -256,6 +258,7 @@ fn map_and_list(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
             alert_frame: module.alert.is_some() && module.settings.flash,
             fade_minutes: module.settings.fade_minutes,
             tags: &shown_tags,
+            activity: &module.activity,
         },
     );
     drop(shown_tags);
@@ -309,6 +312,11 @@ fn alert_banner(module: &mut IntelSupervisor, ui: &mut egui::Ui, map_rect: egui:
         n => format!("{system} · {} from {pilots}", alerts::jumps_text(n)),
     };
     let mut details: Vec<String> = alert.report.message.ships.clone();
+    details.extend(
+        lookup::pilots_to_show(&alert.report.message.pilot_candidates, &module.characters)
+            .into_iter()
+            .map(|(name, _)| name),
+    );
     details.push(format!("reported by {}", alert.report.sender));
     details.push(clock_text(alert.report.time.unix_seconds));
 
@@ -417,6 +425,8 @@ fn report_list(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
     let now = now();
     let fade = module.fade_seconds();
     let alert_jumps = module.alert_jumps();
+    // A clicked pilot name; opened after the loop, which borrows the reports.
+    let mut open_link: Option<String> = None;
     for report in &module.reports {
         let jumps = alerts::report_jumps(report, &module.distances);
         if module.settings.only_in_range && jumps.is_none_or(|j| j > alert_jumps) {
@@ -483,16 +493,41 @@ fn report_list(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.add_space(58.0);
+                    // Guesses ESI confirmed as characters: zKillboard links.
+                    for (name, id) in
+                        lookup::pilots_to_show(&report.message.pilot_candidates, &module.characters)
+                    {
+                        let link = ui
+                            .add(
+                                egui::Label::new(RichText::new(&name).color(PILOT_NAME).strong())
+                                    .sense(egui::Sense::click()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("Open on zKillboard");
+                        if link.clicked() {
+                            open_link = Some(lookup::zkillboard_url(id));
+                        }
+                    }
                     let color = if named { TEXT } else { DIM };
                     ui.label(RichText::new(&report.text).color(color))
                         .on_hover_text(format!("{} > {}", report.sender, report.text));
                 });
             });
     }
+    if let Some(url) = open_link {
+        match crate::shell::open_url(&url) {
+            Ok(()) => {
+                module.problems.remove("browser");
+            }
+            Err(problem) => {
+                module.problems.insert("browser", problem);
+            }
+        }
+    }
     ui.add_space(6.0);
     ui.label(
         small(format!(
-            "Reports fade from red to grey over {} minutes; \"{}\" turns the system green.",
+            "Pilot names open zKillboard in your browser. Reports fade from red to grey over {} minutes; \"{}\" turns the system green.",
             module.settings.fade_minutes,
             module.settings.clear_words.join("\" or \"")
         ))
@@ -551,6 +586,20 @@ fn settings_view(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
         ui.label(
             small(
                 "The active pilot is the one picked on the Follow button, or whoever jumped last.",
+            )
+            .color(DIM),
+        );
+        let mut tint = module.settings.esi_tint;
+        if ui
+            .checkbox(&mut tint, "Tint systems by ESI kills and jumps (last hour)")
+            .changed()
+        {
+            module.set_esi_tint(tint);
+        }
+        ui.label(
+            small(
+                "The tint uses ESI's public data, refreshed at most once an hour. Off by default. \
+                 Purple glow: player kills; grey-blue glow: jumps. Hover a system for the numbers.",
             )
             .color(DIM),
         );
