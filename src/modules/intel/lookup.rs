@@ -8,8 +8,9 @@
 //!   again, when the name next turns up.
 //! - **Activity tint (optional):** `GET /universe/system_kills` and
 //!   `/universe/system_jumps`, the kills and jumps of the last hour per
-//!   system. ESI updates them once an hour, so they are fetched at most
-//!   once an hour, and only while the tint is switched on.
+//!   system. ESI updates them once an hour and says when (`Expires`), so
+//!   they are fetched just after that, at most once an hour, and only
+//!   while the tint is switched on.
 //!
 //! Only public endpoints, no login. Requests block, which is why they run
 //! here and never on the UI thread; results come back through a channel
@@ -26,10 +27,13 @@ use crate::esi::{EsiClient, Fetched};
 
 /// ESI takes at most this many names per lookup.
 const NAMES_PER_CALL: usize = 500;
-/// Names asked for within this time go into one call.
+/// Names asked for within this time of the first one go into one call.
 const GATHER: Duration = Duration::from_millis(500);
-/// Kills and jumps change once an hour.
+/// Kills and jumps change once an hour. ESI says exactly when (its
+/// `Expires` header); this is the fallback if it doesn't.
 const ACTIVITY_EVERY: Duration = Duration::from_secs(60 * 60);
+/// Asked a little after ESI's `Expires`, so the new numbers are surely there.
+const AFTER_EXPIRES: Duration = Duration::from_secs(30);
 /// After a failed fetch, try again this much later.
 const RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
 
@@ -127,6 +131,9 @@ struct JumpsRow {
 fn run(requests: Receiver<Request>, answers: Sender<Answer>, egui_ctx: egui::Context) {
     let mut client: Option<EsiClient> = None;
     let mut names: Vec<String> = Vec::new();
+    // When the gathered names go out: half a second after the first one,
+    // however many more arrive meanwhile.
+    let mut names_due: Option<Instant> = None;
     let mut activity_on = false;
     let mut activity_due: Option<Instant> = None;
     let mut etags: (Option<String>, Option<String>) = (None, None);
@@ -134,13 +141,14 @@ fn run(requests: Receiver<Request>, answers: Sender<Answer>, egui_ctx: egui::Con
     let mut had_problem = false;
 
     loop {
-        // Sleep until a request comes, or the next fetch is due.
-        let wait = if !names.is_empty() {
-            GATHER
-        } else if let Some(due) = activity_due.filter(|_| activity_on) {
-            due.saturating_duration_since(Instant::now())
-        } else {
-            Duration::from_secs(3600)
+        // Sleep until a request comes, or the next call is due.
+        let next_due = [names_due, activity_due.filter(|_| activity_on)]
+            .into_iter()
+            .flatten()
+            .min();
+        let wait = match next_due {
+            Some(due) => due.saturating_duration_since(Instant::now()),
+            None => Duration::from_secs(3600),
         };
         match requests.recv_timeout(wait) {
             Ok(Request::Names(new)) => {
@@ -149,8 +157,9 @@ fn run(requests: Receiver<Request>, answers: Sender<Answer>, egui_ctx: egui::Con
                         names.push(name);
                     }
                 }
-                // Gather more before calling.
-                continue;
+                if names_due.is_none() {
+                    names_due = Some(Instant::now() + GATHER);
+                }
             }
             Ok(Request::Activity(on)) => {
                 activity_on = on;
@@ -163,6 +172,13 @@ fn run(requests: Receiver<Request>, answers: Sender<Answer>, egui_ctx: egui::Con
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
+        }
+        let now = Instant::now();
+        let names_ready = names_due.is_some_and(|due| due <= now);
+        let activity_ready = activity_on && activity_due.is_some_and(|due| due <= now);
+        if !names_ready && !activity_ready {
+            // Nothing due yet (say, more names to gather): sleep again.
+            continue;
         }
 
         let client = match &mut client {
@@ -177,7 +193,7 @@ fn run(requests: Receiver<Request>, answers: Sender<Answer>, egui_ctx: egui::Con
         };
 
         let mut problem: Option<String> = None;
-        if !names.is_empty() {
+        if names_ready {
             for chunk in names.chunks(NAMES_PER_CALL) {
                 match look_up(client, chunk) {
                     Ok(found) => {
@@ -190,12 +206,13 @@ fn run(requests: Receiver<Request>, answers: Sender<Answer>, egui_ctx: egui::Con
                 }
             }
             names.clear();
+            names_due = None;
         }
-        if activity_on && activity_due.is_some_and(|due| due <= Instant::now()) {
+        if activity_ready {
             match fetch_activity(client, &mut etags, &mut activity) {
-                Ok(()) => {
+                Ok(fresh_for) => {
                     let _ = answers.send(Answer::Activity(activity.clone()));
-                    activity_due = Some(Instant::now() + ACTIVITY_EVERY);
+                    activity_due = Some(Instant::now() + fresh_for);
                 }
                 Err(e) => {
                     problem = Some(format!("ESI kills and jumps: {e:#}"));
@@ -207,6 +224,7 @@ fn run(requests: Receiver<Request>, answers: Sender<Answer>, egui_ctx: egui::Con
             had_problem = problem.is_some();
             let _ = answers.send(Answer::Problem(problem));
         }
+        // Something was sent: names, numbers or a problem.
         egui_ctx.request_repaint();
     }
 }
@@ -241,13 +259,16 @@ fn match_names(names: &[String], found: Vec<NamedId>) -> Vec<(String, Option<Cha
 
 /// Fetches kills and jumps, sending the last ETags so unchanged data costs
 /// almost nothing. Keeps the old numbers for a list that didn't change.
+/// Returns how long until ESI has newer numbers.
 fn fetch_activity(
     client: &mut EsiClient,
     etags: &mut (Option<String>, Option<String>),
     activity: &mut HashMap<i64, SystemActivity>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Duration> {
     let kills = client.get_json::<Vec<KillsRow>>("/universe/system_kills", etags.0.as_deref())?;
+    let kills_fresh_for = client.last_expires_in;
     let jumps = client.get_json::<Vec<JumpsRow>>("/universe/system_jumps", etags.1.as_deref())?;
+    let fresh_for = next_activity_fetch(kills_fresh_for, client.last_expires_in);
     if let Fetched::Data { value, etag, .. } = kills {
         etags.0 = etag;
         for entry in activity.values_mut() {
@@ -272,17 +293,30 @@ fn fetch_activity(
         }
     }
     activity.retain(|_, a| *a != SystemActivity::default());
-    Ok(())
+    Ok(fresh_for)
+}
+
+/// When to fetch kills and jumps again: just after the later of the two
+/// lists expires, at least a minute and at most an hour from now.
+fn next_activity_fetch(kills: Option<Duration>, jumps: Option<Duration>) -> Duration {
+    match kills.max(jumps) {
+        Some(expires_in) => {
+            (expires_in + AFTER_EXPIRES).clamp(Duration::from_secs(60), ACTIVITY_EVERY)
+        }
+        None => ACTIVITY_EVERY,
+    }
 }
 
 /// Which of a report's pilot-name guesses to show, with ESI's spelling:
 /// the ones that are characters, longest first, leaving out a shorter
 /// guess inside a longer one already shown ("Evil" inside "Evil Pilot").
 ///
-/// Lots of ordinary words are also character names ("anyone", "around"),
-/// so a one-word guess counts only when it is spelled exactly like the
-/// character, upper and lower case included. Names dragged into chat
-/// always are; a chatty lowercase word usually isn't.
+/// Lots of ordinary words and phrases are also character names
+/// ("anyone", "big blob", "be careful"), so a guess counts only when it is
+/// spelled exactly like the character, upper and lower case included, and
+/// has at least one capital letter. Names dragged into chat always are
+/// spelled exactly; chatty lowercase words aren't, and the few characters
+/// with all-lowercase names ("going") would mostly be false hits.
 pub fn pilots_to_show(
     candidates: &[String],
     known: &HashMap<String, Option<Character>>,
@@ -293,7 +327,7 @@ pub fn pilots_to_show(
         let Some(Some(character)) = known.get(&candidate.to_lowercase()) else {
             continue;
         };
-        if !candidate.contains(' ') && *candidate != character.name {
+        if *candidate != character.name || !candidate.chars().any(char::is_uppercase) {
             continue;
         }
         let inside_shown = shown.iter().any(|(name, _)| {
@@ -343,10 +377,18 @@ mod tests {
 
     #[test]
     fn shorter_guesses_inside_a_shown_name_are_left_out() {
-        let candidates: Vec<String> = ["evil pilot", "Evil", "Pilot", "Scout", "anyone"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let candidates: Vec<String> = [
+            "Evil Pilot",
+            "Evil",
+            "Pilot",
+            "Scout",
+            "anyone",
+            "big blob",
+            "going",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let character = |id: i64, name: &str| {
             Some(Character {
                 id,
@@ -359,17 +401,38 @@ mod tests {
             ("pilot".to_string(), None),
             ("scout".to_string(), character(3, "Scout")),
             ("anyone".to_string(), character(4, "Anyone")),
+            // Real characters with all-lowercase names.
+            ("big blob".to_string(), character(5, "big blob")),
+            ("going".to_string(), character(6, "going")),
         ]
         .into_iter()
         .collect();
-        // "evil pilot" shows with ESI's spelling; "Evil" is inside it;
-        // "anyone" is a character, but written in lowercase.
+        // "Evil" is inside "Evil Pilot"; "anyone" is a character but
+        // spelled differently; "big blob" and "going" have no capital.
         assert_eq!(
             pilots_to_show(&candidates, &known),
             [("Evil Pilot".to_string(), 1), ("Scout".to_string(), 3)]
         );
+        // Spelled differently from the character: no link.
+        assert!(pilots_to_show(&["evil pilot".to_string()], &known).is_empty());
         // Unknown yet: nothing shown.
         assert!(pilots_to_show(&candidates, &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn kills_and_jumps_are_fetched_just_after_they_expire() {
+        let minutes = |m: u64| Some(Duration::from_secs(m * 60));
+        assert_eq!(
+            next_activity_fetch(minutes(14), minutes(20)),
+            Duration::from_secs(20 * 60) + AFTER_EXPIRES
+        );
+        // Already expired: not sooner than a minute.
+        assert_eq!(
+            next_activity_fetch(Some(Duration::ZERO), None),
+            Duration::from_secs(60)
+        );
+        assert_eq!(next_activity_fetch(None, None), ACTIVITY_EVERY);
+        assert_eq!(next_activity_fetch(minutes(600), None), ACTIVITY_EVERY);
     }
 
     #[test]

@@ -59,6 +59,9 @@ pub struct EsiClient {
     /// count resets. Updated from every response.
     error_limit_remain: Option<i64>,
     error_limit_reset_secs: Option<u64>,
+    /// How long until ESI has new data for the last request: its `Expires`
+    /// header minus its `Date` header. `None` if either was missing.
+    pub last_expires_in: Option<Duration>,
 }
 
 impl EsiClient {
@@ -72,6 +75,7 @@ impl EsiClient {
             http,
             error_limit_remain: None,
             error_limit_reset_secs: None,
+            last_expires_in: None,
         })
     }
 
@@ -139,6 +143,7 @@ impl EsiClient {
                 Err(e) => return Err(e).with_context(|| format!("request to {url}")),
             };
             self.read_limits(&response);
+            self.last_expires_in = expires_in(&response);
 
             let status = response.status();
             if status.is_success() || status == StatusCode::NOT_MODIFIED {
@@ -186,6 +191,49 @@ impl EsiClient {
 }
 
 /// A response header as text, if present and readable.
+/// `Expires` minus `Date`: how long ESI's answer stays current. Both come
+/// from ESI's clock, so the PC's clock being off doesn't matter.
+fn expires_in(response: &Response) -> Option<Duration> {
+    let expires = http_date_seconds(&header_text(response, "expires")?)?;
+    let date = http_date_seconds(&header_text(response, "date")?)?;
+    u64::try_from(expires - date).ok().map(Duration::from_secs)
+}
+
+/// An HTTP date such as "Sun, 08 Nov 2026 16:49:14 GMT" as seconds since
+/// 1970. Only this one format, which is the one HTTP requires.
+fn http_date_seconds(text: &str) -> Option<i64> {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    let [_, day, month, year, time, "GMT"] = parts[..] else {
+        return None;
+    };
+    let day: i64 = day.parse().ok()?;
+    let month = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .iter()
+    .position(|m| *m == month)? as i64
+        + 1;
+    let year: i64 = year.parse().ok()?;
+    let clock: Vec<i64> = time
+        .split(':')
+        .map(|part| part.parse().ok())
+        .collect::<Option<Vec<i64>>>()?;
+    let [hours, minutes, seconds] = clock[..] else {
+        return None;
+    };
+    // Days since 1970-01-01 for a date (Howard Hinnant's well-known
+    // "days from civil" calculation; March is treated as the first month
+    // so that leap days fall at the end of the year).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let year_of_era = y - era * 400;
+    let shifted_month = (month + 9) % 12;
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hours * 3600 + minutes * 60 + seconds)
+}
+
 fn header_text(response: &Response, name: &str) -> Option<String> {
     response
         .headers()
@@ -193,4 +241,25 @@ fn header_text(response: &Response, name: &str) -> Option<String> {
         .to_str()
         .ok()
         .map(|text| text.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_dates() {
+        assert_eq!(http_date_seconds("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
+        // `date -u -d "2026-11-08 16:49:14" +%s`
+        assert_eq!(
+            http_date_seconds("Sun, 08 Nov 2026 16:49:14 GMT"),
+            Some(1_794_156_554)
+        );
+        // A leap day.
+        assert_eq!(
+            http_date_seconds("Thu, 29 Feb 2024 12:00:00 GMT"),
+            Some(1_709_208_000)
+        );
+        assert_eq!(http_date_seconds("yesterday"), None);
+    }
 }
