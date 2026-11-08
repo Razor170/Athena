@@ -15,14 +15,16 @@ pub struct AthenaApp {
     data_dir: DataDir,
     saver: Saver,
     settings_panel: SettingsPanel,
+    /// The layout text we last handed to the saver, so we only save when it changed.
+    last_saved_layout: String,
 }
 
 /// State of the settings tab that isn't a setting itself.
 struct SettingsPanel {
     /// The log folder text while the user is typing. Applied when the field loses focus.
     log_folder_text: String,
-    /// Shown when `settings.toml` couldn't be read.
-    warning: Option<String>,
+    /// Problems to show the user, such as a settings or layout file that couldn't be read.
+    warnings: Vec<String>,
     /// How many times the window was drawn. Lets us check that Athena doesn't
     /// redraw while idle: the number should only go up when something happens.
     frames_drawn: u64,
@@ -38,13 +40,18 @@ impl AthenaApp {
         settings_warning: Option<String>,
         saver: Saver,
     ) -> AthenaApp {
-        let modules = modules::create_all(egui_ctx);
+        let modules = modules::create_all(egui_ctx, &settings);
         let module_ids: Vec<String> = modules.iter().map(|m| m.id().to_string()).collect();
         // Reading the layout file here is fine: this runs once before the window shows.
-        let layout = Layout::load(&data_dir.path, &module_ids);
+        let (layout, layout_warning) = Layout::load(&data_dir.path, &module_ids);
+        // `into_iter().flatten()` keeps only the warnings that are `Some`.
+        let warnings = [settings_warning, layout_warning]
+            .into_iter()
+            .flatten()
+            .collect();
         let settings_panel = SettingsPanel {
             log_folder_text: settings.log_folder.display().to_string(),
-            warning: settings_warning,
+            warnings,
             frames_drawn: 0,
             last_frame_cpu: None,
         };
@@ -55,6 +62,7 @@ impl AthenaApp {
             data_dir,
             saver,
             settings_panel,
+            last_saved_layout: String::new(),
         }
     }
 
@@ -65,10 +73,15 @@ impl AthenaApp {
         }
     }
 
-    fn save_layout(&self) {
-        if let Ok(text) = self.layout.to_toml() {
+    /// Saves the layout if it differs from what we saved last time.
+    fn save_layout_if_changed(&mut self) {
+        let Ok(text) = self.layout.to_toml() else {
+            return;
+        };
+        if text != self.last_saved_layout {
             self.saver
-                .save(Layout::file_path(&self.data_dir.path), text);
+                .save(Layout::file_path(&self.data_dir.path), text.clone());
+            self.last_saved_layout = text;
         }
     }
 
@@ -133,12 +146,23 @@ impl eframe::App for AthenaApp {
 
         if settings_changed {
             self.save_settings();
+            for module in &mut self.modules {
+                module.settings_changed(&self.settings);
+            }
+        }
+
+        // Save the layout as soon as it changes, so a crash or a Windows
+        // shutdown doesn't lose it. `ui` only runs when something happened,
+        // so this costs nothing while idle. Skip it while a mouse button is
+        // held, so dragging a tab doesn't save on every frame.
+        if !ui.input(|i| i.pointer.any_down()) {
+            self.save_layout_if_changed();
         }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_settings();
-        self.save_layout();
+        self.save_layout_if_changed();
         // Wait for the writes to finish before the process ends.
         self.saver.finish();
     }
@@ -191,7 +215,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
 fn settings_ui(ui: &mut egui::Ui, viewer: &mut TabViewer) {
     let panel = &mut *viewer.panel;
     egui::ScrollArea::vertical().show(ui, |ui| {
-        if let Some(warning) = &panel.warning {
+        for warning in &panel.warnings {
             ui.colored_label(ui.visuals().warn_fg_color, warning);
             ui.add_space(8.0);
         }

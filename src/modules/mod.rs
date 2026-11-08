@@ -44,15 +44,20 @@ pub trait Module {
 
     /// Draws the module's panel. Only called while its tab is visible.
     fn ui(&mut self, ui: &mut egui::Ui, ctx: &ModuleContext);
+
+    /// Called after the user changed a setting, with the new settings.
+    /// For example, a log watcher restarts here when the log folder changed.
+    fn settings_changed(&mut self, _settings: &Settings) {}
 }
 
 /// Creates every module, in the order they appear in the View menu.
 ///
 /// `egui_ctx` can be cloned and handed to background threads so they can call
-/// `request_repaint()` when they have new data.
-pub fn create_all(egui_ctx: &egui::Context) -> Vec<Box<dyn Module>> {
-    // `egui_ctx` is unused until a module needs it; this keeps clippy quiet.
-    let _ = egui_ctx;
+/// `request_repaint()` when they have new data. `settings` are the settings at
+/// startup, for example the log folder a watcher should start on.
+pub fn create_all(egui_ctx: &egui::Context, settings: &Settings) -> Vec<Box<dyn Module>> {
+    // Unused until a module needs them; this keeps clippy quiet.
+    let _ = (egui_ctx, settings);
     vec![
         Box::new(welcome::Welcome),
         // Add new modules here, one line each.
@@ -65,7 +70,7 @@ mod tests {
 
     #[test]
     fn module_ids_are_unique() {
-        let modules = create_all(&egui::Context::default());
+        let modules = create_all(&egui::Context::default(), &Settings::default());
         let mut ids: Vec<&str> = modules.iter().map(|m| m.id()).collect();
         let count = ids.len();
         ids.sort();

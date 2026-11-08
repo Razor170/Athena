@@ -47,17 +47,26 @@ impl Layout {
         }
     }
 
-    /// Loads the saved layout, or the default one if there is none or it can't be read.
-    pub fn load(data_dir: &Path, module_ids: &[String]) -> Layout {
-        let saved = fs::read_to_string(Layout::file_path(data_dir))
-            .ok()
-            .and_then(|text| Layout::from_toml(&text).ok());
-        match saved {
-            Some(mut layout) => {
+    /// Loads the saved layout. A missing file gives the default layout. A
+    /// broken file also gives the default, plus a warning to show the user.
+    pub fn load(data_dir: &Path, module_ids: &[String]) -> (Layout, Option<String>) {
+        let path = Layout::file_path(data_dir);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => return (Layout::default_for(module_ids), None),
+        };
+        match Layout::from_toml(&text) {
+            Ok(mut layout) => {
                 layout.fit_to_modules(module_ids);
-                layout
+                (layout, None)
             }
-            None => Layout::default_for(module_ids),
+            Err(e) => (
+                Layout::default_for(module_ids),
+                Some(format!(
+                    "{} could not be read, so the default layout is used: {e}",
+                    path.display()
+                )),
+            ),
         }
     }
 
@@ -145,6 +154,17 @@ mod tests {
         let loaded = Layout::from_toml(&text).unwrap();
         assert!(loaded.is_open(&module("b")));
         assert_eq!(loaded.dock.surfaces_count(), 2);
+    }
+
+    #[test]
+    fn broken_file_gives_default_and_warning() {
+        let dir = std::env::temp_dir().join(format!("athena-test-layout-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(Layout::file_path(&dir), "dock = [").unwrap();
+        let (layout, warning) = Layout::load(&dir, &ids(&["a"]));
+        assert!(layout.is_open(&module("a")));
+        assert!(warning.is_some());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
