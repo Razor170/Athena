@@ -33,7 +33,7 @@ Kevin is learning Rust and reviews the code, so readability beats cleverness.
 - Prefer plain structs, enums and functions over heavy generics, trait magic or macros.
 - Add a short comment where Rust-specific behavior isn't obvious (lifetimes, `Arc<Mutex<…>>`, async boundaries).
 - Handle errors with `Result`, plus `anyhow` in the app or `thiserror` in library-like modules. No `unwrap()`/`expect()` outside tests and startup code where failure should end the app.
-- Each dashboard module implements the shared module trait and lives in its own folder (exact layout set in step 2, then recorded here).
+- Each dashboard module implements the `Module` trait from `src/modules/mod.rs` and lives in its own folder, `src/modules/<name>/mod.rs`. Register it with one line in `modules::create_all`. Its `id()` is saved in the layout file, so never change it once released. Background work talks to the module through a channel, which the module drains in `update()`.
 - Add a crate only when it clearly earns its place, and say why in the PR.
 
 ## Checks before every push
