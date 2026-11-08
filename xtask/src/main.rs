@@ -199,7 +199,10 @@ fn build_static_data(zip_path: &Path, out: &Path) -> Result<()> {
         let (Some(name), Some(volume_m3)) = (english(&t.name), t.volume) else {
             continue;
         };
-        if !t.published {
+        // "Batch Compressed ..." are retired types from before the 2022
+        // compression change. Nobody mines them, and their name would fool
+        // the "Compressed ..." check in the app.
+        if !t.published || name.starts_with("Batch Compressed ") {
             continue;
         }
         items.insert(
