@@ -8,6 +8,8 @@
 //! - [`prices`]: Jita prices from ESI (refreshed hourly) and ore values.
 //! - [`watcher`]: follows the game log files on a background thread.
 //! - [`clipboard`]: picks up belt scans copied in EVE (Windows only).
+//! - [`store`]: the mining history in `mining.sqlite` (values frozen at
+//!   "End session") and the day and week totals.
 //! - [`scan`]: parses pasted Mining Survey Scanner results and works out how
 //!   fast a belt is being mined.
 //!
@@ -32,4 +34,5 @@ pub mod history;
 pub mod prices;
 pub mod scan;
 pub mod session;
+pub mod store;
 pub mod watcher;
