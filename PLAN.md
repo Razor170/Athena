@@ -21,13 +21,13 @@ Athena is a personal desktop companion for EVE Online. It reads two sources, the
 |---|---|---|
 | Language | Rust | No GC pauses or heavy runtime, a small single exe |
 | UI | `egui` / `eframe` | Redraws only on change, GPU drawn, supports transparent always-on-top windows for overlays |
-| Render backend | `glow` (OpenGL) or `wgpu`, decided in step 2 by measuring idle RAM/CPU and startup time | `glow` is usually lighter; a 2D map doesn't need `wgpu` |
-| Dockable panels | `egui_tiles` or `egui_dock` (decided in step 2) | Movable dashboard modules |
+| Render backend | `glow` (OpenGL) by default; `wgpu` available behind the `wgpu` cargo feature until both are measured on Windows | `glow` is usually lighter; a 2D map doesn't need `wgpu` |
+| Dockable panels | `egui_dock` (decided in step 2) | Tabs that can be docked, split, resized and pulled out into floating windows, with built-in `serde` support for saving the layout |
 | Log watching | `notify` for new files + a cheap size poll of active files | Windows doesn't reliably raise change events for files another process keeps open |
 | HTTP / ESI | `reqwest` (with `rustls`) + `tokio` | Async ESI calls; `rustls` keeps the exe free of extra TLS DLLs |
 | Local storage | SQLite via `rusqlite` (bundled) | Static data and history in one file |
 | Tokens | Windows Credential Manager via `keyring` | Refresh tokens are not stored in plain text |
-| Config | `serde` + TOML | Human-readable settings next to the exe |
+| Config | `serde` + TOML | Human-readable settings and layout next to the exe (`data\settings.toml`, `data\layout.toml`) |
 
 Considered and rejected: **Tauri** (WebView uses more memory), **C# / WPF** (large maps tend to feel sluggish).
 
@@ -66,6 +66,7 @@ Agree on goals, the stack and the roadmap.
 - GitHub Actions on `windows-latest`: `cargo fmt --check`, `cargo clippy -- -D warnings`, tests and a release build, uploaded as a zip artifact. Version tags (`v*`) create a GitHub Release with the portable zip.
 - Measure idle CPU/RAM against the targets above with both render backends, pick one, and record the numbers as the baseline.
 - Note in the README that the exe isn't code-signed, so Windows SmartScreen warns on first run ("More info" then "Run anyway").
+- **Done:** `egui_dock` picked over `egui_tiles`. Baseline from the Linux sandbox (glow, software rendering under Xvfb): 0 CPU ticks over 30 s idle with the window open, so no idle repaints. RAM there (about 120 MB) is dominated by the software OpenGL driver and doesn't say much about Windows; the Windows numbers for both renderers are still open.
 
 ### Step 3: Data foundations
 - Log watcher and parsers for chat and game logs, with unit tests from sample log lines. Fixtures taken from real logs are anonymized (character names, channel contents) before they're committed.
@@ -90,4 +91,4 @@ Agree on goals, the stack and the roadmap.
 
 - Details of the Mining Supervisor and Intel Supervisor.
 - Which ESI scopes are needed (depends on the modules).
-- `egui_tiles` vs `egui_dock`, and `glow` vs `wgpu`, to be decided in step 2 with a quick prototype and measurements.
+- `glow` vs `wgpu`: needs idle CPU/RAM and startup numbers from Kevin's Windows PC (the sandbox only has a software renderer). Build both from the step 2 PR and compare with Task Manager; the Settings tab shows the renderer and a frame counter.

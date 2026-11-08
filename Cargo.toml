@@ -1,0 +1,36 @@
+[package]
+name = "athena"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "A lightweight, portable Windows desktop companion for EVE Online"
+publish = false
+
+[features]
+# Build with the wgpu renderer instead of glow (OpenGL). Only used to compare
+# the two backends: `cargo build --release --features wgpu`.
+wgpu = ["eframe/wgpu"]
+
+[dependencies]
+# UI framework. Default features are turned off so we only pull in what we use:
+# the glow (OpenGL) renderer, the built-in fonts, and the Linux window backends
+# (x11/wayland do nothing on Windows but let the app build in a Linux sandbox).
+eframe = { version = "0.36", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "x11",
+    "wayland",
+] }
+# Dockable tabs: drag panels around, split, resize. `serde` lets us save the layout.
+egui_dock = { version = "0.21", features = ["serde"] }
+# Finds the Documents and %APPDATA% folders the Windows way (handles redirected folders).
+directories = "6"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+anyhow = "1"
+
+[profile.release]
+# Smaller, faster exe at the cost of a slower release build.
+lto = "thin"
+codegen-units = 1
+strip = true
