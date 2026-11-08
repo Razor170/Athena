@@ -132,7 +132,13 @@ pub enum MiningEvent {
     },
     /// A mining module switched itself off, e.g. because the asteroid is
     /// depleted or the crystal broke. `reason` is the rest of the message.
-    MinerStopped { module: String, reason: String },
+    /// `crystal_destroyed` is true when the mining crystal broke, so the
+    /// module keeps stopping until a new crystal is loaded.
+    MinerStopped {
+        module: String,
+        reason: String,
+        crystal_destroyed: bool,
+    },
 }
 
 /// A mining event with the time it happened.
@@ -226,9 +232,13 @@ fn parse_notify_message(message: &str) -> Option<MiningEvent> {
         if !is_miner {
             return None;
         }
+        let reason = reason.trim();
+        // "due to the destruction of the ... Mining Crystal ... it was fitted with."
+        let crystal_destroyed = reason.contains("destruction of") && reason.contains("Crystal");
         return Some(MiningEvent::MinerStopped {
             module: module.trim().to_string(),
-            reason: reason.trim().to_string(),
+            reason: reason.to_string(),
+            crystal_destroyed,
         });
     }
     None
@@ -437,10 +447,15 @@ mod tests {
     fn parses_miner_stopped_lines() {
         let depleted = "[ 2026.11.08 07:33:00 ] (notify) Modulated Strip Miner II deactivates as it finds the resource it was harvesting a pale shadow of its former glory.";
         let crystal = "[ 2026.11.08 07:33:00 ] (notify) Modulated Strip Miner II deactivates due to the destruction of the Variegated Asteroid Mining Crystal Type B II it was fitted with. ";
-        for line in [depleted, crystal] {
+        for (line, expect_crystal) in [(depleted, false), (crystal, true)] {
             match parse_mining_line(line).unwrap().event {
-                MiningEvent::MinerStopped { module, .. } => {
-                    assert_eq!(module, "Modulated Strip Miner II")
+                MiningEvent::MinerStopped {
+                    module,
+                    crystal_destroyed,
+                    ..
+                } => {
+                    assert_eq!(module, "Modulated Strip Miner II");
+                    assert_eq!(crystal_destroyed, expect_crystal);
                 }
                 other => panic!("unexpected event {other:?}"),
             }
