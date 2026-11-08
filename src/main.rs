@@ -8,9 +8,41 @@ mod modules;
 mod settings;
 mod storage;
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 
+const STARTUP_ERROR_FILE: &str = "athena-startup-error.txt";
+
 fn main() -> Result<()> {
+    let result = run();
+    if let Err(error) = &result {
+        // Release builds have no console, so a startup error would vanish
+        // without a trace. Write it to a text file the user can find.
+        write_startup_error(&format!("{error:#}"));
+    }
+    result
+}
+
+/// Writes the error next to the exe, or into the temp folder if that fails.
+fn write_startup_error(text: &str) {
+    let next_to_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(STARTUP_ERROR_FILE)));
+    let places: Vec<PathBuf> = next_to_exe
+        .into_iter()
+        .chain(std::iter::once(
+            std::env::temp_dir().join(STARTUP_ERROR_FILE),
+        ))
+        .collect();
+    for path in places {
+        if std::fs::write(&path, text).is_ok() {
+            return;
+        }
+    }
+}
+
+fn run() -> Result<()> {
     // Startup code: if we can't find a writable data folder there is no point
     // in running, so errors here end the app.
     let data_dir = storage::DataDir::resolve().context("no writable data folder found")?;
@@ -22,9 +54,10 @@ fn main() -> Result<()> {
             .with_title("Athena")
             // Start maximized. The inner size is what Windows uses when the
             // user un-maximizes the window. Sizes are in logical points, so
-            // Windows display scaling (125%, 150%) is applied automatically.
+            // Windows display scaling (125%, 150%) is applied automatically;
+            // 1280x720 points still fits a 1080p screen at 150%.
             .with_maximized(true)
-            .with_inner_size([1600.0, 900.0])
+            .with_inner_size([1280.0, 720.0])
             .with_min_inner_size([800.0, 600.0]),
         renderer: renderer(),
         ..Default::default()
