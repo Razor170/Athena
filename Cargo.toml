@@ -51,6 +51,7 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_Memory",
     "Win32_UI_WindowsAndMessaging",
 ] }

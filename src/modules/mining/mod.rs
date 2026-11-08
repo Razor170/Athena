@@ -555,7 +555,9 @@ mod sound {
     /// plays it in the background.
     #[cfg(windows)]
     pub fn alert() {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONEXCLAMATION, MessageBeep};
+        // MessageBeep lives in the "Diagnostics::Debug" part of the bindings.
+        use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
+        use windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONEXCLAMATION;
         // SAFETY: MessageBeep takes a plain number and has no other effects.
         unsafe {
             MessageBeep(MB_ICONEXCLAMATION);
