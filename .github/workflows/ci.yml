@@ -35,22 +35,79 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Clippy (wgpu renderer)
         run: cargo clippy --locked --all-targets --features wgpu -- -D warnings
 
       - name: Tests
-        run: cargo test --locked
+        run: cargo test --locked --workspace
 
       - name: Release build
         run: cargo build --release --locked
+
+      # Static game data (ore volumes, reprocessing): built from the official
+      # SDE by `cargo xtask sde` and shipped next to the exe. The ~100 MB SDE
+      # zip is cached per SDE build, so it is only downloaded after a patch.
+      # If CCP's site is down, the newest cached SDE is used instead.
+      - name: Find latest SDE build
+        id: sde
+        shell: pwsh
+        run: |
+          # Saved to a file first: the site sends JSON Lines, which
+          # Invoke-WebRequest hands back as bytes rather than text.
+          $build = ""
+          try {
+            Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -OutFile sde-latest.jsonl https://developers.eveonline.com/static-data/tranquility/latest.jsonl
+            $build = "$((Get-Content -Raw sde-latest.jsonl | ConvertFrom-Json).buildNumber)"
+          } catch {
+            Write-Warning "Can't reach the SDE site: $_"
+          }
+          if ($build -notmatch '^\d+$') {
+            Write-Warning "No SDE build number found, using the newest cached SDE."
+            $build = "unavailable"
+          }
+          Write-Output "SDE build: $build"
+          "build=$build" >> $env:GITHUB_OUTPUT
+
+      - name: Cache SDE
+        id: sde-cache
+        uses: actions/cache@v4
+        with:
+          path: sde.zip
+          key: sde-${{ steps.sde.outputs.build }}
+          # No exact match: start from the newest SDE we have.
+          restore-keys: sde-
+
+      - name: Download SDE
+        if: steps.sde-cache.outputs.cache-hit != 'true' && steps.sde.outputs.build != 'unavailable'
+        shell: pwsh
+        run: |
+          $url = "https://developers.eveonline.com/static-data/tranquility/eve-online-static-data-${{ steps.sde.outputs.build }}-jsonl.zip"
+          for ($try = 1; $try -le 3; $try++) {
+            try {
+              Invoke-WebRequest -UseBasicParsing -TimeoutSec 600 -OutFile sde.new.zip $url
+              Move-Item -Force sde.new.zip sde.zip
+              exit 0
+            } catch {
+              Write-Warning "SDE download attempt $try failed: $_"
+              Start-Sleep -Seconds (15 * $try)
+            }
+          }
+          if (Test-Path sde.zip) {
+            Write-Warning "Using the older cached SDE instead."
+          } else {
+            Write-Error "No SDE available."
+            exit 1
+          }
 
       - name: Package portable zip
         shell: pwsh
         run: |
           $dir = "dist/Athena"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          cargo run --locked --package xtask -- sde sde.zip "$dir/static.sqlite"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           Copy-Item target/release/athena.exe "$dir/Athena.exe"
           Copy-Item README.md "$dir/README.md"
           Compress-Archive -Path "$dir" -DestinationPath dist/Athena-windows.zip -Force

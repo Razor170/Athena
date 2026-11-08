@@ -72,6 +72,7 @@ Agree on goals, the stack and the roadmap.
 - Log watcher and parsers for chat and game logs, with unit tests from sample log lines. Fixtures taken from real logs are anonymized (character names, channel contents) before they're committed.
 - ESI client with SSO (PKCE), token storage and multiple characters.
 - Static data import and lookup (systems, gates, jump routes).
+- **Done (ore part):** `cargo xtask sde` reads the official SDE zip (JSON Lines format) and writes `static.sqlite` with every ore, ice, moon ore and gas type (volume, portion size, compressed type, reprocessing outputs) plus the materials they reprocess into. CI downloads the SDE (cached per SDE build) and ships the file next to the exe. Systems and gates get added to the same file for the Intel Supervisor.
 
 ### Step 4: First modules
 - **Mining Supervisor:** for multiboxed miners, one row per character plus totals. Uses game logs, the SDE and ESI's public market data (no login).

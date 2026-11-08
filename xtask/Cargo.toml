@@ -1,0 +1,17 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Build helpers for Athena (not shipped): turns the EVE SDE into static.sqlite"
+publish = false
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+# The SDE is one JSON object per line (JSONL).
+serde_json = "1"
+# Reads the SDE zip directly, so it never has to be unpacked (it is ~700 MB unpacked).
+zip = { version = "9", default-features = false, features = ["deflate"] }
+# Same crate and version as the app, so the file format matches.
+rusqlite = { version = "0.41", features = ["bundled"] }

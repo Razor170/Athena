@@ -40,8 +40,8 @@ Kevin is learning Rust and reviews the code, so readability beats cleverness.
 
 ```
 cargo fmt --all
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
 CI (from step 2) runs `cargo fmt --check`, clippy with `-D warnings`, tests and a release build on `windows-latest`. If something is Windows-only and can't be tested in a Linux sandbox, say so in the PR rather than claiming it works.

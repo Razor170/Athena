@@ -1,3 +1,8 @@
 /target
 *.pdb
 /dist
+/static.sqlite
+/static.sqlite.tmp
+/sde.zip
+/sde-latest.jsonl
+/sde.new.zip
