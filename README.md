@@ -38,7 +38,8 @@ another log folder in Athena's settings):
 - **Borders:** red dashed means the miners stopped (for example the asteroid is depleted)
   or the hold is full, purple dashed means a mining crystal broke.
 - **Belt scan:** copy a Mining Survey Scanner result in EVE (Ctrl+A, Ctrl+C) and it shows up
-  in the panel. Copy another one later to see how fast the belt is going.
+  in the panel. Copy another one later to see how fast the belt is going; the rate always
+  compares the last two scans.
 - **End session** ends mining for all characters at once and stores it in History, valued
   with the Jita prices of that moment. That value never changes afterwards.
 - **Settings:** hold size and alert level for everyone (11,500 m³ and 70% by default),

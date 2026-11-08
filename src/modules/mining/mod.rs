@@ -44,7 +44,7 @@ use self::config::MiningSettings;
 use self::gamelog::LogTime;
 use self::history::GroupSession;
 use self::prices::{JitaPrices, PriceFetcher, PriceUpdate};
-use self::scan::BeltScan;
+use self::scan::{BeltScan, BeltScans};
 use self::session::{Alert, CharacterTracker, VolumeTable};
 use self::state::{SavedCharacter, SavedState};
 use self::store::{HistorySnapshot, HistoryStore, HistoryUpdate};
@@ -118,8 +118,8 @@ pub struct MiningSupervisor {
     caught_up: bool,
     alerts: VecDeque<AlertEntry>,
 
-    first_scan: Option<BeltScan>,
-    latest_scan: Option<BeltScan>,
+    /// The last two belt scans; the belt rate compares them.
+    belt_scans: BeltScans,
 
     history: HistorySnapshot,
 
@@ -238,8 +238,7 @@ impl MiningSupervisor {
             offsets,
             caught_up: false,
             alerts: VecDeque::new(),
-            first_scan: None,
-            latest_scan: None,
+            belt_scans: BeltScans::default(),
             history: HistorySnapshot::default(),
             watcher,
             price_fetcher,
@@ -318,17 +317,7 @@ impl MiningSupervisor {
 
     /// A new belt scan from the clipboard.
     fn add_scan(&mut self, scan: BeltScan) {
-        let same_belt = self
-            .first_scan
-            .as_ref()
-            .is_some_and(|first| scan::is_same_belt(first, &scan));
-        if same_belt {
-            self.latest_scan = Some(scan);
-        } else {
-            // A different belt (or the first scan): start over.
-            self.first_scan = Some(scan);
-            self.latest_scan = None;
-        }
+        self.belt_scans.add(scan);
     }
 
     /// True when prices and ore data are loaded, so a session can be valued.

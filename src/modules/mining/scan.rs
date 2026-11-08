@@ -15,7 +15,8 @@
 //!
 //! Two scans of the same belt taken some time apart give the rate at which
 //! the belt is being mined by everyone on it, and from that an estimate of
-//! when it will be empty.
+//! when it will be empty. The rate is rolling: each new scan is compared
+//! with the one before it, so it follows miners arriving and leaving.
 
 use super::gamelog::LogTime;
 
@@ -123,13 +124,54 @@ pub struct BeltProgress {
     pub seconds_to_clear: Option<i64>,
 }
 
-/// Compares the first and the latest scan of a belt.
+/// Scans closer together than this give no rate: the belt barely changed,
+/// so the number would be mostly noise.
+const MIN_SECONDS: i64 = 60;
+
+/// The last two scans of the current belt, for a rolling rate.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BeltScans {
+    /// The scan before `latest`, if there is one.
+    pub previous: Option<BeltScan>,
+    pub latest: Option<BeltScan>,
+}
+
+impl BeltScans {
+    /// Adds a new scan from the clipboard.
+    ///
+    /// - A later scan of the same belt moves the old latest scan to
+    ///   `previous`, so the rate always covers the last two scans.
+    /// - A scan less than `MIN_SECONDS` after the latest one (a quick
+    ///   re-copy) only replaces the latest scan. Keeping `previous` means the
+    ///   rate doesn't disappear just because the user copied twice.
+    /// - A scan of a different belt starts over.
+    pub fn add(&mut self, scan: BeltScan) {
+        match self.latest.take() {
+            Some(latest) if is_same_belt(&latest, &scan) => {
+                if scan.taken.seconds_since(latest.taken) >= MIN_SECONDS {
+                    self.previous = Some(latest);
+                }
+                self.latest = Some(scan);
+            }
+            _ => {
+                self.previous = None;
+                self.latest = Some(scan);
+            }
+        }
+    }
+
+    /// Forgets both scans ("New belt").
+    pub fn clear(&mut self) {
+        *self = BeltScans::default();
+    }
+}
+
+/// Compares an earlier and a later scan of a belt.
 ///
 /// The rate is only given when the scans are at least `MIN_SECONDS` apart
 /// and the belt actually shrank; otherwise it is `None` ("paste another scan
 /// later").
 pub fn belt_progress(first: &BeltScan, latest: &BeltScan) -> BeltProgress {
-    const MIN_SECONDS: i64 = 60;
     let m3_left = latest.total_m3();
     let m3_mined = (first.total_m3() - m3_left).max(0.0);
     let rocks_gone = first.rock_count().saturating_sub(latest.rock_count());
@@ -391,5 +433,62 @@ Mordunium\t4,000,000\t400,000 m3\t1 ISK\t1,507 m
         let bigger =
             BeltScan::parse("Omber\t900,000\t9,000,000 m3\t1 ISK\t64 km\n", at(600)).unwrap();
         assert!(!is_same_belt(&first, &bigger));
+    }
+
+    /// A copy of `SCAN` with the Mordunium rock at `units` and `m3`.
+    fn scan_with_mordunium(units: &str, m3: &str, secs: i64) -> BeltScan {
+        let text = format!(
+            "Hedbergite III-Grade\t166,650\t499,950 m3\t1 ISK\t30 km
+Omber\t900,000\t540,000 m3\t1 ISK\t64 km
+Scordite IV-Grade\t3,133,333\t469,999 m3\t1 ISK\t46 km
+Mordunium\t{units}\t{m3} m3\t1 ISK\t1,507 m
+"
+        );
+        BeltScan::parse(&text, at(secs)).unwrap()
+    }
+
+    #[test]
+    fn rate_rolls_over_the_last_two_scans() {
+        let mut scans = BeltScans::default();
+        scans.add(scan_with_mordunium("5,000,000", "500,000", 0));
+        assert!(scans.previous.is_none());
+        // 10 minutes later 100,000 m³ are gone.
+        scans.add(scan_with_mordunium("4,000,000", "400,000", 600));
+        // Another 10 minutes later only 20,000 m³ more are gone: the rate
+        // must follow the slower pace, not average it with the first scan.
+        scans.add(scan_with_mordunium("3,800,000", "380,000", 1_200));
+        let previous = scans.previous.as_ref().unwrap();
+        let latest = scans.latest.as_ref().unwrap();
+        assert_eq!(previous.taken, at(600));
+        assert_eq!(latest.taken, at(1_200));
+        let progress = belt_progress(previous, latest);
+        assert_eq!(progress.m3_mined, 20_000.0);
+        // 20,000 m³ in 10 minutes is 120,000 m³/h (floats, so allow rounding).
+        let rate = progress.m3_per_hour.unwrap();
+        assert!((rate - 120_000.0).abs() < 0.01, "rate was {rate}");
+    }
+
+    #[test]
+    fn quick_recopy_keeps_the_previous_scan() {
+        let mut scans = BeltScans::default();
+        scans.add(scan_with_mordunium("5,000,000", "500,000", 0));
+        scans.add(scan_with_mordunium("4,000,000", "400,000", 600));
+        // Copied again 20 s later: replaces the latest scan only.
+        scans.add(scan_with_mordunium("3,990,000", "399,000", 620));
+        assert_eq!(scans.previous.as_ref().unwrap().taken, at(0));
+        assert_eq!(scans.latest.as_ref().unwrap().taken, at(620));
+    }
+
+    #[test]
+    fn a_new_belt_starts_over() {
+        let mut scans = BeltScans::default();
+        scans.add(scan_with_mordunium("5,000,000", "500,000", 0));
+        scans.add(scan_with_mordunium("4,000,000", "400,000", 600));
+        let other = BeltScan::parse("Veldspar\t900,000\t50,000 m3\t1 ISK\t64 km\n", at(900));
+        scans.add(other.unwrap());
+        assert!(scans.previous.is_none());
+        assert_eq!(scans.latest.as_ref().unwrap().taken, at(900));
+        scans.clear();
+        assert_eq!(scans, BeltScans::default());
     }
 }

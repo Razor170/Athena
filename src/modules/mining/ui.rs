@@ -511,30 +511,32 @@ fn belt_scan(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
             });
         });
 
-        let Some(first) = &module.first_scan else {
+        let Some(latest) = &module.belt_scans.latest else {
             ui.label(
                 small("Copy a Mining Survey Scanner result in EVE (Ctrl+A, Ctrl+C) and it shows up here. Copy another one later to see how fast the belt is being mined.")
                     .color(DIM),
             );
             return;
         };
-        let latest = module.latest_scan.as_ref().unwrap_or(first);
-        let progress = scan::belt_progress(first, latest);
+        // The rate is rolling: the latest scan is compared with the one
+        // before it. With only one scan, it is compared with itself (no rate).
+        let previous = module.belt_scans.previous.as_ref();
+        let progress = scan::belt_progress(previous.unwrap_or(latest), latest);
         let value_left = scan_value(module, latest);
 
         let gap = 6.0;
         let tile_width = (ui.available_width() - 2.0 * gap) / 3.0;
         ui.spacing_mut().item_spacing = Vec2::new(gap, gap);
-        let compared = module.latest_scan.is_some();
+        let compared = previous.is_some();
         ui.horizontal(|ui| {
             let since = if compared {
-                format!("−{} since scan 1", short_m3(progress.m3_mined))
+                format!("−{} since last scan", short_m3(progress.m3_mined))
             } else {
                 "first scan".to_string()
             };
             tile(ui, tile_width, "m³ left", &short_m3(progress.m3_left), &since);
             let gone = if compared {
-                format!("{} gone since scan 1", progress.rocks_gone)
+                format!("{} gone since last scan", progress.rocks_gone)
             } else {
                 String::new()
             };
@@ -570,23 +572,22 @@ fn belt_scan(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
 
         family_table(module, ui, latest);
 
-        let footnote = match &module.latest_scan {
-            Some(latest) => format!(
-                "Scan 1 at {}, scan 2 at {} ({} apart). Copy a new survey scan in EVE (Ctrl+A, Ctrl+C) and it is picked up automatically.",
-                clock_text(first.taken.unix_seconds),
+        let footnote = match previous {
+            Some(previous) => format!(
+                "Previous scan at {}, latest at {} ({} apart). Copy a new survey scan in EVE (Ctrl+A, Ctrl+C) and it is picked up automatically; the rate always uses the last two scans.",
+                clock_text(previous.taken.unix_seconds),
                 clock_text(latest.taken.unix_seconds),
-                duration_text(latest.taken.seconds_since(first.taken))
+                duration_text(latest.taken.seconds_since(previous.taken))
             ),
             None => format!(
-                "Scan 1 at {}. Copy a new survey scan in EVE (Ctrl+A, Ctrl+C) and it is picked up automatically.",
-                clock_text(first.taken.unix_seconds)
+                "Scan at {}. Copy a new survey scan in EVE (Ctrl+A, Ctrl+C) and it is picked up automatically.",
+                clock_text(latest.taken.unix_seconds)
             ),
         };
         ui.label(small(footnote).color(DIM));
     });
     if new_belt {
-        module.first_scan = None;
-        module.latest_scan = None;
+        module.belt_scans.clear();
     }
 }
 
