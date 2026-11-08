@@ -32,8 +32,6 @@ pub struct TrackerSettings {
     pub miner_stopped_min_secs: i64,
     /// "Idle" alert after this many seconds without a cycle.
     pub idle_after_secs: i64,
-    /// A session ends after this many seconds without a cycle.
-    pub session_gap_secs: i64,
 }
 
 impl Default for TrackerSettings {
@@ -44,7 +42,6 @@ impl Default for TrackerSettings {
             full_percent: 99.0,
             miner_stopped_min_secs: 60,
             idle_after_secs: 5 * 60,
-            session_gap_secs: 15 * 60,
         }
     }
 }
@@ -98,6 +95,9 @@ pub enum Alert {
     HoldFull,
     /// A mining module switched off, or no cycle finished for a while.
     MinerStopped { reason: String },
+    /// A mining crystal broke; that module mines at reduced rate or not at
+    /// all until a new crystal is loaded.
+    CrystalDestroyed { module: String },
     /// No cycle for the configured idle time.
     Idle { minutes: i64 },
 }
@@ -134,6 +134,29 @@ pub struct ActiveSession {
     pub cycles: u64,
 }
 
+/// What the character's card border shows (the "guard").
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GuardState {
+    /// Mining normally (or not started yet).
+    Ok,
+    /// Mining stopped: red dashed border until a cycle finishes again.
+    Stopped,
+    /// A crystal broke and the yield hasn't recovered yet: purple border.
+    /// `rate_percent` is the current yield compared to before the break,
+    /// once there is enough data to tell.
+    CrystalBroken { rate_percent: Option<f64> },
+}
+
+/// Remembered when a crystal breaks, to tell when it has been replaced.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CrystalBreak {
+    at: LogTime,
+    /// Units per second over the window before the break.
+    baseline_per_sec: f64,
+    /// Units per second over the latest window after the break.
+    current_per_sec: Option<f64>,
+}
+
 /// All mining state for one character.
 #[derive(Debug, Clone)]
 pub struct CharacterTracker {
@@ -147,6 +170,13 @@ pub struct CharacterTracker {
     /// Times of the most recent cycles (distinct seconds, oldest first), to
     /// learn how often this character's miners normally finish a cycle.
     recent_cycles: VecDeque<LogTime>,
+    /// Recent mined cycles (time, m³), critical bonuses left out, used to
+    /// compare the yield before and after a crystal breaks. m³ rather than
+    /// units, because the pilot often moves to another ore after a break.
+    recent_yield: VecDeque<(LogTime, f64)>,
+    /// Set by `tick` when no cycle came in time; cleared by the next cycle.
+    stopped: bool,
+    crystal_break: Option<CrystalBreak>,
     /// Alerts already raised, so each one fires once instead of every tick.
     /// They re-arm when the situation changes (hold emptied, mining resumes).
     raised_fill: bool,
@@ -163,6 +193,9 @@ impl CharacterTracker {
             hold_units: BTreeMap::new(),
             session: None,
             recent_cycles: VecDeque::new(),
+            recent_yield: VecDeque::new(),
+            stopped: false,
+            crystal_break: None,
             raised_fill: false,
             raised_full: false,
             raised_stopped: false,
@@ -218,12 +251,105 @@ impl CharacterTracker {
         units.min(fitting)
     }
 
+    /// The card border state, see [`GuardState`].
+    pub fn guard_state(&self) -> GuardState {
+        if self.stopped {
+            return GuardState::Stopped;
+        }
+        match &self.crystal_break {
+            Some(crystal_break) => GuardState::CrystalBroken {
+                rate_percent: crystal_break
+                    .current_per_sec
+                    .map(|current| current / crystal_break.baseline_per_sec * 100.0),
+            },
+            None => GuardState::Ok,
+        }
+    }
+
+    /// The window over which the yield is compared before and after a
+    /// crystal breaks: three of the longest recent gaps between cycles, so
+    /// slow strip miners get a long enough window, but at least 3 minutes.
+    fn yield_window_secs(&self) -> i64 {
+        const MIN_WINDOW: i64 = 180;
+        (self.longest_recent_gap() * 3).max(MIN_WINDOW)
+    }
+
+    /// m³ per second mined in the `window` seconds up to `end`.
+    ///
+    /// Early in a session there is less than a window of data, so we divide
+    /// by the time actually covered (from the oldest sample, plus one cycle
+    /// gap for the cycle that produced it) instead of the full window.
+    fn yield_per_sec(&self, end: LogTime, window: i64) -> f64 {
+        let in_window: Vec<&(LogTime, f64)> = self
+            .recent_yield
+            .iter()
+            .filter(|(time, _)| (0..window).contains(&end.seconds_since(*time)))
+            .collect();
+        let Some((oldest, _)) = in_window.first() else {
+            return 0.0;
+        };
+        let one_gap = self.longest_recent_gap().max(1);
+        let covered = (end.seconds_since(*oldest) + one_gap).min(window);
+        let m3: f64 = in_window.iter().map(|(_, m3)| m3).sum();
+        m3 / covered as f64
+    }
+
+    /// The longest gap between the recent cycle times, 0 if unknown.
+    fn longest_recent_gap(&self) -> i64 {
+        self.recent_cycles
+            .iter()
+            .zip(self.recent_cycles.iter().skip(1))
+            .map(|(earlier, later)| later.seconds_since(*earlier))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Records a cycle's yield and checks whether a broken crystal has been
+    /// replaced. "Replaced" means the yield over a full window after the
+    /// break is back to at least 75% of what it was before. That is
+    /// deliberately loose: boosts and different rocks change the yield too,
+    /// and a broken crystal on one of two modules roughly halves it.
+    fn record_yield(&mut self, time: LogTime, m3: f64) {
+        const KEEP_SECS: i64 = 30 * 60;
+        const RECOVERED_SHARE: f64 = 0.75;
+        self.recent_yield.push_back((time, m3));
+        while let Some((oldest, _)) = self.recent_yield.front() {
+            if time.seconds_since(*oldest) > KEEP_SECS {
+                self.recent_yield.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        let window = self.yield_window_secs();
+        let current = self.yield_per_sec(time, window);
+        if let Some(crystal_break) = &mut self.crystal_break {
+            // Only judge once a whole window lies after the break, so cycles
+            // from before it don't count.
+            if time.seconds_since(crystal_break.at) >= window {
+                crystal_break.current_per_sec = Some(current);
+                if current >= crystal_break.baseline_per_sec * RECOVERED_SHARE {
+                    self.crystal_break = None;
+                }
+            }
+        }
+    }
+
     /// Remembers a cycle time for [`Self::miner_stopped_after_secs`].
     fn record_cycle_time(&mut self, time: LogTime) {
         const KEEP: usize = 9;
         // Several modules finishing in the same second count as one.
         if self.recent_cycles.back() == Some(&time) {
             return;
+        }
+        // A break longer than the idle time (moving to another belt,
+        // docking) says nothing about cycle times, so start learning again.
+        let long_break = self
+            .recent_cycles
+            .back()
+            .is_some_and(|last| time.seconds_since(*last) >= self.settings.idle_after_secs);
+        if long_break {
+            self.recent_cycles.clear();
         }
         self.recent_cycles.push_back(time);
         while self.recent_cycles.len() > KEEP {
@@ -269,16 +395,13 @@ impl CharacterTracker {
         Some(self.hold_fill(volumes).total_m3() / capacity * 100.0)
     }
 
-    /// Applies one event from the log. Returns any alerts it caused, and the
-    /// previous session if this event came after a long enough gap to start
-    /// a new one.
-    pub fn apply(
-        &mut self,
-        event: &TimedMiningEvent,
-        volumes: &VolumeTable,
-    ) -> (Vec<Alert>, Option<FinishedSession>) {
+    /// Applies one event from the log and returns any alerts it caused.
+    ///
+    /// The first mined cycle starts a session. Sessions never end by
+    /// themselves: the user ends them with the "End session" button
+    /// ([`CharacterTracker::finish_session`]).
+    pub fn apply(&mut self, event: &TimedMiningEvent, volumes: &VolumeTable) -> Vec<Alert> {
         let mut alerts = Vec::new();
-        let mut finished = None;
 
         match &event.event {
             MiningEvent::Mined {
@@ -286,9 +409,6 @@ impl CharacterTracker {
                 ore,
                 critical,
             } => {
-                // A cycle after a long gap: the old session is over.
-                finished = self.end_session_if_gap(event.time);
-
                 // Ore that doesn't fit in the hold is discarded by EVE, so it
                 // never reaches the hold count below.
                 let kept = self.units_that_fit(ore, *units, volumes);
@@ -311,7 +431,13 @@ impl CharacterTracker {
                 if !critical {
                     session.cycles += 1;
                     self.record_cycle_time(event.time);
+                    // Without the ore's volume (SDE not loaded) the yield
+                    // can't be compared fairly, so the sample is skipped.
+                    if let Some(unit_volume) = volumes.get(ore) {
+                        self.record_yield(event.time, *units as f64 * unit_volume);
+                    }
                 }
+                self.stopped = false;
 
                 if kept > 0 {
                     *self.hold_units.entry(ore.clone()).or_insert(0) += kept;
@@ -333,6 +459,29 @@ impl CharacterTracker {
                 }
                 *self.hold_units.entry(to.clone()).or_insert(0) += units;
             }
+            MiningEvent::MinerStopped {
+                module,
+                crystal_destroyed: true,
+                ..
+            } => {
+                alerts.push(Alert::CrystalDestroyed {
+                    module: module.clone(),
+                });
+                // A second crystal breaking keeps the first baseline.
+                if self.crystal_break.is_none() {
+                    let window = self.yield_window_secs();
+                    let baseline_per_sec = self.yield_per_sec(event.time, window);
+                    // Without a yield to compare with, we can't tell when the
+                    // crystal is replaced, so the border is not shown.
+                    if baseline_per_sec > 0.0 {
+                        self.crystal_break = Some(CrystalBreak {
+                            at: event.time,
+                            baseline_per_sec,
+                            current_per_sec: None,
+                        });
+                    }
+                }
+            }
             MiningEvent::MinerStopped { reason, .. } => {
                 if !self.raised_stopped {
                     self.raised_stopped = true;
@@ -346,7 +495,7 @@ impl CharacterTracker {
         }
 
         alerts.extend(self.fill_alerts(volumes));
-        (alerts, finished)
+        alerts
     }
 
     /// Called regularly (e.g. every few seconds) with the current time, for
@@ -354,15 +503,18 @@ impl CharacterTracker {
     ///
     /// `now` must be EVE time (UTC), not the PC's local time, since the log
     /// times it is compared with are UTC.
-    pub fn tick(&mut self, now: LogTime) -> (Vec<Alert>, Option<FinishedSession>) {
+    pub fn tick(&mut self, now: LogTime) -> Vec<Alert> {
         let mut alerts = Vec::new();
         let Some(session) = &self.session else {
-            return (alerts, None);
+            return alerts;
         };
         let quiet_secs = now.seconds_since(session.last_cycle);
 
         let stopped_after = self.miner_stopped_after_secs();
         let stopped = stopped_after.is_some_and(|limit| quiet_secs >= limit);
+        if stopped {
+            self.stopped = true;
+        }
         if stopped && !self.raised_stopped {
             self.raised_stopped = true;
             alerts.push(Alert::MinerStopped {
@@ -375,21 +527,22 @@ impl CharacterTracker {
                 minutes: quiet_secs / 60,
             });
         }
-        let finished = self.end_session_if_gap(now);
-        (alerts, finished)
+        alerts
     }
 
-    /// Ends the running session if nothing was mined for `session_gap_secs`
-    /// before `now`.
-    fn end_session_if_gap(&mut self, now: LogTime) -> Option<FinishedSession> {
-        let session = self.session.as_ref()?;
-        if now.seconds_since(session.last_cycle) < self.settings.session_gap_secs {
-            return None;
-        }
+    /// Ends the running session (the "End session" button) and hands it back
+    /// so the caller can value and store it. `None` if this character has not
+    /// mined since the last session ended.
+    pub fn finish_session(&mut self) -> Option<FinishedSession> {
         // `take` moves the session out and leaves `None` behind.
         let session = self.session.take()?;
-        // The gap to the next session says nothing about cycle times.
+        // The guard starts fresh with the next session.
         self.recent_cycles.clear();
+        self.recent_yield.clear();
+        self.stopped = false;
+        self.crystal_break = None;
+        self.raised_stopped = false;
+        self.raised_idle = false;
         Some(FinishedSession {
             character: self.character.clone(),
             started: session.started,
@@ -519,22 +672,22 @@ mod tests {
         let mut t = tracker(1_000.0);
         t.settings.fill_alert_percent = 90.0;
         // 80% -> nothing
-        let (alerts, _) = t.apply(&mined(0, 80, "Rock"), &v);
+        let alerts = t.apply(&mined(0, 80, "Rock"), &v);
         assert!(alerts.is_empty());
         // 92% -> threshold alert
-        let (alerts, _) = t.apply(&mined(10, 12, "Rock"), &v);
+        let alerts = t.apply(&mined(10, 12, "Rock"), &v);
         assert!(matches!(alerts[..], [Alert::HoldAboveThreshold { .. }]));
         // 95% -> no repeat
-        let (alerts, _) = t.apply(&mined(20, 3, "Rock"), &v);
+        let alerts = t.apply(&mined(20, 3, "Rock"), &v);
         assert!(alerts.is_empty());
         // 100% -> full
-        let (alerts, _) = t.apply(&mined(30, 5, "Rock"), &v);
+        let alerts = t.apply(&mined(30, 5, "Rock"), &v);
         assert_eq!(alerts, vec![Alert::HoldFull]);
-        let (alerts, _) = t.apply(&mined(40, 0, "Rock"), &v);
+        let alerts = t.apply(&mined(40, 0, "Rock"), &v);
         assert!(alerts.is_empty());
         // Emptied re-arms both.
         t.mark_emptied();
-        let (alerts, _) = t.apply(&mined(50, 100, "Rock"), &v);
+        let alerts = t.apply(&mined(50, 100, "Rock"), &v);
         assert_eq!(alerts, vec![Alert::HoldFull]);
     }
 
@@ -542,10 +695,10 @@ mod tests {
     fn compressing_rearms_fill_alert() {
         let v = volumes();
         let mut t = tracker(1_000.0);
-        let (alerts, _) = t.apply(&mined(0, 95, "Rock"), &v);
+        let alerts = t.apply(&mined(0, 95, "Rock"), &v);
         assert_eq!(alerts.len(), 1);
         t.apply(&compressed(5, 95, "Rock"), &v);
-        let (alerts, _) = t.apply(&mined(10, 95, "Rock"), &v);
+        let alerts = t.apply(&mined(10, 95, "Rock"), &v);
         assert!(matches!(alerts[..], [Alert::HoldAboveThreshold { .. }]));
     }
 
@@ -553,7 +706,7 @@ mod tests {
     fn no_fill_alerts_without_capacity() {
         let v = volumes();
         let mut t = CharacterTracker::new("Test Pilot", TrackerSettings::default());
-        let (alerts, _) = t.apply(&mined(0, 1_000_000, "Rock"), &v);
+        let alerts = t.apply(&mined(0, 1_000_000, "Rock"), &v);
         assert!(alerts.is_empty());
         assert_eq!(t.fill_percent(&v), None);
     }
@@ -568,9 +721,10 @@ mod tests {
             event: MiningEvent::MinerStopped {
                 module: "Strip Miner".to_string(),
                 reason: "rock depleted".to_string(),
+                crystal_destroyed: false,
             },
         };
-        let (alerts, _) = t.apply(&stop, &v);
+        let alerts = t.apply(&stop, &v);
         assert_eq!(
             alerts,
             vec![Alert::MinerStopped {
@@ -578,11 +732,11 @@ mod tests {
             }]
         );
         // A second miner stopping right after doesn't alert again...
-        let (alerts, _) = t.apply(&stop, &v);
+        let alerts = t.apply(&stop, &v);
         assert!(alerts.is_empty());
         // ...until mining resumed.
         t.apply(&mined(60, 1, "Rock"), &v);
-        let (alerts, _) = t.apply(&stop, &v);
+        let alerts = t.apply(&stop, &v);
         assert_eq!(alerts.len(), 1);
     }
 
@@ -596,22 +750,22 @@ mod tests {
         }
         assert_eq!(t.miner_stopped_after_secs(), Some(60));
 
-        let (alerts, finished) = t.tick(at(100));
-        assert!(alerts.is_empty());
-        assert!(finished.is_none());
+        assert!(t.tick(at(100)).is_empty());
 
         // 60 s after the last cycle: miner stopped.
-        let (alerts, _) = t.tick(at(120));
+        let alerts = t.tick(at(120));
         assert!(matches!(alerts[..], [Alert::MinerStopped { .. }]));
-        assert!(t.tick(at(121)).0.is_empty());
+        assert!(t.tick(at(121)).is_empty());
 
         // 5 min: idle.
-        let (alerts, _) = t.tick(at(60 + 300));
+        let alerts = t.tick(at(60 + 300));
         assert_eq!(alerts, vec![Alert::Idle { minutes: 5 }]);
 
-        // 15 min: session over.
-        let (_, finished) = t.tick(at(60 + 900));
-        let finished = finished.unwrap();
+        // Sessions never end by themselves...
+        t.tick(at(60 + 7_200));
+        assert!(t.session().is_some());
+        // ...only when the user ends them.
+        let finished = t.finish_session().unwrap();
         assert_eq!(finished.started, at(0));
         assert_eq!(finished.ended, at(60));
         assert_eq!(finished.cycles, 4);
@@ -631,9 +785,9 @@ mod tests {
         }
         assert_eq!(t.miner_stopped_after_secs(), Some(360));
         // Between two normal cycles: no alert.
-        assert!(t.tick(at(4 * 180 + 179)).0.is_empty());
+        assert!(t.tick(at(4 * 180 + 179)).is_empty());
         // Two whole cycles missed: stopped.
-        let (alerts, _) = t.tick(at(4 * 180 + 360));
+        let alerts = t.tick(at(4 * 180 + 360));
         assert!(
             alerts
                 .iter()
@@ -648,7 +802,7 @@ mod tests {
         t.apply(&mined(0, 10, "Rock"), &v);
         t.apply(&mined(30, 10, "Rock"), &v);
         assert_eq!(t.miner_stopped_after_secs(), None);
-        assert!(t.tick(at(200)).0.is_empty());
+        assert!(t.tick(at(200)).is_empty());
     }
 
     #[test]
@@ -668,7 +822,7 @@ mod tests {
         let mut t = tracker(1_000.0);
         // 95 units = 950 m³; then 20 more but only 5 fit.
         t.apply(&mined(0, 95, "Rock"), &v);
-        let (alerts, _) = t.apply(&mined(10, 20, "Rock"), &v);
+        let alerts = t.apply(&mined(10, 20, "Rock"), &v);
         assert_eq!(alerts, vec![Alert::HoldFull]);
         assert_eq!(t.hold_units().get("Rock"), Some(&100));
         let session = t.session().unwrap();
@@ -702,15 +856,170 @@ mod tests {
     }
 
     #[test]
-    fn late_cycle_after_gap_starts_new_session() {
-        // E.g. Athena was closed, so no tick ended the session in time.
+    fn session_continues_after_a_break_until_ended() {
         let v = volumes();
         let mut t = tracker(10_000.0);
         t.apply(&mined(0, 10, "Rock"), &v);
-        let (_, finished) = t.apply(&mined(3_600, 5, "Rock"), &v);
-        assert_eq!(finished.unwrap().mined_units.get("Rock"), Some(&10));
+        t.apply(&mined(3_600, 5, "Rock"), &v);
         let session = t.session().unwrap();
-        assert_eq!(session.started, at(3_600));
-        assert_eq!(session.mined_units.get("Rock"), Some(&5));
+        assert_eq!(session.started, at(0));
+        assert_eq!(session.mined_units.get("Rock"), Some(&15));
+
+        let finished = t.finish_session().unwrap();
+        assert_eq!(finished.ended, at(3_600));
+        assert!(t.finish_session().is_none());
+        // The next cycle starts a fresh session.
+        t.apply(&mined(4_000, 1, "Rock"), &v);
+        assert_eq!(t.session().unwrap().started, at(4_000));
+    }
+
+    #[test]
+    fn long_break_resets_cycle_rhythm() {
+        let v = volumes();
+        let mut t = tracker(100_000.0);
+        for secs in [0, 20, 40, 60] {
+            t.apply(&mined(secs, 1, "Rock"), &v);
+        }
+        // A 30 min break (new belt), then normal cycles again.
+        for secs in [1_860, 1_880, 1_900, 1_920] {
+            t.apply(&mined(secs, 1, "Rock"), &v);
+        }
+        assert_eq!(t.miner_stopped_after_secs(), Some(60));
+    }
+
+    fn crystal_broke(secs: i64) -> TimedMiningEvent {
+        TimedMiningEvent {
+            time: at(secs),
+            event: MiningEvent::MinerStopped {
+                module: "Modulated Strip Miner II".to_string(),
+                reason: "due to the destruction of the Crystal".to_string(),
+                crystal_destroyed: true,
+            },
+        }
+    }
+
+    #[test]
+    fn guard_shows_stopped_until_mining_resumes() {
+        let v = volumes();
+        let mut t = tracker(100_000.0);
+        for secs in [0, 20, 40, 60] {
+            t.apply(&mined(secs, 10, "Rock"), &v);
+        }
+        assert_eq!(t.guard_state(), GuardState::Ok);
+        t.tick(at(130));
+        assert_eq!(t.guard_state(), GuardState::Stopped);
+        t.apply(&mined(140, 10, "Rock"), &v);
+        assert_eq!(t.guard_state(), GuardState::Ok);
+    }
+
+    #[test]
+    fn guard_shows_broken_crystal_until_yield_recovers() {
+        let v = volumes();
+        let mut t = tracker(1_000_000.0);
+        // Two modules, each 100 units every 20 s, finishing together.
+        for secs in (0..=300).step_by(20) {
+            t.apply(&mined(secs, 100, "Rock"), &v);
+            t.apply(&mined(secs, 100, "Rock"), &v);
+        }
+        let alerts = t.apply(&crystal_broke(305), &v);
+        assert_eq!(
+            alerts,
+            vec![Alert::CrystalDestroyed {
+                module: "Modulated Strip Miner II".to_string()
+            }]
+        );
+        assert_eq!(
+            t.guard_state(),
+            GuardState::CrystalBroken { rate_percent: None }
+        );
+
+        // One module only for 5 minutes: about half the yield.
+        for secs in (320..=600).step_by(20) {
+            t.apply(&mined(secs, 100, "Rock"), &v);
+        }
+        match t.guard_state() {
+            GuardState::CrystalBroken {
+                rate_percent: Some(percent),
+            } => assert!((45.0..=55.0).contains(&percent), "{percent}"),
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // New crystal loaded, a bit slower than before (no boosts now):
+        // 90% of the old yield still counts as recovered.
+        for secs in (620..=900).step_by(20) {
+            t.apply(&mined(secs, 100, "Rock"), &v);
+            t.apply(&mined(secs, 80, "Rock"), &v);
+        }
+        assert_eq!(t.guard_state(), GuardState::Ok);
+    }
+
+    #[test]
+    fn crystal_break_without_yield_shows_no_border() {
+        let v = volumes();
+        let mut t = tracker(1_000_000.0);
+        let alerts = t.apply(&crystal_broke(0), &v);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(t.guard_state(), GuardState::Ok);
+    }
+
+    #[test]
+    fn end_session_resets_guard() {
+        let v = volumes();
+        let mut t = tracker(1_000_000.0);
+        for secs in [0, 20, 40, 60] {
+            t.apply(&mined(secs, 10, "Rock"), &v);
+        }
+        t.tick(at(130));
+        assert_eq!(t.guard_state(), GuardState::Stopped);
+        t.finish_session();
+        assert_eq!(t.guard_state(), GuardState::Ok);
+
+        for secs in [200, 220, 240, 260] {
+            t.apply(&mined(secs, 10, "Rock"), &v);
+        }
+        t.apply(&crystal_broke(265), &v);
+        assert!(matches!(t.guard_state(), GuardState::CrystalBroken { .. }));
+        t.finish_session();
+        assert_eq!(t.guard_state(), GuardState::Ok);
+    }
+
+    #[test]
+    fn crystal_recovery_compares_m3_across_ores() {
+        let mut v = volumes();
+        v.insert("Big Rock", 100.0);
+        let mut t = tracker(10_000_000.0);
+        // 2 x 100 units of a 10 m³ ore every 20 s = 2,000 m³ per 20 s.
+        for secs in (0..=300).step_by(20) {
+            t.apply(&mined(secs, 100, "Rock"), &v);
+            t.apply(&mined(secs, 100, "Rock"), &v);
+        }
+        t.apply(&crystal_broke(305), &v);
+        // New crystal, new rock: 2 x 10 units of a 100 m³ ore = same m³.
+        for secs in (320..=900).step_by(20) {
+            t.apply(&mined(secs, 10, "Big Rock"), &v);
+            t.apply(&mined(secs, 10, "Big Rock"), &v);
+        }
+        assert_eq!(t.guard_state(), GuardState::Ok);
+    }
+
+    #[test]
+    fn early_baseline_uses_time_actually_mined() {
+        let v = volumes();
+        let mut t = tracker(1_000_000.0);
+        // Only 60 s of mining before the break, with a 180 s window.
+        for secs in [0, 20, 40, 60] {
+            t.apply(&mined(secs, 100, "Rock"), &v);
+        }
+        t.apply(&crystal_broke(61), &v);
+        // Half the yield afterwards must not count as recovered.
+        for secs in (80..=600).step_by(40) {
+            t.apply(&mined(secs, 100, "Rock"), &v);
+        }
+        match t.guard_state() {
+            GuardState::CrystalBroken {
+                rate_percent: Some(percent),
+            } => assert!((40.0..=60.0).contains(&percent), "{percent}"),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }
