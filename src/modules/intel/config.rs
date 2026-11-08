@@ -18,6 +18,16 @@ pub struct IntelSettings {
     pub channels: Vec<String>,
     /// Words that mark a system as clear, lowercase.
     pub clear_words: Vec<String>,
+    /// The region the map showed last.
+    pub region_id: Option<i64>,
+    /// Switch the map to the active pilot's region when they jump into
+    /// another one.
+    pub follow_regions: bool,
+    /// Own pilots hidden from the map and from jump distances (clicked
+    /// off on their chip).
+    pub hidden_pilots: Vec<String>,
+    /// Width of the intel list next to the map, in points.
+    pub list_width: f32,
 }
 
 impl Default for IntelSettings {
@@ -25,6 +35,10 @@ impl Default for IntelSettings {
         IntelSettings {
             channels: Vec::new(),
             clear_words: vec!["clr".to_string(), "clear".to_string()],
+            region_id: None,
+            follow_regions: true,
+            hidden_pilots: Vec::new(),
+            list_width: 420.0,
         }
     }
 }
