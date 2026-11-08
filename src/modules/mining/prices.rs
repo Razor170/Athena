@@ -331,7 +331,11 @@ fn price_thread(
             .as_ref()
             .is_some_and(|p| type_ids.iter().all(|id| p.by_type.contains_key(id)));
         let wait_secs = match &current {
-            Some(prices) if complete => (MAX_AGE_SECS - prices.age_secs(now_unix())).max(0),
+            // Clamped, so a PC clock that jumps backwards can't put off the
+            // refresh for longer than an hour.
+            Some(prices) if complete => {
+                (MAX_AGE_SECS - prices.age_secs(now_unix())).clamp(0, MAX_AGE_SECS)
+            }
             _ => 0,
         };
         if !wait(&stop, wait_secs as u64) {

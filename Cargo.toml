@@ -41,7 +41,6 @@ reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "gzip",
 ] }
-serde_json = "1"
 # SQLite, compiled into the exe (`bundled`), so there is no DLL to ship.
 # Reads static.sqlite (game data) and, later, the mining history.
 rusqlite = { version = "0.41", features = ["bundled"] }
