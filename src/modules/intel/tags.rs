@@ -9,9 +9,12 @@
 //! ```
 //!
 //! The fields are system, label, colour, icon, a flag Athena doesn't use,
-//! and group. Fields Athena doesn't use (the flag, unknown icon names, any
-//! extra fields) are kept and written back unchanged. Tags are saved in
-//! `intel_tags.txt` in the data folder, in the same format.
+//! and group. Fields Athena doesn't use (the flag, unknown icon names, the
+//! colour exactly as written, any extra fields) are kept and written back
+//! unchanged. Tags are saved in `intel_tags.txt` in the data folder, in the
+//! same format. Lines of that file Athena can't read (say, a misspelt
+//! system) are kept as they are and written back at the end, so saving
+//! never loses anything.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -40,7 +43,10 @@ pub struct Tag {
     /// The name as written in the file.
     pub system_name: String,
     pub label: String,
+    /// The colour for drawing.
     pub color: Color32,
+    /// The colour as written ("#F5FF83", or empty), written back as is.
+    pub color_text: String,
     /// RIFT's icon name, such as "structure_skyhook".
     pub icon: String,
     /// RIFT's fifth field ("false"), kept as it was.
@@ -56,7 +62,7 @@ impl Tag {
         let mut fields = vec![
             self.system_name.clone(),
             self.label.clone(),
-            color_text(self.color),
+            self.color_text.clone(),
             self.icon.clone(),
             self.flag.clone(),
             self.group.clone(),
@@ -75,21 +81,24 @@ impl Tag {
 #[derive(Debug, Default, PartialEq)]
 pub struct ParsedTags {
     pub tags: Vec<Tag>,
-    /// Lines that aren't tags or name a system that isn't on the map.
-    pub skipped: usize,
+    /// Lines that aren't tags or name a system that isn't on the map,
+    /// exactly as they were.
+    pub unread: Vec<String>,
 }
 
 /// Reads tags in RIFT's format, one per line. Empty lines are ignored.
 pub fn parse(text: &str, universe: &Universe) -> ParsedTags {
     let mut parsed = ParsedTags::default();
-    for line in text.lines() {
-        let line = line.trim();
+    // A file saved by Notepad can start with a byte order mark.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    for raw in text.lines() {
+        let line = raw.trim();
         if line.is_empty() {
             continue;
         }
         match parse_line(line, universe) {
             Some(tag) => parsed.tags.push(tag),
-            None => parsed.skipped += 1,
+            None => parsed.unread.push(raw.trim_end().to_string()),
         }
     }
     parsed
@@ -108,6 +117,7 @@ fn parse_line(line: &str, universe: &Universe) -> Option<Tag> {
         system_name: system.name.clone(),
         label,
         color: parse_color(&field(2)).unwrap_or(DEFAULT_COLOR),
+        color_text: field(2),
         icon: field(3),
         flag: if fields.len() > 4 {
             field(4)
@@ -138,9 +148,13 @@ pub fn color_text(color: Color32) -> String {
     format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b())
 }
 
-/// All tags as text, one line each.
-pub fn format(tags: &[Tag]) -> String {
+/// All tags as text, one line each, then the `unread` lines unchanged.
+pub fn format(tags: &[Tag], unread: &[String]) -> String {
     let mut text: String = tags.iter().map(|t| t.to_line() + "\n").collect();
+    for line in unread {
+        text.push_str(line);
+        text.push('\n');
+    }
     if text.is_empty() {
         text.push('\n');
     }
@@ -198,11 +212,17 @@ pub fn file_path(data_dir: &Path) -> PathBuf {
 }
 
 /// Reads the saved tags. Runs once at startup, before the window shows.
-/// A missing file is no tags; a broken line is skipped.
-pub fn load(data_dir: &Path, universe: &Universe) -> ParsedTags {
-    match std::fs::read_to_string(file_path(data_dir)) {
-        Ok(text) => parse(&text, universe),
-        Err(_) => ParsedTags::default(),
+/// A missing file is no tags. Any other read error is returned, and then
+/// the file must not be overwritten.
+pub fn load(data_dir: &Path, universe: &Universe) -> Result<ParsedTags, String> {
+    let path = file_path(data_dir);
+    match std::fs::read(&path) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => Ok(parse(&text, universe)),
+            Err(_) => Err(format!("{} isn't UTF-8 text.", path.display())),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ParsedTags::default()),
+        Err(e) => Err(format!("Can't read {}: {e}", path.display())),
     }
 }
 
@@ -261,7 +281,18 @@ mod tests {
                     Nowhere;POS;#FFFFFF;dot;false;POS\n\
                     A2-XYZ;;#FFFFFF;dot;false;POS\n";
         let parsed = parse(text, &universe());
-        assert_eq!(parsed.skipped, 2);
+        assert_eq!(
+            parsed.unread,
+            [
+                "Nowhere;POS;#FFFFFF;dot;false;POS",
+                "A2-XYZ;;#FFFFFF;dot;false;POS"
+            ]
+        );
+        // Saving writes the unread lines back at the end.
+        let saved = format(&parsed.tags, &parsed.unread);
+        assert!(
+            saved.ends_with("Nowhere;POS;#FFFFFF;dot;false;POS\nA2-XYZ;;#FFFFFF;dot;false;POS\n")
+        );
         let [pos, m3] = &parsed.tags[..] else {
             panic!("two tags expected");
         };
@@ -272,9 +303,10 @@ mod tests {
             pos.to_line(),
             "A1-XYZ;POS;#F5FF83;structure_skyhook;false;POS"
         );
+        // The colour keeps its spelling.
         assert_eq!(
             m3.to_line(),
-            "B1;M3;#71E754;resources_isk;true;Ratting;more;fields"
+            "B1;M3;#71e754;resources_isk;true;Ratting;more;fields"
         );
     }
 
@@ -283,7 +315,9 @@ mod tests {
         let parsed = parse("A1-XYZ;Ice", &universe());
         let tag = &parsed.tags[0];
         assert_eq!(tag.color, DEFAULT_COLOR);
-        assert_eq!(tag.to_line(), "A1-XYZ;Ice;#DCDCDC;;false;");
+        assert_eq!(tag.to_line(), "A1-XYZ;Ice;;;false;");
+        // A byte order mark at the start is ignored.
+        assert_eq!(parse("\u{feff}A1-XYZ;Ice", &universe()).tags.len(), 1);
     }
 
     #[test]

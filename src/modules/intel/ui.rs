@@ -687,8 +687,9 @@ fn tag_dialog(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
                     ui.label("Label");
                     let label = ui.text_edit_singleline(&mut dialog.label);
                     // Ready to type as soon as the window opens.
-                    if dialog.label.is_empty() && !label.has_focus() {
+                    if dialog.focus_label {
                         label.request_focus();
+                        dialog.focus_label = false;
                     }
                     ui.end_row();
 

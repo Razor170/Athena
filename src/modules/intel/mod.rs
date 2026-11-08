@@ -103,6 +103,8 @@ pub struct TagDialog {
     pub new_group: bool,
     pub color: egui::Color32,
     pub icon: String,
+    /// Put the cursor in the label field (once, when the window opens).
+    pub focus_label: bool,
 }
 
 /// The alert banner over the map: the newest report that raised an alert.
@@ -157,6 +159,11 @@ pub struct IntelSupervisor {
     clear_words_text: String,
     /// System tags, sorted by system and label.
     tags: Vec<Tag>,
+    /// Lines of the tag file that aren't readable tags, written back as
+    /// they were.
+    unread_tag_lines: Vec<String>,
+    /// False when the tag file couldn't be read: then it is never saved.
+    tags_writable: bool,
     /// The "Add tag…" window, while it is open.
     tag_dialog: Option<TagDialog>,
     /// The group of the last tag added with that window.
@@ -212,19 +219,29 @@ impl IntelSupervisor {
             egui_ctx.clone(),
         );
         let clear_words_text = settings.clear_words.join(", ");
-        let (tags, tag_message) = match &shared.data {
-            Some(data) => {
-                let parsed = tags::load(data_dir, &data.universe);
-                let message = (parsed.skipped > 0).then(|| {
-                    format!(
-                        "{} lines of {} couldn't be read and were left out.",
-                        parsed.skipped,
-                        tags::file_path(data_dir).display()
-                    )
-                });
-                (parsed.tags, message)
-            }
-            None => (Vec::new(), None),
+        // If the tag file can't be read, it is never written either, so
+        // nothing in it gets lost.
+        let (tags, unread_tag_lines, tags_writable, tag_message) = match &shared.data {
+            Some(data) => match tags::load(data_dir, &data.universe) {
+                Ok(parsed) => {
+                    let message = (!parsed.unread.is_empty()).then(|| {
+                        format!(
+                            "{} lines of {} name no known system; they are kept in the file \
+                             but not shown.",
+                            parsed.unread.len(),
+                            tags::file_path(data_dir).display()
+                        )
+                    });
+                    (parsed.tags, parsed.unread, true, message)
+                }
+                Err(problem) => (
+                    Vec::new(),
+                    Vec::new(),
+                    false,
+                    Some(format!("{problem} Tags are off until it can be read.")),
+                ),
+            },
+            None => (Vec::new(), Vec::new(), false, None),
         };
         IntelSupervisor {
             egui_ctx: egui_ctx.clone(),
@@ -247,6 +264,8 @@ impl IntelSupervisor {
             muted_until: None,
             clear_words_text,
             tags,
+            unread_tag_lines,
+            tags_writable,
             tag_dialog: None,
             last_tag_group: None,
             tag_message,
@@ -537,6 +556,12 @@ impl IntelSupervisor {
     /// used for the last tag added here (else the first group), and that
     /// group's colour and icon.
     fn open_tag_dialog(&mut self, system_id: i64) {
+        if !self.tags_writable {
+            if let Some(message) = &self.tag_message {
+                self.problems.insert("tags", message.clone());
+            }
+            return;
+        }
         let group = self
             .last_tag_group
             .clone()
@@ -561,6 +586,7 @@ impl IntelSupervisor {
             group,
             color,
             icon,
+            focus_label: true,
         });
     }
 
@@ -585,13 +611,19 @@ impl IntelSupervisor {
             system_name: name,
             label,
             color: dialog.color,
+            color_text: tags::color_text(dialog.color),
             icon: dialog.icon,
             flag: "false".to_string(),
             group: dialog.group.trim().replace(';', ","),
             extra: Vec::new(),
         };
         self.last_tag_group = Some(tag.group.clone());
-        tags::merge(&mut self.tags, vec![tag]);
+        // The same label again on the same system updates that tag.
+        if let Some(existing) = self.tags.iter_mut().find(|t| t.same_as(&tag)) {
+            *existing = tag;
+        } else {
+            tags::merge(&mut self.tags, vec![tag]);
+        }
         self.save_tags();
     }
 
@@ -605,13 +637,20 @@ impl IntelSupervisor {
     /// "Import": adds the tags on the clipboard (RIFT's format).
     fn import_tags(&mut self) {
         let Some(text) = crate::modules::mining::clipboard::read_text_once(MAX_IMPORT_BYTES) else {
-            self.tag_message = Some("The clipboard has no text to import.".to_string());
+            self.tag_message = Some(
+                "Couldn't read text from the clipboard. Copy the tags (in RIFT: Export) and \
+                 try again."
+                    .to_string(),
+            );
             return;
         };
         self.import_tag_text(&text);
     }
 
     fn import_tag_text(&mut self, text: &str) {
+        if !self.tags_writable {
+            return;
+        }
         let Some(universe) = self.universe() else {
             return;
         };
@@ -622,8 +661,11 @@ impl IntelSupervisor {
         if added < found {
             message += &format!(" ({} were already there)", found - added);
         }
-        if parsed.skipped > 0 {
-            message += &format!("; {} lines weren't tags and were skipped", parsed.skipped);
+        if !parsed.unread.is_empty() {
+            message += &format!(
+                "; {} lines weren't tags and were skipped",
+                parsed.unread.len()
+            );
         }
         self.tag_message = Some(message + ".");
         if added > 0 {
@@ -633,7 +675,7 @@ impl IntelSupervisor {
 
     /// "Export": copies all tags to the clipboard.
     fn export_tags(&mut self) {
-        self.egui_ctx.copy_text(tags::format(&self.tags));
+        self.egui_ctx.copy_text(tags::format(&self.tags, &[]));
         self.tag_message = Some(format!("Copied {} tags to the clipboard.", self.tags.len()));
     }
 
@@ -647,8 +689,13 @@ impl IntelSupervisor {
     }
 
     fn save_tags(&mut self) {
-        self.saver
-            .save(tags::file_path(&self.data_dir), tags::format(&self.tags));
+        if !self.tags_writable {
+            return;
+        }
+        self.saver.save(
+            tags::file_path(&self.data_dir),
+            tags::format(&self.tags, &self.unread_tag_lines),
+        );
     }
 
     /// Something picked in the map's right-click menu.
@@ -1197,6 +1244,37 @@ mod tests {
         assert!(tags::by_system(&m.tags, &m.settings.hidden_tag_groups).is_empty());
         m.remove_tag(0);
         assert_eq!(m.tags.len(), 1);
+    }
+
+    #[test]
+    fn an_unreadable_tag_file_is_never_overwritten() {
+        let dir = std::env::temp_dir().join(format!("athena-tags-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = tags::file_path(&dir);
+        std::fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
+        let universe = crate::static_data::tests::sample().universe;
+        assert!(tags::load(&dir, &universe).is_err());
+
+        let mut m = module();
+        m.tags_writable = false;
+        m.import_tag_text("A1-XYZ;POS");
+        m.open_tag_dialog(101);
+        assert!(m.tags.is_empty());
+        assert!(m.tag_dialog.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adding_a_tag_again_updates_it() {
+        let mut m = module();
+        m.import_tag_text("A1-XYZ;POS;;dot;false;POS");
+        m.open_tag_dialog(101);
+        let dialog = m.tag_dialog.as_mut().unwrap();
+        dialog.label = "pos".into();
+        dialog.color = egui::Color32::from_rgb(1, 2, 3);
+        m.add_tag_from_dialog();
+        assert_eq!(m.tags.len(), 1);
+        assert_eq!(m.tags[0].to_line(), "A1-XYZ;pos;#010203;dot;false;POS");
     }
 
     #[test]
