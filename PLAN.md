@@ -74,7 +74,7 @@ Agree on goals, the stack and the roadmap.
 - Static data import and lookup (systems, gates, jump routes).
 
 ### Step 4: First modules
-- **Mining Supervisor:** for multiboxed miners, one row per character plus totals. Uses game logs and the SDE only, no ESI.
+- **Mining Supervisor:** for multiboxed miners, one row per character plus totals. Uses game logs, the SDE and ESI's public market data (no login).
   - Ore hold fill per character, split into uncompressed and compressed ore. The log has every mined cycle (including critical successes; residue is ignored as it never reaches the hold) and every in-space compression (1:1 in units). Unloading at a station writes no log line, so each row has an "Emptied" button. Hold size and alert level are global settings (default 11,500 m³ and 70%) that each character can override. EVE logs no "hold full" line, so fullness comes from the m³ math; ore mined into a full hold is voided.
   - Alerts: hold above a per-character threshold, hold full, miner stopped (the module's "deactivates" line, or no cycle for a while), idle for X minutes.
   - A session starts with the first mined cycle and ends only when Kevin clicks "End session", which ends it for all characters at once. History shows one entry per session that opens to per-pilot data. A finished session's ISK value (reprocessed value at Jita prices from ESI's public market data, cached and refreshed at most hourly; yield 90.63% for ore, ice and moon ore, 95% for gas) is stored once and never recalculated. History also shows daily and weekly totals.
