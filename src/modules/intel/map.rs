@@ -21,10 +21,7 @@ use eframe::egui::{
 };
 
 use super::alerts::{self, SystemMark};
-<<<<<<< HEAD
 use super::lookup::SystemActivity;
-=======
->>>>>>> origin/claude/project-thread-3tt5b0
 use super::tags::{self, Tag};
 use crate::universe::{Universe, drawing};
 
@@ -41,11 +38,8 @@ pub const PILOT_BLUE: Color32 = Color32::from_rgb(0x4e, 0xa1, 0xff);
 const PILOT_TEXT: Color32 = Color32::from_rgb(0x8f, 0xc3, 0xff);
 const LEGEND_TEXT: Color32 = Color32::from_rgb(0xa8, 0xa8, 0xa8);
 const TAG_TEXT: Color32 = Color32::from_rgb(0xcf, 0xcf, 0xcf);
-<<<<<<< HEAD
 const KILLS_TINT: Color32 = Color32::from_rgb(0xb0, 0x4c, 0xd8);
 const JUMPS_TINT: Color32 = Color32::from_rgb(0x9a, 0xb4, 0xd0);
-=======
->>>>>>> origin/claude/project-thread-3tt5b0
 
 /// Zoom limits. 1.0 is the size the xtask laid the map out for.
 const MIN_ZOOM: f32 = 0.3;
@@ -187,11 +181,8 @@ pub struct MapContent<'a> {
     pub fade_minutes: u32,
     /// Tags to show under system names (hidden groups already left out).
     pub tags: &'a HashMap<i64, Vec<&'a Tag>>,
-<<<<<<< HEAD
     /// ESI kills and jumps of the last hour; empty while the tint is off.
     pub activity: &'a HashMap<i64, SystemActivity>,
-=======
->>>>>>> origin/claude/project-thread-3tt5b0
 }
 
 /// Something picked in the map's right-click menu.
@@ -305,7 +296,6 @@ impl MapView {
             );
         }
         self.controls(ui, rect, bounds);
-<<<<<<< HEAD
         legend(
             &painter,
             rect,
@@ -322,9 +312,6 @@ impl MapView {
                 ui.label(activity_text(activity));
             });
         }
-=======
-        legend(&painter, rect, content.fade_minutes);
->>>>>>> origin/claude/project-thread-3tt5b0
         self.context_menu(&response, rect)
     }
 

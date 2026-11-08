@@ -44,11 +44,8 @@ pub struct IntelSettings {
     pub only_in_range: bool,
     /// Tag groups not shown on the map (unticked in Settings).
     pub hidden_tag_groups: Vec<String>,
-<<<<<<< HEAD
     /// Tint systems by ESI's kills and jumps of the last hour.
     pub esi_tint: bool,
-=======
->>>>>>> origin/claude/project-thread-3tt5b0
 }
 
 impl Default for IntelSettings {
@@ -68,10 +65,7 @@ impl Default for IntelSettings {
             fade_minutes: 10,
             only_in_range: false,
             hidden_tag_groups: Vec::new(),
-<<<<<<< HEAD
             esi_tint: false,
-=======
->>>>>>> origin/claude/project-thread-3tt5b0
         }
     }
 }
