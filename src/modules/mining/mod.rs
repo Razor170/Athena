@@ -4,6 +4,7 @@
 //!
 //! - [`gamelog`]: reads EVE game log files and turns mining lines into events.
 //! - [`session`]: adds those events up into per-character mining sessions.
+//! - [`history`]: groups sessions of pilots that mined together.
 //! - [`scan`]: parses pasted Mining Survey Scanner results and works out how
 //!   fast a belt is being mined.
 //!
@@ -23,5 +24,6 @@
 #![allow(dead_code)]
 
 pub mod gamelog;
+pub mod history;
 pub mod scan;
 pub mod session;
