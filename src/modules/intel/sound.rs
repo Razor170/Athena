@@ -197,8 +197,9 @@ pub fn scale_wav(bytes: &[u8], volume: f32) -> Option<Vec<u8>> {
             if !pcm16 {
                 return None;
             }
-            for sample in out[start..end].chunks_exact_mut(2) {
-                let value = i16::from_le_bytes([sample[0], sample[1]]) as f32 * volume;
+            // Two bytes per sample; an odd byte at the end is left alone.
+            for sample in out[start..end].as_chunks_mut::<2>().0 {
+                let value = i16::from_le_bytes(*sample) as f32 * volume;
                 let scaled = value.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
                 sample.copy_from_slice(&scaled.to_le_bytes());
             }
@@ -285,8 +286,10 @@ mod tests {
 
     fn samples(bytes: &[u8]) -> Vec<i16> {
         bytes[44..]
-            .chunks_exact(2)
-            .map(|s| i16::from_le_bytes([s[0], s[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|s| i16::from_le_bytes(*s))
             .collect()
     }
 
