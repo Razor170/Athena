@@ -139,6 +139,9 @@ pub enum MiningEvent {
         reason: String,
         crystal_destroyed: bool,
     },
+    /// EVE says the hold is full and a mining module stopped because of it.
+    /// One line per module.
+    HoldFull { module: String },
 }
 
 /// A mining event with the time it happened.
@@ -217,6 +220,17 @@ fn parse_notify_message(message: &str) -> Option<MiningEvent> {
             to: to.to_string(),
             units: parse_units(number)?,
         });
+    }
+    // "Your ORE Strip Miner has completed operations. Ship's cargo hold is full."
+    // The apostrophe can be written as the HTML code `&#39;`, so only the
+    // end of the sentence is matched.
+    if message.trim_end_matches('.').ends_with("hold is full") {
+        let module = message
+            .strip_prefix("Your ")
+            .and_then(|rest| rest.split_once(" has completed operations"))
+            .map(|(module, _)| module.trim().to_string())
+            .unwrap_or_default();
+        return Some(MiningEvent::HoldFull { module });
     }
     // "Modulated Strip Miner II deactivates as it finds the resource ..."
     // "Modulated Strip Miner II deactivates due to the destruction of ..."
@@ -462,6 +476,23 @@ mod tests {
                 units: 3430,
             }
         );
+    }
+
+    #[test]
+    fn parses_hold_full_line() {
+        // As written in a real log (the apostrophe as an HTML code), and as
+        // plain text.
+        for line in [
+            "[ 2026.11.08 09:37:13 ] (notify) Your ORE Strip Miner has completed operations. Ship&#39;s cargo hold is full.",
+            "[ 2026.11.08 09:37:13 ] (notify) Your ORE Strip Miner has completed operations. Ship's cargo hold is full.",
+        ] {
+            assert_eq!(
+                parse_mining_line(line).unwrap().event,
+                MiningEvent::HoldFull {
+                    module: "ORE Strip Miner".to_string(),
+                }
+            );
+        }
     }
 
     #[test]
