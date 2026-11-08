@@ -194,8 +194,12 @@ fn summary_bar(module: &mut MiningSupervisor, ui: &mut egui::Ui, now: LogTime) {
                     {
                         end_clicked = true;
                     }
-                    let anything_in_holds =
-                        module.trackers.values().any(|t| !t.hold_units().is_empty());
+                    // A hold EVE called full counts too, even if Athena saw
+                    // none of its ore (e.g. loaded before Athena ran).
+                    let anything_in_holds = module
+                        .trackers
+                        .values()
+                        .any(|t| !t.hold_units().is_empty() || t.hold_reported_full());
                     if ui
                         .add_enabled(anything_in_holds, egui::Button::new(small("Empty all")))
                         .on_hover_text(
