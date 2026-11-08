@@ -330,14 +330,14 @@ impl MiningSupervisor {
         }
     }
 
-    /// The "End session" button: ends every character's session, values it
-    /// with the prices of this moment and stores it.
     /// True when prices and ore data are loaded, so a session can be valued.
     fn can_value_sessions(&self) -> bool {
         let prices_loaded = self.prices.as_ref().is_some_and(|p| p.fetched_unix > 0);
         prices_loaded && self.static_data.is_some()
     }
 
+    /// The "End session" button: ends every character's session, values it
+    /// with the prices of this moment and stores it.
     fn end_session(&mut self) {
         // The value is frozen when the session ends, so without prices or
         // ore data it would be stored as 0 ISK forever. Keep the session
