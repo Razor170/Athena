@@ -10,10 +10,6 @@
 //! rows), so lookups afterwards are plain map lookups. Loading is file I/O,
 //! so call it on a background thread, not the UI thread.
 
-// Nothing outside the tests uses this yet; the Mining Supervisor panel will.
-// Remove this line when it is wired in.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -186,10 +182,6 @@ impl StaticData {
         Ok(data)
     }
 
-    pub fn item(&self, type_id: i64) -> Option<&Item> {
-        self.items.get(&type_id)
-    }
-
     /// Looks up an item by its English name, as written in the logs.
     pub fn item_by_name(&self, name: &str) -> Option<&Item> {
         self.items.get(self.id_by_name.get(name)?)
@@ -200,11 +192,6 @@ impl StaticData {
         self.items
             .values()
             .filter(|item| item.kind != ItemKind::Material)
-    }
-
-    /// The compressed version of an item, if it has one.
-    pub fn compressed_of(&self, type_id: i64) -> Option<&Item> {
-        self.items.get(self.compressed.get(&type_id)?)
     }
 
     /// What one unit of `type_id` reprocesses into at 100% yield, as
@@ -299,10 +286,6 @@ pub mod tests {
         let veldspar = data.item_by_name("Veldspar").unwrap();
         assert_eq!(veldspar.volume_m3, 0.1);
         assert_eq!(veldspar.kind, ItemKind::Ore);
-        assert_eq!(
-            data.compressed_of(veldspar.type_id).unwrap().name,
-            "Compressed Veldspar"
-        );
         assert!(data.item_by_name("Mystery Ore").is_none());
         assert_eq!(data.minable_items().count(), 5);
     }

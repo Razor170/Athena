@@ -27,6 +27,26 @@ run it. Click **More info**, then **Run anyway**.
 - Closed tabs come back through the **View** menu.
 - The layout is saved when Athena closes.
 
+## Mining Supervisor
+
+One card per character, filled from the game logs (`Documents\EVE\logs\Gamelogs`; set
+another log folder in Athena's settings):
+
+- **Hold bar:** purple is compressed ore, green normal ore, yellow above your alert level,
+  red when full. EVE writes nothing when you unload at a station, so click **Emptied**
+  afterwards.
+- **Borders:** red dashed means the miners stopped (or the hold is full), purple means a
+  mining crystal broke.
+- **Belt scan:** copy a Mining Survey Scanner result in EVE (Ctrl+A, Ctrl+C) and it shows up
+  in the panel. Copy another one later to see how fast the belt is going.
+- **End session** ends mining for all characters at once and stores it in History, valued
+  with the Jita prices of that moment. That value never changes afterwards.
+- **Settings:** hold size and alert level for everyone (11,500 m³ and 70% by default),
+  with per-character overrides, Jita buy or sell, and the refining yields.
+
+Files in the data folder: `mining.toml` (settings), `mining_state.toml` (hold contents
+and the running session), `mining.sqlite` (history), `jita_prices.toml` (price cache).
+
 ## Building from source
 
 ```
