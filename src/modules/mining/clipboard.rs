@@ -55,10 +55,18 @@ fn watch(scans: Sender<BeltScan>, stop: Receiver<()>, egui_ctx: egui::Context) {
         if current == last_seen {
             continue;
         }
-        last_seen = current;
-        let Some(text) = win::read_text(MAX_TEXT_BYTES) else {
-            continue;
+        let text = match win::read_text(MAX_TEXT_BYTES) {
+            ClipboardText::Text(text) => text,
+            ClipboardText::NoText => {
+                last_seen = current;
+                continue;
+            }
+            // Another program has the clipboard open right now (often just
+            // after a copy). Keep `last_seen` as it is, so the next tick
+            // tries this change again instead of losing the scan.
+            ClipboardText::Busy => continue,
         };
+        last_seen = current;
         if let Some(scan) = BeltScan::parse(&text, now()) {
             if scans.send(scan).is_err() {
                 return;
@@ -66,6 +74,17 @@ fn watch(scans: Sender<BeltScan>, stop: Receiver<()>, egui_ctx: egui::Context) {
             egui_ctx.request_repaint();
         }
     }
+}
+
+/// What reading the clipboard gave.
+// Only the Windows code makes `Text` and `Busy`.
+#[cfg_attr(not(windows), allow(dead_code))]
+enum ClipboardText {
+    Text(String),
+    /// No text on it, or too much to be a scan.
+    NoText,
+    /// Another program has it open; try again shortly.
+    Busy,
 }
 
 /// The current time as EVE time (UTC).
@@ -86,6 +105,8 @@ mod win {
     };
     use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 
+    use super::ClipboardText;
+
     /// The clipboard format for UTF-16 text (`CF_UNICODETEXT`).
     const CF_UNICODETEXT: u32 = 13;
 
@@ -95,19 +116,17 @@ mod win {
     }
 
     /// The clipboard text, if there is any and it is at most `max_bytes`.
-    /// Returns `None` when another program has the clipboard open; the next
-    /// change is picked up anyway.
-    pub fn read_text(max_bytes: usize) -> Option<String> {
+    pub fn read_text(max_bytes: usize) -> ClipboardText {
         // SAFETY: the Windows clipboard protocol is followed exactly:
         // open, get the handle, lock it, copy the text out, unlock, close.
         // The pointer is only used while the memory is locked, and never
         // read past the size Windows reports for it.
         unsafe {
             if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 {
-                return None;
+                return ClipboardText::NoText;
             }
             if OpenClipboard(std::ptr::null_mut()) == 0 {
-                return None;
+                return ClipboardText::Busy;
             }
             let text = (|| {
                 let handle = GetClipboardData(CF_UNICODETEXT);
@@ -132,7 +151,10 @@ mod win {
                 Some(text)
             })();
             CloseClipboard();
-            text
+            match text {
+                Some(text) => ClipboardText::Text(text),
+                None => ClipboardText::NoText,
+            }
         }
     }
 }
@@ -140,11 +162,13 @@ mod win {
 /// Stand-ins so the code builds on other systems; never called there.
 #[cfg(not(windows))]
 mod win {
+    use super::ClipboardText;
+
     pub fn sequence_number() -> u32 {
         0
     }
 
-    pub fn read_text(_max_bytes: usize) -> Option<String> {
-        None
+    pub fn read_text(_max_bytes: usize) -> ClipboardText {
+        ClipboardText::NoText
     }
 }

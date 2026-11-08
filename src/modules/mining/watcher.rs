@@ -177,19 +177,27 @@ impl Watcher {
             if !name.ends_with(".txt") || self.files.contains_key(&name) {
                 continue;
             }
-            let Ok(metadata) = entry.metadata() else {
+            // On Windows the directory listing's size and time are only
+            // updated when the writer closes the file, and EVE keeps its log
+            // open all session. So the listing is only good for skipping
+            // files that are clearly old (a stale time is never newer than
+            // the real one, and no log stays open across daily downtime).
+            let Ok(listed) = entry.metadata() else {
                 continue;
             };
-            let age_hours = metadata
-                .modified()
-                .ok()
-                .and_then(|modified| now.duration_since(modified).ok())
-                .map(|age| age.as_secs() / 3600)
-                .unwrap_or(0);
+            if age_in_hours(&listed, now) >= FOLLOW_HOURS {
+                continue;
+            }
+            // For the files that remain, ask the file itself for the real
+            // size and time.
+            let path = entry.path();
+            let Ok(metadata) = std::fs::metadata(&path) else {
+                continue;
+            };
+            let age_hours = age_in_hours(&metadata, now);
             if age_hours >= FOLLOW_HOURS {
                 continue;
             }
-            let path = entry.path();
             let size = metadata.len();
             let followed = match self.known.get(&name) {
                 // Read before: continue where we stopped. A file that got
@@ -276,6 +284,16 @@ fn read_new_bytes(
     followed.read_to += got as u64;
     let more = followed.read_to < size;
     Ok(Some((followed.reader.push(&buffer), more)))
+}
+
+/// Hours since the file was last changed (0 if unknown).
+fn age_in_hours(metadata: &std::fs::Metadata, now: SystemTime) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .map(|age| age.as_secs() / 3600)
+        .unwrap_or(0)
 }
 
 /// Follows an old file from its current end. The header is read first, so
