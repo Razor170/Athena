@@ -1,14 +1,19 @@
 //! Draws the Intel Supervisor panel, following the approved mockup
 //! (<https://claude.ai/artifact/AAU2CByJPT4bJj9xbcFqeY>).
 //!
-//! For now (PR 3 of 6): the toolbar (region picker, Follow, pilot chips),
-//! the map, a draggable split, and a plain list of reports where the
-//! mockup's intel list goes in the next pull request. Settings has the
-//! "Intel channels" box and the Map box's Follow switch.
+//! So far (PR 4 of 6): the toolbar (region picker, Follow, pilot chips,
+//! alert range, Mute), the map with the alert banner, a draggable split,
+//! and the intel list. Settings has the "Intel channels", "Alerts" and
+//! "Map" boxes.
+
+use std::collections::HashMap;
+use std::time::Duration;
 
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke, Vec2};
 
-use super::{IntelSupervisor, View, map};
+use super::alerts::{self, SystemMark};
+use super::sound::{self, SoundKind};
+use super::{IntelSupervisor, Report, View, map, now};
 
 /// The Settings view has the same width as the Mining panel.
 const SETTINGS_WIDTH: f32 = 480.0;
@@ -21,6 +26,23 @@ const CHIP_FILL: Color32 = Color32::from_rgb(0x1d, 0x33, 0x52);
 const CHIP_BORDER: Color32 = Color32::from_rgb(0x3d, 0x6f, 0xae);
 const CHIP_TEXT: Color32 = Color32::from_rgb(0xcf, 0xe2, 0xff);
 const HANDLE: Color32 = Color32::from_rgb(0x4a, 0x4f, 0x57);
+const NOTE: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x8a);
+const TEXT: Color32 = Color32::from_rgb(0xc8, 0xc8, 0xc8);
+const SHIP_BORDER: Color32 = Color32::from_rgb(0x55, 0x55, 0x55);
+const SHIP_TEXT: Color32 = Color32::from_rgb(0xe8, 0xe8, 0xe8);
+// Report cards: new (red), faded, cleared, and past the fade time.
+const NEW_FILL: Color32 = Color32::from_rgb(0x3a, 0x15, 0x12);
+const FADED_FILL: Color32 = Color32::from_rgb(0x23, 0x21, 0x20);
+const FADED_BORDER: Color32 = Color32::from_rgb(0x3a, 0x35, 0x33);
+const CLEAR_FILL: Color32 = Color32::from_rgb(0x1c, 0x26, 0x1d);
+const CLEAR_BORDER: Color32 = Color32::from_rgb(0x33, 0x50, 0x3a);
+const OLD_FILL: Color32 = Color32::from_rgb(0x22, 0x22, 0x22);
+// The alert banner.
+const BANNER_TITLE: Color32 = Color32::from_rgb(0xff, 0xb3, 0xad);
+const BANNER_TEXT: Color32 = Color32::from_rgb(0xf0, 0xd0, 0xcc);
+/// While reports are fading, the map and list are redrawn this often (not
+/// every frame): the badges count whole minutes.
+const FADE_REPAINT: Duration = Duration::from_secs(30);
 
 /// The map and the list can't be dragged narrower than this.
 const MIN_MAP_WIDTH: f32 = 300.0;
@@ -149,6 +171,34 @@ fn toolbar(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
         if let Some(name) = clicked {
             module.toggle_pilot_hidden(&name);
         }
+
+        ui.add_space(12.0);
+        let alert_jumps = module.alert_jumps();
+        ui.label(
+            RichText::new(format!(
+                "Alert at {alert_jumps} jumps or less · loud at {}",
+                module.settings.loud_jumps.min(alert_jumps)
+            ))
+            .color(DIM),
+        );
+        let mute_text = match module.muted_until {
+            Some(until) if module.is_muted() => {
+                let left = (-now().seconds_since(until)).max(0);
+                format!("Muted · {}:{:02}", left / 60, left % 60)
+            }
+            _ => "Mute 5 min".to_string(),
+        };
+        if ui
+            .button(mute_text)
+            .on_hover_text("No sound or flashing for 5 minutes. Click again to unmute.")
+            .clicked()
+        {
+            module.toggle_mute();
+        }
+        if module.is_muted() {
+            // Counts down once a second while muted (and visible).
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+        }
     });
 }
 
@@ -191,10 +241,21 @@ fn map_and_list(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
     let list_rect = egui::Rect::from_min_max(egui::pos2(handle_rect.right(), area.top()), area.max);
 
     let pilots = module.pilots_by_system();
+    let now = now();
+    let reports: Vec<&Report> = module.reports.iter().collect();
+    let marks = alerts::system_marks(&reports, now, module.fade_seconds(), &module.distances);
     let mut map_ui = ui.new_child(egui::UiBuilder::new().max_rect(map_rect));
-    module
-        .map
-        .show(&mut map_ui, &map::MapContent { pilots: &pilots });
+    module.map.show(
+        &mut map_ui,
+        &map::MapContent {
+            pilots: &pilots,
+            marks: &marks,
+            alert_frame: module.alert.is_some() && module.settings.flash,
+            fade_minutes: module.settings.fade_minutes,
+        },
+    );
+    alert_banner(module, ui, map_rect);
+    schedule_fade_repaint(module, ui, &marks);
 
     // The handle: a short bar in the middle, dragged sideways.
     let handle = ui
@@ -223,46 +284,211 @@ fn map_and_list(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
     ui.allocate_rect(area, egui::Sense::hover());
 }
 
-/// Stand-in for the intel list: reports as plain text.
-fn report_list(module: &IntelSupervisor, ui: &mut egui::Ui) {
+/// The red banner across the top of the map while an alert is showing.
+fn alert_banner(module: &mut IntelSupervisor, ui: &mut egui::Ui, map_rect: egui::Rect) {
+    let Some(alert) = &module.alert else {
+        return;
+    };
+    let universe = module.universe();
+    let system = universe
+        .and_then(|u| u.system(alert.system_id))
+        .map(|s| s.name.clone())
+        .unwrap_or_default();
+    let pilots = and_list(&alert.pilots);
+    let title = match alert.jumps {
+        0 => format!("{system} · in system with {pilots}"),
+        n => format!("{system} · {} from {pilots}", alerts::jumps_text(n)),
+    };
+    let mut details: Vec<String> = alert.report.message.ships.clone();
+    details.push(format!("reported by {}", alert.report.sender));
+    details.push(clock_text(alert.report.time.unix_seconds));
+
+    let area = egui::Rect::from_min_size(
+        map_rect.min + Vec2::splat(12.0),
+        Vec2::new((map_rect.width() - 24.0).max(0.0), 34.0),
+    );
+    let mut dismissed = false;
+    let mut banner_ui = ui.new_child(egui::UiBuilder::new().max_rect(area));
+    banner_ui.set_clip_rect(area.expand(2.0));
+    egui::Frame::new()
+        .fill(NEW_FILL)
+        .stroke(Stroke::new(2.0, alerts::RED))
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(10, 5))
+        .show(&mut banner_ui, |ui| {
+            ui.set_width(ui.available_width());
+            // Dismiss first, on the right, so long text is cut short
+            // instead of pushing it out of the map.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                dismissed = ui.button(small("Dismiss")).clicked();
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new(title).color(BANNER_TITLE).strong())
+                            .truncate(),
+                    );
+                    ui.add(
+                        egui::Label::new(RichText::new(details.join(" · ")).color(BANNER_TEXT))
+                            .truncate(),
+                    );
+                });
+            });
+        });
+    if dismissed {
+        module.alert = None;
+    }
+}
+
+/// "Pilot Alpha", "Pilot Alpha and Pilot Bravo", "A, B and C".
+fn and_list(names: &[String]) -> String {
+    match names {
+        [] => "your pilots".to_string(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Reports fade by age, so the map needs a redraw now and then while any
+/// is still fading, but never while Athena is minimized.
+fn schedule_fade_repaint(
+    module: &IntelSupervisor,
+    ui: &egui::Ui,
+    marks: &HashMap<i64, SystemMark>,
+) {
+    let minimized = ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
+    if !minimized && (!marks.is_empty() || module.alert.is_some()) {
+        ui.ctx().request_repaint_after(FADE_REPAINT);
+    }
+}
+
+/// A small coloured chip with white text, like the "1 jump" badge.
+fn badge(ui: &mut egui::Ui, text: &str, fill: Color32) {
+    egui::Frame::new()
+        .fill(fill)
+        .corner_radius(CornerRadius::same(3))
+        .inner_margin(egui::Margin::symmetric(5, 0))
+        .show(ui, |ui| {
+            ui.label(small(text).color(Color32::WHITE).strong());
+        });
+}
+
+/// The intel list: one card per report, newest first.
+fn report_list(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
     let Some(data) = module.static_data.clone() else {
         return;
     };
     let universe = &data.universe;
-    let system_name = |id: i64| {
-        universe
-            .system(id)
-            .map(|s| s.name.clone())
-            .unwrap_or_default()
-    };
-    ui.label(RichText::new("Intel").color(BRIGHT).strong());
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Intel").color(BRIGHT).strong().size(13.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .selectable_label(module.settings.only_in_range, small("Only in range"))
+                .on_hover_text("Show only reports within the alert range.")
+                .clicked()
+            {
+                module.settings.only_in_range = !module.settings.only_in_range;
+                module.save_settings();
+            }
+            let count = module.settings.channels.len();
+            let channels = match count {
+                1 => "1 channel".to_string(),
+                n => format!("{n} channels"),
+            };
+            ui.label(small(channels).color(DIM));
+            // Green while the logs can be read, yellow if not.
+            let ok = !module.problems.contains_key("chatlogs") && count > 0;
+            let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
+            ui.painter()
+                .circle_filled(dot.center(), 4.0, if ok { alerts::GREEN } else { YELLOW });
+        });
+    });
     if module.settings.channels.is_empty() {
         ui.label(small("Pick your intel channels in Settings.").color(DIM));
     }
+
+    let now = now();
+    let fade = module.fade_seconds();
+    let alert_jumps = module.alert_jumps();
     for report in &module.reports {
+        let jumps = alerts::report_jumps(report, &module.distances);
+        if module.settings.only_in_range && jumps.is_none_or(|j| j > alert_jumps) {
+            continue;
+        }
+        let fraction = alerts::fade_fraction(report, now, fade);
+        let named = !report.message.systems.is_empty();
+        let (fill, border, badge_color) = if !named || fraction >= 1.0 {
+            (OLD_FILL, BORDER, alerts::OLD_GREY)
+        } else if report.message.clear {
+            (CLEAR_FILL, CLEAR_BORDER, alerts::GREEN)
+        } else {
+            (
+                alerts::mix(NEW_FILL, FADED_FILL, fraction),
+                alerts::mix(alerts::RED, FADED_BORDER, fraction),
+                alerts::fade_color(fraction),
+            )
+        };
         let systems: Vec<String> = report
             .message
             .systems
             .iter()
-            .map(|&id| system_name(id))
+            .filter_map(|&id| universe.system(id).map(|s| s.name.clone()))
             .collect();
-        let mut parts = vec![clock_text(report.time.unix_seconds)];
-        parts.push(if systems.is_empty() {
-            "–".to_string()
-        } else {
-            systems.join(", ")
-        });
-        if !report.message.ships.is_empty() {
-            parts.push(report.message.ships.join(", "));
-        }
-        if report.message.clear {
-            parts.push("clear".to_string());
-        }
-        parts.push(format!("{} > {}", report.sender, report.text));
-        parts.push(report.channel.clone());
-        let color = if systems.is_empty() { DIM } else { BRIGHT };
-        ui.label(small(parts.join(" · ")).color(color));
+        egui::Frame::new()
+            .fill(fill)
+            .stroke(Stroke::new(1.0, border))
+            .corner_radius(CornerRadius::same(5))
+            .inner_margin(egui::Margin::symmetric(7, 5))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing = Vec2::new(6.0, 3.0);
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [52.0, 14.0],
+                        egui::Label::new(
+                            RichText::new(clock_text(report.time.unix_seconds))
+                                .color(DIM)
+                                .monospace()
+                                .size(11.0),
+                        ),
+                    );
+                    if named {
+                        ui.label(RichText::new(systems.join(", ")).color(BRIGHT).strong());
+                    }
+                    if let Some(jumps) = jumps {
+                        badge(ui, &alerts::jumps_text(jumps), badge_color);
+                    }
+                    if report.message.clear {
+                        badge(ui, "clear", badge_color);
+                    }
+                    for ship in &report.message.ships {
+                        egui::Frame::new()
+                            .stroke(Stroke::new(1.0, SHIP_BORDER))
+                            .corner_radius(CornerRadius::same(3))
+                            .inner_margin(egui::Margin::symmetric(5, 0))
+                            .show(ui, |ui| {
+                                ui.label(small(ship).color(SHIP_TEXT));
+                            });
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(small(&report.channel).color(NOTE));
+                    });
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_space(58.0);
+                    let color = if named { TEXT } else { DIM };
+                    ui.label(RichText::new(&report.text).color(color))
+                        .on_hover_text(format!("{} > {}", report.sender, report.text));
+                });
+            });
     }
+    ui.add_space(6.0);
+    ui.label(
+        small(format!(
+            "Reports fade from red to grey over {} minutes; \"{}\" turns the system green.",
+            module.settings.fade_minutes,
+            module.settings.clear_words.join("\" or \"")
+        ))
+        .color(NOTE),
+    );
 }
 
 fn settings_view(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
@@ -299,6 +525,8 @@ fn settings_view(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
         module.set_channel_watched(&name, watched);
     }
 
+    alerts_settings(module, ui);
+
     section_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.label(RichText::new("Map").color(BRIGHT).strong());
@@ -318,6 +546,150 @@ fn settings_view(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
             .color(DIM),
         );
     });
+}
+
+/// Saves the settings once a number field is done changing: when a drag
+/// ends or typing finishes, not every frame of a drag.
+fn save_when_done(module: &mut IntelSupervisor, response: &egui::Response) {
+    let done = response.drag_stopped()
+        || response.lost_focus()
+        || (response.changed() && !response.dragged() && !response.has_focus());
+    if done {
+        module.save_settings();
+    }
+}
+
+/// The "Alerts" box in Settings.
+fn alerts_settings(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
+    let mut play: Option<u32> = None;
+    let mut open_folder = false;
+    section_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new("Alerts").color(BRIGHT).strong());
+        egui::Grid::new("intel_alert_settings")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Alert when a report is this close");
+                let response = ui.add(
+                    egui::DragValue::new(&mut module.settings.alert_jumps)
+                        .range(0..=sound::MAX_JUMPS)
+                        .suffix(" jumps"),
+                );
+                save_when_done(module, &response);
+                ui.end_row();
+
+                ui.label("Loud alert at");
+                let alert_jumps = module.settings.alert_jumps;
+                let response = ui
+                    .add(
+                        egui::DragValue::new(&mut module.settings.loud_jumps)
+                            .range(0..=alert_jumps)
+                            .suffix(" jumps"),
+                    )
+                    .on_hover_text("Full volume, played twice.");
+                save_when_done(module, &response);
+                ui.end_row();
+
+                ui.label("Sound");
+                let before = module.settings.sound;
+                egui::ComboBox::from_id_salt("intel_sound")
+                    .selected_text(match module.settings.sound {
+                        SoundKind::Voice => "Voice",
+                        SoundKind::Beep => "Beep",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut module.settings.sound, SoundKind::Voice, "Voice");
+                        ui.selectable_value(&mut module.settings.sound, SoundKind::Beep, "Beep");
+                    });
+                if module.settings.sound != before {
+                    module.save_settings();
+                }
+                ui.end_row();
+            });
+
+        ui.horizontal_wrapped(|ui| {
+            for jumps in 0..=module.settings.alert_jumps.min(sound::MAX_JUMPS) {
+                let text = match jumps {
+                    0 => "▶ Enemy in system".to_string(),
+                    1 => "▶ 1 jump".to_string(),
+                    n => format!("▶ {n}"),
+                };
+                if ui
+                    .button(text)
+                    .on_hover_text(sound::spoken_text(jumps))
+                    .clicked()
+                {
+                    play = Some(jumps);
+                }
+            }
+            open_folder = ui.button("Open sounds folder").clicked();
+        });
+        ui.label(
+            small(
+                "\"Enemy 3 jumps\" and so on, one WAV per distance in the sounds folder. \
+                 Drop in your own file with the same name to replace one.",
+            )
+            .color(DIM),
+        );
+
+        egui::Grid::new("intel_alert_settings_2")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Volume");
+                let mut percent = (module.settings.volume * 100.0).round();
+                let response = ui.add(egui::Slider::new(&mut percent, 0.0..=100.0).suffix(" %"));
+                if response.changed() {
+                    module.settings.volume = percent / 100.0;
+                }
+                save_when_done(module, &response);
+                ui.end_row();
+
+                ui.label("Reports fade to grey after");
+                let response = ui.add(
+                    egui::DragValue::new(&mut module.settings.fade_minutes)
+                        .range(1..=60)
+                        .suffix(" min"),
+                );
+                save_when_done(module, &response);
+                ui.end_row();
+
+                ui.label("Words that mean clear");
+                let response = ui.text_edit_singleline(&mut module.clear_words_text);
+                if response.lost_focus() {
+                    let text = module.clear_words_text.clone();
+                    module.set_clear_words(&text);
+                    module.clear_words_text = module.settings.clear_words.join(", ");
+                }
+                ui.end_row();
+            });
+        if ui
+            .checkbox(
+                &mut module.settings.flash,
+                "Flash the map and the taskbar button",
+            )
+            .changed()
+        {
+            module.save_settings();
+        }
+        ui.label(
+            small("Distance counts from the nearest of your pilots, by gate jumps.").color(DIM),
+        );
+    });
+    if let Some(jumps) = play {
+        module.play_sample(jumps);
+    }
+    if open_folder {
+        match sound::open_sounds_folder() {
+            Ok(()) => {
+                module.problems.remove("sounds");
+            }
+            Err(problem) => {
+                module.problems.insert("sounds", problem);
+            }
+        }
+    }
 }
 
 /// "14:52:10" (EVE time) from unix seconds.

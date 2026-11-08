@@ -101,6 +101,35 @@ jobs:
             exit 1
           }
 
+      # Intel Supervisor voice alerts ("Enemy 3 jumps"), spoken by the
+      # Windows built-in voice into 16-bit mono WAVs. Windows PowerShell 5.1
+      # (`shell: powershell`) has System.Speech; PowerShell 7 doesn't.
+      # The names must match `file_name` in src/modules/intel/sound.rs.
+      - name: Make voice alert sounds
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Add-Type -AssemblyName System.Speech
+          $dir = "dist/Athena/sounds"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $voice = New-Object System.Speech.Synthesis.SpeechSynthesizer
+          if ($voice.GetInstalledVoices().Count -eq 0) {
+            Write-Error "No Windows voice is installed on this runner."
+            exit 1
+          }
+          $format = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(22050, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)
+          for ($jumps = 0; $jumps -le 10; $jumps++) {
+            if ($jumps -eq 0) { $name = "enemy-in-system.wav"; $text = "Enemy in system" }
+            elseif ($jumps -eq 1) { $name = "enemy-1-jump.wav"; $text = "Enemy 1 jump" }
+            else { $name = "enemy-$jumps-jumps.wav"; $text = "Enemy $jumps jumps" }
+            $path = Join-Path (Resolve-Path $dir) $name
+            $voice.SetOutputToWaveFile($path, $format)
+            $voice.Speak($text)
+          }
+          $voice.SetOutputToNull()
+          $voice.Dispose()
+          Get-ChildItem $dir | Format-Table Name, Length
+
       - name: Package portable zip
         shell: pwsh
         run: |
