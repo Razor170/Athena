@@ -485,7 +485,12 @@ mod tests {
     use super::*;
 
     fn module() -> IntelSupervisor {
-        let dir = std::env::temp_dir().join(format!("athena-intel-{}", std::process::id()));
+        // Tests run in parallel in one process, and a test that hides a
+        // pilot saves intel.toml, so each module gets a folder of its own.
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("athena-intel-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let settings = Settings {
             log_folder: dir.join("no-logs-here"),
