@@ -1,5 +1,6 @@
-//! Belt scans: the result of the Mining Survey Scanner, copied from EVE and
-//! pasted into Athena.
+//! Belt scans: the result of the Mining Survey Scanner, copied from EVE.
+//! Athena watches the clipboard and picks up anything that is a valid scan,
+//! so the user only has to copy it in EVE.
 //!
 //! EVE copies the scan as text, one rock per line, with tab-separated
 //! columns:
@@ -36,12 +37,33 @@ pub struct BeltScan {
 }
 
 impl BeltScan {
-    /// Parses pasted scan text. Lines that don't look like a rock are
-    /// skipped. Returns `None` if no rock was found at all, so a wrong
-    /// clipboard content can be reported to the user.
+    /// Parses clipboard text as a scan.
+    ///
+    /// Because this runs on whatever the user copies, it is strict: every
+    /// non-empty line must be a rock or a group header naming an ore that
+    /// also appears as a rock. Anything else (a chat line, a fitting, a
+    /// web page) gives `None`, and the clipboard is left alone.
     pub fn parse(text: &str, taken: LogTime) -> Option<BeltScan> {
-        let rocks: Vec<Rock> = text.lines().filter_map(parse_rock).collect();
+        let mut rocks = Vec::new();
+        let mut headers = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if line.contains('\t') {
+                rocks.push(parse_rock(line)?);
+            } else {
+                headers.push(line);
+            }
+        }
         if rocks.is_empty() {
+            return None;
+        }
+        let headers_match = headers
+            .iter()
+            .all(|header| rocks.iter().any(|rock| rock.ore == *header));
+        if !headers_match {
             return None;
         }
         Some(BeltScan { taken, rocks })
@@ -139,10 +161,14 @@ pub fn ore_family(ore: &str) -> &str {
     }
 }
 
-/// Parses one line of the scan, or returns `None` for headers and junk.
+/// Parses one rock line, or returns `None` if it isn't one.
 fn parse_rock(line: &str) -> Option<Rock> {
     let columns: Vec<&str> = line.split('\t').map(str::trim).collect();
-    if columns.len() < 3 {
+    // Name, quantity, volume, ISK, distance.
+    if columns.len() != 5 {
+        return None;
+    }
+    if !columns[2].ends_with("m3") && !columns[2].ends_with("m³") {
         return None;
     }
     let ore = columns[0];
@@ -152,8 +178,11 @@ fn parse_rock(line: &str) -> Option<Rock> {
     let units = parse_number(columns[1])?;
     // "499,992 m3"
     let volume_m3 = parse_number(columns[2].trim_end_matches("m3").trim_end_matches("m³"))?;
-    // Column 3 is ISK, ignored. Column 4 is the distance, if present.
-    let distance_m = columns.get(4).and_then(|text| parse_distance(text));
+    // Column 3 is ISK, ignored. Column 4 is the distance.
+    if !columns[3].ends_with("ISK") {
+        return None;
+    }
+    let distance_m = parse_distance(columns[4]);
     Some(Rock {
         ore: ore.to_string(),
         units: units as u64,
@@ -224,12 +253,22 @@ Mordunium\t2,855,327\t285,532 m3\t44,300,000.00 ISK\t38 km
     }
 
     #[test]
-    fn handles_windows_line_ends_and_junk() {
-        let text = "hello\r\nOmber\t900,000\t540,000 m3\t1.00 ISK\t64 km\r\n\r\n";
+    fn handles_windows_line_ends() {
+        let text = "Omber\r\nOmber\t900,000\t540,000 m3\t1.00 ISK\t64 km\r\n\r\n";
         let scan = BeltScan::parse(text, at(0)).unwrap();
         assert_eq!(scan.rock_count(), 1);
-        assert!(BeltScan::parse("not a scan at all", at(0)).is_none());
+    }
+
+    #[test]
+    fn rejects_other_clipboard_contents() {
         assert!(BeltScan::parse("", at(0)).is_none());
+        assert!(BeltScan::parse("not a scan at all", at(0)).is_none());
+        // A scan with an unrelated line mixed in.
+        let mixed = "hello\nOmber\t900,000\t540,000 m3\t1.00 ISK\t64 km\n";
+        assert!(BeltScan::parse(mixed, at(0)).is_none());
+        // Tab-separated data that isn't a scan (e.g. from a spreadsheet).
+        assert!(BeltScan::parse("a\t1\t2\t3\t4\n", at(0)).is_none());
+        assert!(BeltScan::parse("Omber\t900,000\t540,000 m3\n", at(0)).is_none());
     }
 
     #[test]
