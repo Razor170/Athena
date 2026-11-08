@@ -18,7 +18,7 @@ pub struct TrackerSettings {
     /// Size of the ore hold in m³ (from Show Info in game, with skills).
     /// `None` until the user has entered it; fill alerts are off until then.
     pub hold_capacity_m3: Option<f64>,
-    /// Alert when the hold is at least this full, in percent (e.g. 90.0).
+    /// Alert when the hold is at least this full, in percent (default 70).
     pub fill_alert_percent: f64,
     /// Alert when the hold is at least this full, in percent, as "full".
     /// Slightly under 100 because the last cycle rarely fits exactly.
@@ -38,7 +38,7 @@ impl Default for TrackerSettings {
     fn default() -> Self {
         TrackerSettings {
             hold_capacity_m3: None,
-            fill_alert_percent: 90.0,
+            fill_alert_percent: 70.0,
             full_percent: 99.0,
             miner_stopped_min_secs: 60,
             idle_after_secs: 5 * 60,
@@ -108,8 +108,11 @@ pub struct FinishedSession {
     pub started: LogTime,
     /// Time of the last mining cycle.
     pub ended: LogTime,
-    /// Units mined per ore name (critical bonuses included).
+    /// Units mined per ore name (critical bonuses included) that made it
+    /// into the hold.
     pub mined_units: BTreeMap<String, u64>,
+    /// Units mined while the hold was full. EVE discards them.
+    pub voided_units: BTreeMap<String, u64>,
     pub cycles: u64,
 }
 
@@ -118,7 +121,10 @@ pub struct FinishedSession {
 pub struct ActiveSession {
     pub started: LogTime,
     pub last_cycle: LogTime,
+    /// Units that made it into the hold, per ore name.
     pub mined_units: BTreeMap<String, u64>,
+    /// Units mined while the hold was full, which EVE discards.
+    pub voided_units: BTreeMap<String, u64>,
     pub cycles: u64,
 }
 
@@ -186,6 +192,24 @@ impl CharacterTracker {
             .map(|(earlier, later)| later.seconds_since(*earlier))
             .max()?;
         Some((longest_gap * 2).max(self.settings.miner_stopped_min_secs))
+    }
+
+    /// How many of `units` of `ore` still fit in the hold. All of them if
+    /// the hold size or the ore's volume is unknown.
+    fn units_that_fit(&self, ore: &str, units: u64, volumes: &VolumeTable) -> u64 {
+        let (Some(capacity), Some(unit_volume)) =
+            (self.settings.hold_capacity_m3, volumes.get(ore))
+        else {
+            return units;
+        };
+        if unit_volume <= 0.0 {
+            return units;
+        }
+        let free_m3 = (capacity - self.hold_fill(volumes).total_m3()).max(0.0);
+        // `as u64` rounds down, which is what we want: a partial unit doesn't fit.
+        // A tiny tolerance keeps float rounding from losing a whole unit.
+        let fitting = ((free_m3 + 1e-6) / unit_volume) as u64;
+        units.min(fitting)
     }
 
     /// Remembers a cycle time for [`Self::miner_stopped_after_secs`].
@@ -259,14 +283,24 @@ impl CharacterTracker {
                 // A cycle after a long gap: the old session is over.
                 finished = self.end_session_if_gap(event.time);
 
+                // Ore that doesn't fit in the hold is discarded by EVE.
+                let kept = self.units_that_fit(ore, *units, volumes);
+                let voided = units - kept;
+
                 let session = self.session.get_or_insert_with(|| ActiveSession {
                     started: event.time,
                     last_cycle: event.time,
                     mined_units: BTreeMap::new(),
+                    voided_units: BTreeMap::new(),
                     cycles: 0,
                 });
                 session.last_cycle = event.time;
-                *session.mined_units.entry(ore.clone()).or_insert(0) += units;
+                if kept > 0 {
+                    *session.mined_units.entry(ore.clone()).or_insert(0) += kept;
+                }
+                if voided > 0 {
+                    *session.voided_units.entry(ore.clone()).or_insert(0) += voided;
+                }
                 // A critical success is a bonus on a cycle that already has
                 // its own "You mined" line, so it is not a cycle of its own.
                 if !critical {
@@ -274,7 +308,9 @@ impl CharacterTracker {
                     self.record_cycle_time(event.time);
                 }
 
-                *self.hold_units.entry(ore.clone()).or_insert(0) += units;
+                if kept > 0 {
+                    *self.hold_units.entry(ore.clone()).or_insert(0) += kept;
+                }
 
                 // Mining again re-arms the time based alerts.
                 self.raised_stopped = false;
@@ -354,6 +390,7 @@ impl CharacterTracker {
             started: session.started,
             ended: session.last_cycle,
             mined_units: session.mined_units,
+            voided_units: session.voided_units,
             cycles: session.cycles,
         })
     }
@@ -617,6 +654,24 @@ mod tests {
         }
         assert_eq!(t.miner_stopped_after_secs(), Some(200));
         assert_eq!(t.session().unwrap().cycles, 8);
+    }
+
+    #[test]
+    fn overflow_is_voided() {
+        let v = volumes();
+        let mut t = tracker(1_000.0);
+        // 95 units = 950 m³; then 20 more but only 5 fit.
+        t.apply(&mined(0, 95, "Rock"), &v);
+        let (alerts, _) = t.apply(&mined(10, 20, "Rock"), &v);
+        assert_eq!(alerts, vec![Alert::HoldFull]);
+        assert_eq!(t.hold_units().get("Rock"), Some(&100));
+        let session = t.session().unwrap();
+        assert_eq!(session.mined_units.get("Rock"), Some(&100));
+        assert_eq!(session.voided_units.get("Rock"), Some(&15));
+        // Completely full: everything is voided.
+        t.apply(&mined(20, 10, "Rock"), &v);
+        assert_eq!(t.hold_units().get("Rock"), Some(&100));
+        assert_eq!(t.session().unwrap().voided_units.get("Rock"), Some(&25));
     }
 
     #[test]
