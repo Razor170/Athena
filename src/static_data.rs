@@ -1,26 +1,29 @@
 //! Static game data from EVE's static data export (SDE): ore, ice, moon ore
 //! and gas types with their volumes, what they reprocess into, and which
-//! type each one compresses into.
+//! type each one compresses into. Also the map (regions, systems, gates)
+//! and ship names, in [`Universe`].
 //!
 //! The data comes from `static.sqlite`, which `cargo xtask sde` builds from
 //! the official SDE (see `xtask/src/main.rs`). CI builds it and puts it in the
 //! release zip next to `Athena.exe`; it is not committed to the repo.
 //!
-//! [`StaticData::load`] reads the whole file into memory (a few hundred
-//! rows), so lookups afterwards are plain map lookups. Loading takes a few
-//! milliseconds; the Mining Supervisor does it once at startup, before the
-//! window is shown. Don't call it while the UI is running.
+//! [`StaticData::load`] reads the whole file into memory (about 20,000 rows,
+//! well under a megabyte), so lookups afterwards are plain map lookups.
+//! Loading takes a few tens of milliseconds; modules do it once at startup,
+//! before the window is shown. Don't call it while the UI is running.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::universe::Universe;
+
 /// The file name, next to the exe.
 pub const FILE_NAME: &str = "static.sqlite";
 
 /// The `schema_version` this code can read. Must match the xtask.
-const SCHEMA_VERSION: &str = "1";
+const SCHEMA_VERSION: &str = "2";
 
 /// What kind of thing an item is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +79,8 @@ pub struct StaticData {
     reprocess: HashMap<i64, Vec<(i64, i64)>>,
     /// type id -> its compressed type id.
     compressed: HashMap<i64, i64>,
+    /// The map and ship names, for the Intel Supervisor.
+    pub universe: Universe,
 }
 
 impl StaticData {
@@ -180,6 +185,7 @@ impl StaticData {
         if data.items.is_empty() {
             bail!("static data contains no items");
         }
+        data.universe = Universe::from_connection(db).context("reading the map")?;
         Ok(data)
     }
 
@@ -255,7 +261,7 @@ pub mod tests {
             CREATE TABLE compressed (type_id INTEGER PRIMARY KEY,
                 compressed_type_id INTEGER NOT NULL);
 
-            INSERT INTO meta VALUES ('schema_version', '1'), ('sde_build', '3670638');
+            INSERT INTO meta VALUES ('schema_version', '2'), ('sde_build', '3670638');
             INSERT INTO items VALUES
                 (1230, 'Veldspar', 0.1, 100, 'Veldspar', 'ore'),
                 (62516, 'Compressed Veldspar', 0.001, 100, 'Veldspar', 'ore'),
@@ -273,6 +279,8 @@ pub mod tests {
             ",
         )
         .unwrap();
+        db.execute_batch(crate::universe::tests::SAMPLE_MAP_SQL)
+            .unwrap();
         db
     }
 
@@ -289,6 +297,8 @@ pub mod tests {
         assert_eq!(veldspar.kind, ItemKind::Ore);
         assert!(data.item_by_name("Mystery Ore").is_none());
         assert_eq!(data.minable_items().count(), 5);
+        // The map comes along.
+        assert!(data.universe.system_by_name("A1-XYZ").is_some());
     }
 
     #[test]
