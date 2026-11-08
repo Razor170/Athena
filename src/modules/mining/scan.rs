@@ -26,7 +26,7 @@ pub struct Rock {
     pub units: u64,
     pub volume_m3: f64,
     /// Distance from the ship when the scan was taken, in metres.
-    pub distance_m: Option<f64>,
+    pub distance_m: f64,
 }
 
 /// A parsed scan and when it was pasted.
@@ -152,6 +152,23 @@ pub fn belt_progress(first: &BeltScan, latest: &BeltScan) -> BeltProgress {
     }
 }
 
+/// Whether `latest` can be a later scan of the same belt as `first`.
+///
+/// Scans arrive from the clipboard automatically, so a scan of a different
+/// belt must not be compared with the old one (a smaller new belt would look
+/// like a huge mining rate). A belt only shrinks and never gains ore types,
+/// so a scan with more m³ or an ore family the first scan didn't have
+/// starts a new belt.
+pub fn is_same_belt(first: &BeltScan, latest: &BeltScan) -> bool {
+    if latest.total_m3() > first.total_m3() {
+        return false;
+    }
+    latest.rocks.iter().all(|rock| {
+        let family = ore_family(&rock.ore);
+        first.rocks.iter().any(|old| ore_family(&old.ore) == family)
+    })
+}
+
 /// "Mordunium III-Grade" -> "Mordunium". Names without a grade stay as
 /// they are.
 pub fn ore_family(ore: &str) -> &str {
@@ -175,17 +192,17 @@ fn parse_rock(line: &str) -> Option<Rock> {
     if ore.is_empty() {
         return None;
     }
-    let units = parse_number(columns[1])?;
+    let units = parse_whole_number(columns[1])?;
     // "499,992 m3"
     let volume_m3 = parse_number(columns[2].trim_end_matches("m3").trim_end_matches("m³"))?;
     // Column 3 is ISK, ignored. Column 4 is the distance.
     if !columns[3].ends_with("ISK") {
         return None;
     }
-    let distance_m = parse_distance(columns[4]);
+    let distance_m = parse_distance(columns[4])?;
     Some(Rock {
         ore: ore.to_string(),
-        units: units as u64,
+        units,
         volume_m3,
         distance_m,
     })
@@ -202,18 +219,43 @@ fn parse_distance(text: &str) -> Option<f64> {
     None
 }
 
-/// Parses "5,718,887" or "1,507" or "93,300,000.00". EVE's English client
-/// uses ',' for thousands and '.' for decimals.
-fn parse_number(text: &str) -> Option<f64> {
-    let cleaned: String = text
-        .trim()
-        .chars()
-        .filter(|c| !matches!(c, ',' | ' ' | '\u{a0}'))
-        .collect();
-    if cleaned.is_empty() {
+/// Parses a whole number in English format: "5,718,887" or "1,507".
+///
+/// Only the English client format is accepted. A German "833.320" is
+/// rejected instead of being read as 833, so a scan from a client in
+/// another language is ignored rather than shown with wrong numbers.
+fn parse_whole_number(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let groups: Vec<&str> = text.split(',').collect();
+    let first = groups.first()?;
+    let first_ok = (1..=3).contains(&first.len()) || groups.len() == 1;
+    let rest_ok = groups[1..].iter().all(|group| group.len() == 3);
+    let digits_ok = groups
+        .iter()
+        .all(|group| !group.is_empty() && group.chars().all(|c| c.is_ascii_digit()));
+    if !(first_ok && rest_ok && digits_ok) {
         return None;
     }
-    cleaned.parse().ok()
+    groups.concat().parse().ok()
+}
+
+/// Parses an English-format number with an optional decimal part:
+/// "499,992" or "93,300,000.00". See [`parse_whole_number`].
+fn parse_number(text: &str) -> Option<f64> {
+    let text = text.trim();
+    let (whole, fraction) = match text.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (text, None),
+    };
+    let whole = parse_whole_number(whole)? as f64;
+    match fraction {
+        None => Some(whole),
+        Some(digits) if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) => {
+            let value: f64 = format!("0.{digits}").parse().ok()?;
+            Some(whole + value)
+        }
+        Some(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -245,10 +287,10 @@ Mordunium\t2,855,327\t285,532 m3\t44,300,000.00 ISK\t38 km
                 ore: "Hedbergite III-Grade".to_string(),
                 units: 166_650,
                 volume_m3: 499_950.0,
-                distance_m: Some(30_000.0),
+                distance_m: 30_000.0,
             }
         );
-        assert_eq!(scan.rocks[3].distance_m, Some(1_507.0));
+        assert_eq!(scan.rocks[3].distance_m, 1_507.0);
         assert_eq!(scan.total_m3(), 2_295_481.0);
     }
 
@@ -316,5 +358,38 @@ Mordunium\t4,000,000\t400,000 m3\t1 ISK\t1,507 m
         let unchanged = belt_progress(&scan, &later);
         assert_eq!(unchanged.m3_per_hour, None);
         assert_eq!(unchanged.seconds_to_clear, None);
+    }
+
+    #[test]
+    fn strict_numbers() {
+        assert_eq!(parse_whole_number("5,718,887"), Some(5_718_887));
+        assert_eq!(parse_whole_number("12"), Some(12));
+        assert_eq!(parse_whole_number("833.320"), None);
+        assert_eq!(parse_whole_number("1,50"), None);
+        assert_eq!(parse_whole_number("-5"), None);
+        assert_eq!(parse_whole_number("NaN"), None);
+        assert_eq!(parse_number("93,300,000.00"), Some(93_300_000.0));
+        assert_eq!(parse_number("499,992"), Some(499_992.0));
+        assert_eq!(parse_number("inf"), None);
+        // A German-format scan line is rejected, not misread.
+        let german = "Omber\t833.320\t499.992 m3\t76.800.000,00 ISK\t96 km";
+        assert!(BeltScan::parse(german, at(0)).is_none());
+        // So is a row with an unreadable distance.
+        let bad_distance = "Omber\t900,000\t540,000 m3\t1.00 ISK\tfar away";
+        assert!(BeltScan::parse(bad_distance, at(0)).is_none());
+    }
+
+    #[test]
+    fn detects_a_new_belt() {
+        let first = BeltScan::parse(SCAN, at(0)).unwrap();
+        let smaller =
+            BeltScan::parse("Omber\t900,000\t500,000 m3\t1 ISK\t64 km\n", at(600)).unwrap();
+        assert!(is_same_belt(&first, &smaller));
+        let other_ore =
+            BeltScan::parse("Veldspar\t900,000\t50,000 m3\t1 ISK\t64 km\n", at(600)).unwrap();
+        assert!(!is_same_belt(&first, &other_ore));
+        let bigger =
+            BeltScan::parse("Omber\t900,000\t9,000,000 m3\t1 ISK\t64 km\n", at(600)).unwrap();
+        assert!(!is_same_belt(&first, &bigger));
     }
 }
