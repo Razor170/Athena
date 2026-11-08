@@ -199,10 +199,11 @@ impl MiningSupervisor {
             name,
             hold_units,
             session,
+            hold_reported_full,
         } in saved.characters
         {
             let mut tracker = CharacterTracker::new(&name, settings.tracker_settings(&name));
-            tracker.restore(hold_units, session);
+            tracker.restore(hold_units, session, hold_reported_full);
             trackers.insert(name, tracker);
         }
         let offsets: BTreeMap<String, FileOffset> = saved
@@ -393,6 +394,7 @@ impl MiningSupervisor {
                     name: tracker.character.clone(),
                     hold_units: tracker.hold_units().clone(),
                     session: tracker.session().cloned(),
+                    hold_reported_full: tracker.hold_reported_full(),
                 })
                 .collect(),
             files: self.offsets.values().cloned().collect(),

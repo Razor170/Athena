@@ -25,6 +25,8 @@ pub struct SavedCharacter {
     pub name: String,
     pub hold_units: BTreeMap<String, u64>,
     pub session: Option<ActiveSession>,
+    /// EVE said the hold is full and nothing has freed room since.
+    pub hold_reported_full: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -84,6 +86,7 @@ mod tests {
                     mined_units: mined,
                     cycles: 3,
                 }),
+                hold_reported_full: true,
             }],
             files: vec![FileOffset {
                 file: "20261108_073012_1.txt".to_string(),

@@ -204,9 +204,27 @@ impl CharacterTracker {
 
     /// Puts back the hold contents and running session saved before a
     /// restart. The guard (cycle rhythm, crystal) starts fresh.
-    pub fn restore(&mut self, hold_units: BTreeMap<String, u64>, session: Option<ActiveSession>) {
+    pub fn restore(
+        &mut self,
+        hold_units: BTreeMap<String, u64>,
+        session: Option<ActiveSession>,
+        reported_full: bool,
+    ) {
         self.hold_units = hold_units;
         self.session = session;
+        // A hold EVE called full before the restart is still full, and
+        // its alert was already shown.
+        self.reported_full = reported_full;
+        self.stopped = reported_full;
+        self.raised_full = reported_full;
+        self.raised_fill = reported_full;
+        self.raised_stopped = reported_full;
+    }
+
+    /// True while EVE's "cargo hold is full" line is the latest word on the
+    /// hold (saved across restarts).
+    pub fn hold_reported_full(&self) -> bool {
+        self.reported_full
     }
 
     /// Units in the hold per item name.
@@ -854,6 +872,20 @@ mod tests {
         // Compressing frees room.
         t.apply(&compressed(20, 50, "Rock"), &v);
         assert!(t.fill_percent(&v).unwrap() < 1.0);
+    }
+
+    #[test]
+    fn restored_full_hold_stays_full_without_new_alerts() {
+        let v = volumes();
+        let mut t = tracker(1_000.0);
+        let mut hold = BTreeMap::new();
+        hold.insert("Rock".to_string(), 50);
+        t.restore(hold, None, true);
+        assert!(t.hold_reported_full());
+        assert_eq!(t.fill_percent(&v), Some(100.0));
+        assert_eq!(t.guard_state(), GuardState::Stopped);
+        // The second module's line after the restart repeats nothing.
+        assert!(t.apply(&hold_full(10), &v).is_empty());
     }
 
     #[test]
