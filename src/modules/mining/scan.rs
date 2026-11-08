@@ -128,41 +128,68 @@ pub struct BeltProgress {
 /// so the number would be mostly noise.
 const MIN_SECONDS: i64 = 60;
 
-/// The last two scans of the current belt, for a rolling rate.
+/// Most scans kept per belt. Only scans less than `MIN_SECONDS` apart pile
+/// up, so this is just a safety cap.
+const MAX_KEPT: usize = 20;
+
+/// The recent scans of the current belt, for a rolling rate.
+///
+/// The rate compares the latest scan with the newest earlier scan that is at
+/// least `MIN_SECONDS` older. So it always covers the shortest useful window,
+/// a quick double copy doesn't wipe it, and copying every 30–50 s still rolls
+/// forward instead of growing into an average over the whole belt.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BeltScans {
-    /// The scan before `latest`, if there is one.
-    pub previous: Option<BeltScan>,
-    pub latest: Option<BeltScan>,
+    /// Oldest first. The first entry is the comparison scan once one exists;
+    /// everything older than that has been dropped.
+    recent: Vec<BeltScan>,
 }
 
 impl BeltScans {
-    /// Adds a new scan from the clipboard.
-    ///
-    /// - A later scan of the same belt moves the old latest scan to
-    ///   `previous`, so the rate always covers the last two scans.
-    /// - A scan less than `MIN_SECONDS` after the latest one (a quick
-    ///   re-copy) only replaces the latest scan. Keeping `previous` means the
-    ///   rate doesn't disappear just because the user copied twice.
-    /// - A scan of a different belt starts over.
+    /// Adds a new scan from the clipboard. A scan of a different belt
+    /// starts over.
     pub fn add(&mut self, scan: BeltScan) {
-        match self.latest.take() {
-            Some(latest) if is_same_belt(&latest, &scan) => {
-                if scan.taken.seconds_since(latest.taken) >= MIN_SECONDS {
-                    self.previous = Some(latest);
-                }
-                self.latest = Some(scan);
-            }
-            _ => {
-                self.previous = None;
-                self.latest = Some(scan);
-            }
+        let same_belt = self
+            .recent
+            .last()
+            .is_some_and(|newest| is_same_belt(newest, &scan));
+        if !same_belt {
+            self.recent.clear();
+        }
+        self.recent.push(scan);
+
+        // Drop every scan older than the comparison scan: they are no longer
+        // needed for the rate.
+        if let Some(anchor) = self.previous_index() {
+            self.recent.drain(..anchor);
+        }
+        if self.recent.len() > MAX_KEPT {
+            let extra = self.recent.len() - MAX_KEPT;
+            self.recent.drain(..extra);
         }
     }
 
-    /// Forgets both scans ("New belt").
+    /// The newest scan.
+    pub fn latest(&self) -> Option<&BeltScan> {
+        self.recent.last()
+    }
+
+    /// The scan the latest one is compared with: the newest one at least
+    /// `MIN_SECONDS` older. `None` until there is one.
+    pub fn previous(&self) -> Option<&BeltScan> {
+        self.previous_index().map(|index| &self.recent[index])
+    }
+
+    fn previous_index(&self) -> Option<usize> {
+        let latest = self.recent.last()?;
+        self.recent
+            .iter()
+            .rposition(|scan| latest.taken.seconds_since(scan.taken) >= MIN_SECONDS)
+    }
+
+    /// Forgets all scans ("New belt").
     pub fn clear(&mut self) {
-        *self = BeltScans::default();
+        self.recent.clear();
     }
 }
 
@@ -451,14 +478,14 @@ Mordunium\t{units}\t{m3} m3\t1 ISK\t1,507 m
     fn rate_rolls_over_the_last_two_scans() {
         let mut scans = BeltScans::default();
         scans.add(scan_with_mordunium("5,000,000", "500,000", 0));
-        assert!(scans.previous.is_none());
+        assert!(scans.previous().is_none());
         // 10 minutes later 100,000 m³ are gone.
         scans.add(scan_with_mordunium("4,000,000", "400,000", 600));
         // Another 10 minutes later only 20,000 m³ more are gone: the rate
         // must follow the slower pace, not average it with the first scan.
         scans.add(scan_with_mordunium("3,800,000", "380,000", 1_200));
-        let previous = scans.previous.as_ref().unwrap();
-        let latest = scans.latest.as_ref().unwrap();
+        let previous = scans.previous().unwrap();
+        let latest = scans.latest().unwrap();
         assert_eq!(previous.taken, at(600));
         assert_eq!(latest.taken, at(1_200));
         let progress = belt_progress(previous, latest);
@@ -475,8 +502,8 @@ Mordunium\t{units}\t{m3} m3\t1 ISK\t1,507 m
         scans.add(scan_with_mordunium("4,000,000", "400,000", 600));
         // Copied again 20 s later: replaces the latest scan only.
         scans.add(scan_with_mordunium("3,990,000", "399,000", 620));
-        assert_eq!(scans.previous.as_ref().unwrap().taken, at(0));
-        assert_eq!(scans.latest.as_ref().unwrap().taken, at(620));
+        assert_eq!(scans.previous().unwrap().taken, at(0));
+        assert_eq!(scans.latest().unwrap().taken, at(620));
     }
 
     #[test]
@@ -486,9 +513,51 @@ Mordunium\t{units}\t{m3} m3\t1 ISK\t1,507 m
         scans.add(scan_with_mordunium("4,000,000", "400,000", 600));
         let other = BeltScan::parse("Veldspar\t900,000\t50,000 m3\t1 ISK\t64 km\n", at(900));
         scans.add(other.unwrap());
-        assert!(scans.previous.is_none());
-        assert_eq!(scans.latest.as_ref().unwrap().taken, at(900));
+        assert!(scans.previous().is_none());
+        assert_eq!(scans.latest().unwrap().taken, at(900));
         scans.clear();
         assert_eq!(scans, BeltScans::default());
+    }
+
+    #[test]
+    fn copies_under_a_minute_apart_still_give_a_rate() {
+        let mut scans = BeltScans::default();
+        // A copy every 45 s, each 1,000 m³ smaller than the one before.
+        for step in 0..20_i64 {
+            let m3 = 500_000 - step * 1_000;
+            let units = m3 * 10;
+            scans.add(scan_with_mordunium(
+                &units.to_string(),
+                &m3.to_string(),
+                step * 45,
+            ));
+            if step < 2 {
+                // 0 s and 45 s: no scan is a minute older yet.
+                assert!(scans.previous().is_none());
+                continue;
+            }
+            // The rate covers the last 90 s (two copies back), not the whole
+            // time since the first copy.
+            let previous = scans.previous().unwrap();
+            let latest = scans.latest().unwrap();
+            assert_eq!(latest.taken.seconds_since(previous.taken), 90);
+            let rate = belt_progress(previous, latest).m3_per_hour.unwrap();
+            assert!((rate - 80_000.0).abs() < 0.01, "rate was {rate}");
+        }
+        // Old scans are dropped, not kept forever.
+        assert!(scans.recent.len() <= 3);
+    }
+
+    #[test]
+    fn frequent_copies_after_a_rate_keep_rolling() {
+        let mut scans = BeltScans::default();
+        scans.add(scan_with_mordunium("5,000,000", "500,000", 0));
+        scans.add(scan_with_mordunium("4,000,000", "400,000", 600));
+        // Now copies every 45 s: the comparison scan must move on from 0 s.
+        scans.add(scan_with_mordunium("3,990,000", "399,000", 645));
+        scans.add(scan_with_mordunium("3,980,000", "398,000", 690));
+        assert_eq!(scans.previous().unwrap().taken, at(600));
+        scans.add(scan_with_mordunium("3,970,000", "397,000", 735));
+        assert_eq!(scans.previous().unwrap().taken, at(645));
     }
 }
