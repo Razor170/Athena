@@ -190,7 +190,6 @@ impl EsiClient {
     }
 }
 
-/// A response header as text, if present and readable.
 /// `Expires` minus `Date`: how long ESI's answer stays current. Both come
 /// from ESI's clock, so the PC's clock being off doesn't matter.
 fn expires_in(response: &Response) -> Option<Duration> {
@@ -234,6 +233,7 @@ fn http_date_seconds(text: &str) -> Option<i64> {
     Some(days * 86_400 + hours * 3600 + minutes * 60 + seconds)
 }
 
+/// A response header as text, if present and readable.
 fn header_text(response: &Response, name: &str) -> Option<String> {
     response
         .headers()

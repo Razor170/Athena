@@ -39,7 +39,6 @@ const PILOT_TEXT: Color32 = Color32::from_rgb(0x8f, 0xc3, 0xff);
 const LEGEND_TEXT: Color32 = Color32::from_rgb(0xa8, 0xa8, 0xa8);
 const TAG_TEXT: Color32 = Color32::from_rgb(0xcf, 0xcf, 0xcf);
 const KILLS_TINT: Color32 = Color32::from_rgb(0xb0, 0x4c, 0xd8);
-const JUMPS_TINT: Color32 = Color32::from_rgb(0x9a, 0xb4, 0xd0);
 
 /// Zoom limits. 1.0 is the size the xtask laid the map out for.
 const MIN_ZOOM: f32 = 0.3;
@@ -423,14 +422,13 @@ impl MapView {
             let pilots = content.pilots.get(&node.id);
             let mark = content.marks.get(&node.id);
             let ring = dot_radius + 3.0 * zoom.max(0.6);
-            // The ESI tint: a soft glow behind the dot, bigger and
-            // stronger with more activity.
-            if let Some(activity) = content.activity.get(&node.id) {
-                let (color, strength) = activity_glow(activity);
+            // The ESI tint: a soft purple glow behind the dot, bigger and
+            // stronger with more player kills.
+            if let Some(strength) = content.activity.get(&node.id).and_then(kills_glow) {
                 painter.circle_filled(
                     center,
                     dot_radius + (4.0 + 10.0 * strength) * zoom.max(0.6),
-                    color.gamma_multiply(0.15 + 0.35 * strength),
+                    KILLS_TINT.gamma_multiply(0.15 + 0.35 * strength),
                 );
             }
             if let Some(mark) = mark {
@@ -557,19 +555,18 @@ impl MapView {
     }
 }
 
-/// The tint colour and a 0–1 strength for a system's activity: purple for
-/// player kills (ships and pods), else grey-blue for jumps. Both scale
-/// with the logarithm, so 5 kills already shows and 50 isn't ten times
-/// louder.
-pub fn activity_glow(activity: &SystemActivity) -> (Color32, f32) {
+/// How strongly (0.3–1) a system glows for its player kills (ships and
+/// pods) of the last hour, or `None` without any. Jumps alone don't glow
+/// (Kevin's choice, to keep the map calm); they show on hover. The
+/// strength grows with the logarithm, so 1 kill already shows and 30
+/// isn't thirty times louder.
+pub fn kills_glow(activity: &SystemActivity) -> Option<f32> {
     let kills = activity.ship_kills + activity.pod_kills;
-    if kills > 0 {
-        let strength = ((kills as f32).ln_1p() / 30f32.ln_1p()).min(1.0);
-        (KILLS_TINT, strength.max(0.3))
-    } else {
-        let strength = ((activity.jumps as f32).ln_1p() / 300f32.ln_1p()).min(1.0);
-        (JUMPS_TINT, strength * 0.8)
+    if kills == 0 {
+        return None;
     }
+    let strength = ((kills as f32).ln_1p() / 30f32.ln_1p()).min(1.0);
+    Some(strength.max(0.3))
 }
 
 /// "12 jumps · 3 ship kills · 1 pod kill · 40 NPC kills in the last hour".
@@ -605,7 +602,6 @@ fn legend(painter: &egui::Painter, view: Rect, fade_minutes: u32, tint: bool) {
     ];
     if tint {
         entries.push(("Kills (1 h)", Some(Some(KILLS_TINT))));
-        entries.push(("Jumps (1 h)", Some(Some(JUMPS_TINT))));
     }
     entries.push(("· drag to pan, wheel to zoom", None));
     // Entries go left to right and wrap into a row below when they would
@@ -671,6 +667,26 @@ fn legend(painter: &egui::Painter, view: Rect, fade_minutes: u32, tint: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_player_kills_glow() {
+        let busy_but_quiet = SystemActivity {
+            jumps: 400,
+            npc_kills: 300,
+            ..Default::default()
+        };
+        assert_eq!(kills_glow(&busy_but_quiet), None);
+        let one_pod = SystemActivity {
+            pod_kills: 1,
+            ..Default::default()
+        };
+        assert_eq!(kills_glow(&one_pod), Some(0.3));
+        let brawl = SystemActivity {
+            ship_kills: 50,
+            ..Default::default()
+        };
+        assert_eq!(kills_glow(&brawl), Some(1.0));
+    }
 
     fn universe() -> Universe {
         crate::static_data::tests::sample().universe

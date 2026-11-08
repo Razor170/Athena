@@ -591,7 +591,7 @@ fn settings_view(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
         );
         let mut tint = module.settings.esi_tint;
         if ui
-            .checkbox(&mut tint, "Tint systems by ESI kills and jumps (last hour)")
+            .checkbox(&mut tint, "Tint systems by ESI player kills (last hour)")
             .changed()
         {
             module.set_esi_tint(tint);
@@ -599,7 +599,7 @@ fn settings_view(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
         ui.label(
             small(
                 "The tint uses ESI's public data, refreshed at most once an hour. Off by default. \
-                 Purple glow: player kills; grey-blue glow: jumps. Hover a system for the numbers.",
+                 Systems with ship or pod kills glow purple. Hover a system for its kills and jumps.",
             )
             .color(DIM),
         );
