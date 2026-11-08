@@ -7,8 +7,9 @@
 //! release zip next to `Athena.exe`; it is not committed to the repo.
 //!
 //! [`StaticData::load`] reads the whole file into memory (a few hundred
-//! rows), so lookups afterwards are plain map lookups. Loading is file I/O,
-//! so call it on a background thread, not the UI thread.
+//! rows), so lookups afterwards are plain map lookups. Loading takes a few
+//! milliseconds; the Mining Supervisor does it once at startup, before the
+//! window is shown. Don't call it while the UI is running.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -100,6 +100,8 @@ struct AlertEntry {
 pub struct MiningSupervisor {
     egui_ctx: egui::Context,
     data_dir: PathBuf,
+    /// The game log folder the watcher follows (from the app settings).
+    log_folder: PathBuf,
     /// Writes settings and state files on a background thread.
     saver: Saver,
     settings: MiningSettings,
@@ -204,6 +206,7 @@ impl MiningSupervisor {
         {
             let mut tracker = CharacterTracker::new(&name, settings.tracker_settings(&name));
             tracker.restore(hold_units, session, hold_reported_full);
+            tracker.settle_fill_alerts(&volumes);
             trackers.insert(name, tracker);
         }
         let offsets: BTreeMap<String, FileOffset> = saved
@@ -224,6 +227,7 @@ impl MiningSupervisor {
         MiningSupervisor {
             egui_ctx: egui_ctx.clone(),
             data_dir: data_dir.to_path_buf(),
+            log_folder: app_settings.log_folder.clone(),
             saver: Saver::start(),
             settings,
             static_data,
@@ -328,12 +332,17 @@ impl MiningSupervisor {
 
     /// The "End session" button: ends every character's session, values it
     /// with the prices of this moment and stores it.
+    /// True when prices and ore data are loaded, so a session can be valued.
+    fn can_value_sessions(&self) -> bool {
+        let prices_loaded = self.prices.as_ref().is_some_and(|p| p.fetched_unix > 0);
+        prices_loaded && self.static_data.is_some()
+    }
+
     fn end_session(&mut self) {
         // The value is frozen when the session ends, so without prices or
         // ore data it would be stored as 0 ISK forever. Keep the session
         // running instead and say why.
-        let prices_loaded = self.prices.as_ref().is_some_and(|p| p.fetched_unix > 0);
-        if !prices_loaded || self.static_data.is_none() {
+        if !self.can_value_sessions() {
             self.problems.insert(
                 "end",
                 "The session can't be valued yet (Jita prices or ore data not loaded), \
@@ -531,6 +540,10 @@ impl Module for MiningSupervisor {
     }
 
     fn settings_changed(&mut self, settings: &Settings) {
+        if settings.log_folder == self.log_folder {
+            return;
+        }
+        self.log_folder = settings.log_folder.clone();
         // Follow the new log folder. Offsets are by file name, so files
         // already read are not read again.
         self.watcher = GameLogWatcher::start(

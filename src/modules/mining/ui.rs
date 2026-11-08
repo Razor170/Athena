@@ -175,10 +175,10 @@ fn summary_bar(module: &mut MiningSupervisor, ui: &mut egui::Ui, now: LogTime) {
                     )
                     .fill(Color32::from_rgb(0x3a, 0x2a, 0x1a))
                     .stroke(Stroke::new(1.0, Color32::from_rgb(0x6b, 0x4a, 0x24)));
-                    let hint = if module.prices.is_some() {
+                    let hint = if module.can_value_sessions() {
                         "Ends the session for every pilot and saves it to History, valued at the current Jita prices."
                     } else {
-                        "Ends the session for every pilot. Jita prices haven't loaded yet, so it would be saved with no ISK value."
+                        "Jita prices or ore data haven't loaded yet, so the session can't be valued. It keeps running until they are in."
                     };
                     if ui
                         .add_enabled(started.is_some(), button)
