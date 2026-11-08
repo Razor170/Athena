@@ -74,7 +74,12 @@ Agree on goals, the stack and the roadmap.
 - Static data import and lookup (systems, gates, jump routes).
 
 ### Step 4: First modules
-- **Mining Supervisor:** details to come from Kevin.
+- **Mining Supervisor:** for multiboxed miners, one row per character plus totals. Uses game logs and the SDE only, no ESI.
+  - Ore hold fill per character, split into uncompressed and compressed ore. The log has every mined cycle (including critical successes; residue is ignored as it never reaches the hold) and every in-space compression (1:1 in units). Unloading at a station writes no log line, so each row has an "Emptied" button. Hold size and alert level are global settings (default 11,500 m³ and 70%) that each character can override. EVE logs no "hold full" line, so fullness comes from the m³ math; ore mined into a full hold is voided.
+  - Alerts: hold above a per-character threshold, hold full, miner stopped (the module's "deactivates" line, or no cycle for a while), idle for X minutes.
+  - Sessions end after X minutes without mining. A finished session's ISK value (reprocessed value at Jita prices from ESI's public market data, cached and refreshed at most hourly; yield 90.63% for ore, ice and moon ore, 95% for gas) is stored once and never recalculated. History shows sessions plus daily and weekly totals.
+  - Covers all ore, ice and moon ore; volumes, compressed types and reprocessing outputs come from the SDE.
+  - UI: a panel at most a quarter of 1080p wide. Compressed ore is purple; normal ore is green, yellow from the alert level, red when full. Mockups are shown to Kevin for approval before any panel is built.
 - **Intel Supervisor:** intel channel parsing plus a map of nearby systems with our own layout (from static data positions), highlighting reported systems and distance from your character. Smooth pan and zoom is a hard requirement. Details to come from Kevin.
 
 ### Later
@@ -89,6 +94,6 @@ Agree on goals, the stack and the roadmap.
 
 ## Open questions
 
-- Details of the Mining Supervisor and Intel Supervisor.
+- Details of the Intel Supervisor.
 - Which ESI scopes are needed (depends on the modules).
 - `glow` vs `wgpu`: needs idle CPU/RAM and startup numbers from Kevin's Windows PC (the sandbox only has a software renderer). Build both from the step 2 PR and compare with Task Manager; the Settings tab shows the renderer and a frame counter.
