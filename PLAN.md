@@ -63,7 +63,7 @@ Agree on goals, the stack and the roadmap.
 - Settings panel (log folder path and similar).
 - A small module trait so new modules plug in the same way.
 - `windows_subsystem = "windows"` so no console window opens next to the app.
-- GitHub Actions on `windows-latest`: `cargo fmt --check`, `clippy`, tests and a release build, uploaded as a zip artifact. Version tags (`v*`) create a GitHub Release with the portable zip.
+- GitHub Actions on `windows-latest`: `cargo fmt --check`, `cargo clippy -- -D warnings`, tests and a release build, uploaded as a zip artifact. Version tags (`v*`) create a GitHub Release with the portable zip.
 - Measure idle CPU/RAM against the targets above with both render backends, pick one, and record the numbers as the baseline.
 - Note in the README that the exe isn't code-signed, so Windows SmartScreen warns on first run ("More info" then "Run anyway").
 
