@@ -49,6 +49,10 @@ pub struct MiningSettings {
     /// Decompression yield in percent for compressed gas.
     pub gas_yield_percent: f64,
     pub price_side: PriceSide,
+    /// The order of the characters on the Live view and in Settings, set
+    /// with the arrows in Settings. Characters not listed come after these,
+    /// in alphabetical order.
+    pub order: Vec<String>,
     /// By character name.
     pub characters: BTreeMap<String, CharacterSettings>,
 }
@@ -63,6 +67,7 @@ impl Default for MiningSettings {
             ore_yield_percent: 90.63,
             gas_yield_percent: 95.0,
             price_side: PriceSide::Buy,
+            order: Vec::new(),
             characters: BTreeMap::new(),
         }
     }
@@ -111,6 +116,48 @@ impl MiningSettings {
         }
     }
 
+    /// `names` sorted in the user's order: the ones in `order` first, then
+    /// the rest alphabetically.
+    pub fn ordered<'a>(&self, names: impl Iterator<Item = &'a String>) -> Vec<String> {
+        let mut names: Vec<String> = names.cloned().collect();
+        // Not in `order` gives `usize::MAX`, so those sort last; the name
+        // breaks ties, which sorts them alphabetically.
+        let rank = |name: &String| {
+            self.order
+                .iter()
+                .position(|o| o == name)
+                .unwrap_or(usize::MAX)
+        };
+        names.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+        names
+    }
+
+    /// Moves `name` (dragged on the Live view) to just before `target`, or
+    /// just after it when `after` is true. `names` are the characters
+    /// currently known.
+    pub fn place_character(&mut self, names: &[String], name: &str, target: &str, after: bool) {
+        if name == target {
+            return;
+        }
+        let mut list = self.ordered(names.iter());
+        let Some(from) = list.iter().position(|n| n == name) else {
+            return;
+        };
+        let moved = list.remove(from);
+        let Some(to) = list.iter().position(|n| n == target) else {
+            return;
+        };
+        list.insert(if after { to + 1 } else { to }, moved);
+        // Keep characters that aren't in the logs right now, after the known
+        // ones, so they come back in a sensible place.
+        for old in &self.order {
+            if !list.contains(old) {
+                list.push(old.clone());
+            }
+        }
+        self.order = list;
+    }
+
     pub fn yields(&self) -> Yields {
         Yields {
             ore: self.ore_yield_percent / 100.0,
@@ -144,6 +191,35 @@ mod tests {
     }
 
     #[test]
+    fn character_order() {
+        let names = |list: &[&str]| -> Vec<String> { list.iter().map(|n| n.to_string()).collect() };
+        let known = names(&["Pilot Alpha", "Pilot Bravo", "Pilot Charlie"]);
+        let mut settings = MiningSettings::default();
+        // No order yet: alphabetical.
+        assert_eq!(settings.ordered(known.iter()), known);
+        // Charlie dropped on the top half of Alpha: goes first.
+        settings.place_character(&known, "Pilot Charlie", "Pilot Alpha", false);
+        assert_eq!(
+            settings.ordered(known.iter()),
+            names(&["Pilot Charlie", "Pilot Alpha", "Pilot Bravo"])
+        );
+        // Charlie dropped on the bottom half of Bravo: goes last.
+        settings.place_character(&known, "Pilot Charlie", "Pilot Bravo", true);
+        assert_eq!(settings.ordered(known.iter()), known);
+        // Dropped on itself: nothing changes.
+        settings.place_character(&known, "Pilot Alpha", "Pilot Alpha", true);
+        assert_eq!(settings.ordered(known.iter()), known);
+        // A new character goes last. One that's gone stays in the saved
+        // order, after the known ones.
+        let later = names(&["Pilot Alpha", "Pilot Bravo", "Pilot Delta"]);
+        settings.place_character(&later, "Pilot Delta", "Pilot Alpha", false);
+        assert_eq!(
+            settings.order,
+            names(&["Pilot Delta", "Pilot Alpha", "Pilot Bravo", "Pilot Charlie"])
+        );
+    }
+
+    #[test]
     fn round_trip_and_defaults() {
         let mut settings = MiningSettings {
             price_side: PriceSide::Sell,
@@ -152,6 +228,7 @@ mod tests {
         settings
             .characters
             .insert("Pilot Echo".to_string(), CharacterSettings::default());
+        settings.order = vec!["Pilot Echo".to_string()];
         let text = settings.to_toml().unwrap();
         let back: MiningSettings = toml::from_str(&text).unwrap();
         assert_eq!(back, settings);

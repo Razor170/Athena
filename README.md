@@ -37,6 +37,7 @@ another log folder in Athena's settings):
   afterwards.
 - **Borders:** red dashed means the miners stopped (or the hold is full), purple means a
   mining crystal broke.
+- **Order:** drag a card up or down to change the order of the characters.
 - **Belt scan:** copy a Mining Survey Scanner result in EVE (Ctrl+A, Ctrl+C) and it shows up
   in the panel. Copy another one later to see how fast the belt is going.
 - **End session** ends mining for all characters at once and stores it in History, valued

@@ -97,13 +97,19 @@ fn live_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
     };
     summary_bar(module, ui, now);
 
-    // Cards for the characters that are shown and have something to show.
+    // Cards for the characters that are shown and have something to show,
+    // in the order set in Settings.
     let names: Vec<String> = module
-        .trackers
-        .values()
-        .filter(|t| module.settings.character(&t.character).show)
-        .filter(|t| t.session().is_some() || !t.hold_units().is_empty())
-        .map(|t| t.character.clone())
+        .settings
+        .ordered(module.trackers.keys())
+        .into_iter()
+        .filter(|name| module.settings.character(name).show)
+        .filter(|name| {
+            module
+                .trackers
+                .get(name)
+                .is_some_and(|t| t.session().is_some() || !t.hold_units().is_empty())
+        })
         .collect();
     if names.is_empty() {
         ui.label(
@@ -116,17 +122,68 @@ fn live_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
         );
     }
     let mut emptied = None;
+    // Drag and drop: a card can be dragged onto another one. Dropped on its
+    // top half it goes before that card, on the bottom half after it.
+    // (dragged name, target name, after)
+    let mut dropped: Option<(String, String, bool)> = None;
+    let pointer_y = ui.ctx().pointer_interact_pos().map(|p| p.y);
     ui.spacing_mut().item_spacing.y = 4.0;
     for name in &names {
-        if let Some(tracker) = module.trackers.get(name)
-            && character_card(module, tracker, ui, now)
-        {
+        let Some(tracker) = module.trackers.get(name) else {
+            continue;
+        };
+        // The whole card is the drag handle. Its drag area is registered
+        // before the card is drawn, using where the card was last frame, so
+        // the Emptied button (drawn later, so on top) still gets its clicks.
+        let drag_id = egui::Id::new(("mining_card", name));
+        let last_rect = ui.ctx().data(|d| d.get_temp::<egui::Rect>(drag_id));
+        if let Some(last_rect) = last_rect {
+            let handle = ui
+                .interact(last_rect, drag_id, Sense::drag())
+                .on_hover_cursor(egui::CursorIcon::Grab);
+            // The payload is the dragged card's character name.
+            handle.dnd_set_drag_payload(name.clone());
+        }
+        let being_dragged = ui.ctx().is_being_dragged(drag_id);
+        let card = ui.scope(|ui| {
+            if being_dragged {
+                // Faded while it's being moved.
+                ui.multiply_opacity(0.4);
+            }
+            character_card(module, tracker, ui, now)
+        });
+        if card.inner {
             emptied = Some(name.clone());
+        }
+        let rect = card.response.rect;
+        ui.ctx().data_mut(|d| d.insert_temp(drag_id, rect));
+        let after = pointer_y.is_some_and(|y| y > rect.center().y);
+        if let Some(dragged) = card.response.dnd_hover_payload::<String>()
+            && *dragged != *name
+        {
+            // Show where the card will land.
+            let y = if after {
+                rect.bottom() + 2.0
+            } else {
+                rect.top() - 2.0
+            };
+            ui.painter()
+                .hline(rect.x_range(), y, Stroke::new(2.0, BRIGHT));
+        }
+        if let Some(dragged) = card.response.dnd_release_payload::<String>() {
+            dropped = Some(((*dragged).clone(), name.clone(), after));
         }
     }
     ui.spacing_mut().item_spacing.y = 6.0;
     if let Some(name) = emptied {
         module.mark_emptied(&name);
+    }
+    if let Some((dragged, target, after)) = dropped {
+        let known: Vec<String> = module.trackers.keys().cloned().collect();
+        module
+            .settings
+            .place_character(&known, &dragged, &target, after);
+        module.settings_edited();
     }
 
     alert_list(module, ui);
@@ -963,10 +1020,10 @@ fn settings_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
         ui.set_width(ui.available_width());
         ui.label(RichText::new("Characters").color(BRIGHT).strong());
         ui.label(
-            small("Found in your game logs. Leave a field empty to use the default above.")
+            small("Found in your game logs. Leave a field empty to use the default above. Drag the cards on the Live view to change the order.")
                 .color(DIM),
         );
-        let names: Vec<String> = module.trackers.keys().cloned().collect();
+        let names = settings.ordered(module.trackers.keys());
         if names.is_empty() {
             ui.label(small("None yet.").color(DIM));
         }
