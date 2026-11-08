@@ -4,6 +4,8 @@
 //!
 //! - [`gamelog`]: reads EVE game log files and turns mining lines into events.
 //! - [`session`]: adds those events up into per-character mining sessions.
+//! - [`scan`]: parses pasted Mining Survey Scanner results and works out how
+//!   fast a belt is being mined.
 //!
 //! The dashboard panel (the `Module` impl) comes in a later PR, once Kevin has
 //! approved the mockup.
@@ -21,4 +23,5 @@
 #![allow(dead_code)]
 
 pub mod gamelog;
+pub mod scan;
 pub mod session;
