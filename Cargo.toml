@@ -45,11 +45,13 @@ reqwest = { version = "0.13", default-features = false, features = [
 # Reads static.sqlite (game data) and, later, the mining history.
 rusqlite = { version = "0.41", features = ["bundled"] }
 
-# Windows-only: reading the clipboard (for belt scans) and the alert sound. These are
+# Windows-only: reading the clipboard (for belt scans), the alert beep and the
+# Intel voice alerts (PlaySoundW, from Win32_Media_Audio). These are
 # thin, official bindings to the Windows API, with no other dependencies.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Media_Audio",
     "Win32_System_DataExchange",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Memory",

@@ -1,6 +1,6 @@
 //! The region map: a dot per system, its name and security on a small dark
-//! label, gate lines, and the own pilots in blue, drawn like the approved
-//! mockup (and RIFT).
+//! label, gate lines, the own pilots in blue and reported systems in red
+//! fading to grey (see `alerts`), drawn like the approved mockup (and RIFT).
 //!
 //! Everything is drawn with egui's painter from positions the xtask laid
 //! out (see `xtask/src/map.rs`), so nothing is laid out here. To keep pan
@@ -20,6 +20,7 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2,
 };
 
+use super::alerts::{self, SystemMark};
 use crate::universe::{Universe, drawing};
 
 // Colours from the mockup.
@@ -55,12 +56,21 @@ struct Node {
     border: bool,
 }
 
+/// One gate line, in map points.
+struct GateLine {
+    from: i64,
+    to: i64,
+    a: Pos2,
+    b: Pos2,
+    /// Dashed: to a system of another region.
+    dashed: bool,
+}
+
 /// The shapes of one region, worked out once when it is picked.
 struct RegionDrawing {
     region_id: i64,
     nodes: Vec<Node>,
-    /// Gate lines in map points; `true` for dashed lines to other regions.
-    lines: Vec<(Pos2, Pos2, bool)>,
+    lines: Vec<GateLine>,
     /// The area to show for "Fit region".
     bounds: Rect,
 }
@@ -114,7 +124,13 @@ impl RegionDrawing {
                 let next_is_border = region.borders.iter().any(|b| b.system_id == next);
                 let next_is_ours = !next_is_border && position.contains_key(&next);
                 if (next_is_ours && next > id) || next_is_border {
-                    lines.push((position[&id], position[&next], next_is_border));
+                    lines.push(GateLine {
+                        from: id,
+                        to: next,
+                        a: position[&id],
+                        b: position[&next],
+                        dashed: next_is_border,
+                    });
                 }
             }
         }
@@ -152,6 +168,12 @@ pub fn security_color(security: f64) -> Color32 {
 pub struct MapContent<'a> {
     /// Own pilots by the system they are in.
     pub pilots: &'a HashMap<i64, Vec<String>>,
+    /// Reported systems: colour and badge.
+    pub marks: &'a HashMap<i64, SystemMark>,
+    /// Draw a red frame around the map (an alert is showing).
+    pub alert_frame: bool,
+    /// For the legend's "Fading (10 min)".
+    pub fade_minutes: u32,
 }
 
 /// The map's camera and cached shapes. Lives in the module.
@@ -244,8 +266,16 @@ impl MapView {
         }
 
         self.paint(&painter, rect, content);
+        if content.alert_frame {
+            painter.rect_stroke(
+                rect,
+                CornerRadius::same(6),
+                Stroke::new(3.0, alerts::RED),
+                egui::StrokeKind::Inside,
+            );
+        }
         self.controls(ui, rect, bounds);
-        legend(&painter, rect);
+        legend(&painter, rect, content.fade_minutes);
     }
 
     fn fit(&mut self, bounds: Rect, view: Rect) {
@@ -291,14 +321,20 @@ impl MapView {
         let visible = view.expand(label_reach);
 
         // Gate lines first, so dots and labels cover them.
-        for &(a, b, dashed) in &drawing.lines {
-            let a = self.to_screen(a, view);
-            let b = self.to_screen(b, view);
+        for line in &drawing.lines {
+            let a = self.to_screen(line.a, view);
+            let b = self.to_screen(line.b, view);
             if !view.intersects(Rect::from_two_pos(a, b)) {
                 continue;
             }
-            let stroke = Stroke::new(line_width, GATE);
-            if dashed {
+            // A line touching a reported system takes its colour.
+            let hot = [line.from, line.to]
+                .iter()
+                .filter_map(|id| content.marks.get(id))
+                .find(|mark| mark.hot);
+            let color = hot.map_or(GATE, |mark| mark.color);
+            let stroke = Stroke::new(line_width, color);
+            if line.dashed {
                 painter.extend(Shape::dashed_line(&[a, b], stroke, 5.0 * zoom, 4.0 * zoom));
             } else {
                 painter.line_segment([a, b], stroke);
@@ -312,15 +348,21 @@ impl MapView {
                 continue;
             }
             let pilots = content.pilots.get(&node.id);
-            if node.border {
+            let mark = content.marks.get(&node.id);
+            let ring = dot_radius + 3.0 * zoom.max(0.6);
+            if let Some(mark) = mark {
+                // A soft ring in the report's colour; a blue edge if an own
+                // pilot is there too. Border systems show reports as well.
+                painter.circle_filled(center, ring, mark.color.gamma_multiply(0.27));
+                painter.circle_filled(center, dot_radius, mark.color);
+                if pilots.is_some() {
+                    painter.circle_stroke(center, dot_radius, Stroke::new(2.0, PILOT_BLUE));
+                }
+            } else if node.border {
                 painter.circle_stroke(center, dot_radius - 1.0, Stroke::new(2.0, IDLE_DOT));
             } else if pilots.is_some() {
                 // A soft ring, then the blue dot.
-                painter.circle_filled(
-                    center,
-                    dot_radius + 3.0 * zoom.max(0.6),
-                    PILOT_BLUE.gamma_multiply(0.27),
-                );
+                painter.circle_filled(center, ring, PILOT_BLUE.gamma_multiply(0.27));
                 painter.circle_filled(center, dot_radius, PILOT_BLUE);
             } else {
                 painter.circle_filled(center, dot_radius, IDLE_DOT);
@@ -340,13 +382,28 @@ impl MapView {
             let name_width = galley.size().x;
             let line_height = galley.size().y;
             painter.galley(label_pos, galley, name_color);
-            painter.text(
+            let detail = painter.text(
                 label_pos + Vec2::new(name_width + 5.0, line_height / 2.0),
                 Align2::LEFT_CENTER,
                 &node.detail,
                 FontId::proportional(small_size),
                 node.detail_color,
             );
+            // "1j · now" on a chip in the report's colour.
+            if let Some(mark) = mark {
+                let galley = painter.layout_no_wrap(
+                    mark.badge.clone(),
+                    FontId::proportional(small_size),
+                    Color32::WHITE,
+                );
+                let at = Pos2::new(
+                    detail.right() + 5.0 + 4.0,
+                    detail.center().y - galley.size().y / 2.0,
+                );
+                let chip = Rect::from_min_size(at, galley.size()).expand2(Vec2::new(4.0, 0.0));
+                painter.rect_filled(chip, CornerRadius::same(3), mark.color);
+                painter.galley(at, galley, Color32::WHITE);
+            }
             if let Some(pilots) = pilots {
                 painter.text(
                     label_pos + Vec2::new(0.0, line_height + 1.0),
@@ -382,35 +439,77 @@ impl MapView {
     }
 }
 
-/// The colour key, bottom left. Report colours join it with the intel list.
-fn legend(painter: &egui::Painter, view: Rect) {
+/// The colour key, bottom left.
+fn legend(painter: &egui::Painter, view: Rect, fade_minutes: u32) {
     let font = FontId::proportional(11.0);
-    let mut x = view.left() + 14.0;
-    let y = view.bottom() - 20.0;
-    let entries: [(&str, bool); 2] = [("My pilot", true), ("Other region", false)];
-    for (text, filled) in entries {
-        let dot = Pos2::new(x + 5.0, y);
-        if filled {
-            painter.circle_filled(dot, 5.0, PILOT_BLUE);
-        } else {
-            painter.circle_stroke(dot, 4.0, Stroke::new(2.0, IDLE_DOT));
+    let fading = format!("Fading ({fade_minutes} min)");
+    // `None` is the hollow "other region" dot, `Some(None)` the hint text.
+    let entries: [(&str, Option<Option<Color32>>); 6] = [
+        ("Reported now", Some(Some(alerts::RED))),
+        (&fading, Some(Some(alerts::ORANGE))),
+        ("Clear", Some(Some(alerts::GREEN))),
+        ("My pilot", Some(Some(PILOT_BLUE))),
+        ("Other region", Some(None)),
+        ("· drag to pan, wheel to zoom", None),
+    ];
+    // Entries go left to right and wrap into a row below when they would
+    // run into the zoom buttons (bottom right, about 170 points wide).
+    let left = view.left() + 14.0;
+    let right = view.right() - 175.0;
+    let widths: Vec<f32> = entries
+        .iter()
+        .map(|(text, dot)| {
+            let text_width = painter
+                .layout_no_wrap(text.to_string(), font.clone(), LEGEND_TEXT)
+                .size()
+                .x;
+            text_width + if dot.is_some() { 14.0 } else { 0.0 } + 12.0
+        })
+        .collect();
+    // Count the rows first, so the last row sits at the bottom.
+    let mut rows = 1;
+    let mut x = left;
+    for width in &widths {
+        if x + width > right && x > left {
+            rows += 1;
+            x = left;
         }
-        let rect = painter.text(
-            Pos2::new(x + 14.0, y),
-            Align2::LEFT_CENTER,
-            text,
-            font.clone(),
-            LEGEND_TEXT,
-        );
-        x = rect.right() + 12.0;
+        x += width;
     }
-    painter.text(
-        Pos2::new(x, y),
-        Align2::LEFT_CENTER,
-        "· drag to pan, wheel to zoom",
-        font,
-        OTHER_REGION_TEXT,
-    );
+    let mut y = view.bottom() - 20.0 - 18.0 * (rows - 1) as f32;
+    let mut x = left;
+    for ((text, dot), width) in entries.iter().zip(&widths) {
+        if x + width > right && x > left {
+            y += 18.0;
+            x = left;
+        }
+        let mut text_x = x;
+        if let Some(color) = dot {
+            let center = Pos2::new(x + 5.0, y);
+            match color {
+                Some(color) => {
+                    painter.circle_filled(center, 5.0, *color);
+                }
+                None => {
+                    painter.circle_stroke(center, 4.0, Stroke::new(2.0, IDLE_DOT));
+                }
+            }
+            text_x += 14.0;
+        }
+        let color = if dot.is_some() {
+            LEGEND_TEXT
+        } else {
+            OTHER_REGION_TEXT
+        };
+        painter.text(
+            Pos2::new(text_x, y),
+            Align2::LEFT_CENTER,
+            *text,
+            font.clone(),
+            color,
+        );
+        x += width;
+    }
 }
 
 #[cfg(test)]
@@ -430,8 +529,8 @@ mod tests {
         assert!(b1.border);
         assert_eq!(b1.detail, "Beta");
         // A1-A2, A2-A3, A3-A4 solid; A2-B1 dashed. Each gate once.
-        assert_eq!(drawing.lines.iter().filter(|l| !l.2).count(), 3);
-        assert_eq!(drawing.lines.iter().filter(|l| l.2).count(), 1);
+        assert_eq!(drawing.lines.iter().filter(|l| !l.dashed).count(), 3);
+        assert_eq!(drawing.lines.iter().filter(|l| l.dashed).count(), 1);
         assert!(RegionDrawing::new(&universe(), 999).is_none());
     }
 

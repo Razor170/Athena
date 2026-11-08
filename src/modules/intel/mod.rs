@@ -11,21 +11,24 @@
 //! - [`parser`]: finds systems, ships, "clear"/"nv" and pilot names in a line.
 //! - [`config`]: the module's settings (`intel.toml`).
 //! - [`map`]: draws a region map with pan and zoom.
+//! - [`alerts`]: report colours on the map, and which reports raise an alert.
+//! - [`sound`]: plays the alert voice lines or a beep on its own thread.
 //! - [`ui`]: draws the panel.
 //!
 //! This file holds the [`IntelSupervisor`] module: it owns the watcher,
 //! drains its channel in `update`, and keeps the reports and where each own
 //! pilot is.
 //!
-//! So far (PR 3 of 6) the panel has the map with the own pilots, the
-//! region picker, Follow and the pilot chips, plus a plain list of reports
-//! next to it; the styled intel list and alerts come next.
+//! So far (PR 4 of 6) the panel has the map with the own pilots and the
+//! reports, the intel list, and alerts with sound; tags come next.
 
+pub mod alerts;
 pub mod chatlog;
 pub mod config;
 pub mod dedupe;
 pub mod map;
 pub mod parser;
+pub mod sound;
 mod ui;
 pub mod watcher;
 
@@ -41,6 +44,7 @@ use self::config::IntelSettings;
 use self::dedupe::Deduper;
 use self::map::MapView;
 use self::parser::{IntelMessage, ParseContext};
+use self::sound::{PlayRequest, SoundPlayer};
 use self::watcher::{ChatLogWatcher, LOCAL, WatchEvent, last_downtime};
 use super::{Module, ModuleContext, SharedStaticData};
 use crate::modules::mining::gamelog::LogTime;
@@ -51,9 +55,11 @@ use crate::universe::Universe;
 
 /// How many reports are kept in memory.
 const REPORTS_KEPT: usize = 200;
-/// Reports older than this when Athena starts aren't shown. PR 4 makes the
-/// fade time a setting and uses it here.
-const STARTUP_REPORT_MAX_AGE_SECS: i64 = 10 * 60;
+/// Jump distances from the own pilots are worked out this far, for the
+/// "4 jumps" badges; alerts go up to `sound::MAX_JUMPS`.
+const DISTANCE_LIMIT: u32 = 30;
+/// "Mute 5 min".
+const MUTE_SECS: i64 = 5 * 60;
 
 /// Which view of the panel is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +85,18 @@ pub struct Report {
     pub sender: String,
     pub text: String,
     pub message: IntelMessage,
+}
+
+/// The alert banner over the map: the newest report that raised an alert.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Alert {
+    pub report: Report,
+    /// The reported system nearest to an own pilot.
+    pub system_id: i64,
+    pub jumps: u32,
+    /// The own pilots that close to it.
+    pub pilots: Vec<String>,
+    pub loud: bool,
 }
 
 pub struct IntelSupervisor {
@@ -108,6 +126,17 @@ pub struct IntelSupervisor {
     nearby: HashSet<i64>,
     /// The regions `nearby` was built from, to rebuild it only on change.
     nearby_regions: BTreeSet<i64>,
+    /// Jumps from the nearest shown own pilot, for systems up to
+    /// `DISTANCE_LIMIT` away. Rebuilt when a pilot moves or is hidden.
+    distances: HashMap<i64, u32>,
+
+    sound: SoundPlayer,
+    /// The banner over the map, until dismissed or faded.
+    alert: Option<Alert>,
+    /// "Mute 5 min" was clicked: no sound or flashing until then.
+    muted_until: Option<LogTime>,
+    /// The clear words box in Settings while it is being typed in.
+    clear_words_text: String,
 
     /// Things the user should know about, by source.
     problems: BTreeMap<&'static str, String>,
@@ -156,6 +185,7 @@ impl IntelSupervisor {
             settings.channels.clone(),
             egui_ctx.clone(),
         );
+        let clear_words_text = settings.clear_words.join(", ");
         IntelSupervisor {
             egui_ctx: egui_ctx.clone(),
             data_dir: data_dir.to_path_buf(),
@@ -171,6 +201,11 @@ impl IntelSupervisor {
             reports: VecDeque::new(),
             nearby: HashSet::new(),
             nearby_regions: BTreeSet::new(),
+            distances: HashMap::new(),
+            sound: SoundPlayer::start(),
+            alert: None,
+            muted_until: None,
+            clear_words_text,
             problems,
             view: View::Map,
             map: MapView::default(),
@@ -197,14 +232,20 @@ impl IntelSupervisor {
                 self.pilot_moved(listener, line);
             }
             self.update_nearby();
+            self.update_distances();
         } else if self.settings.channels.iter().any(|c| c == channel) {
             let now = now();
             for line in lines {
-                // At startup, only what is still recent.
-                if catch_up && now.seconds_since(line.time) > STARTUP_REPORT_MAX_AGE_SECS {
+                // At startup, only what is still recent, and no alerts for
+                // it: it's old news.
+                if catch_up && now.seconds_since(line.time) > self.fade_seconds() {
                     continue;
                 }
-                self.add_report(channel, line);
+                if let Some(at) = self.add_report(channel, line)
+                    && !catch_up
+                {
+                    self.check_alert(at);
+                }
             }
         }
     }
@@ -340,7 +381,127 @@ impl IntelSupervisor {
         }
         self.save_settings();
         self.update_nearby();
+        self.update_distances();
         self.choose_region();
+    }
+
+    /// Rebuilds the jump distances from the shown own pilots.
+    fn update_distances(&mut self) {
+        let starts: Vec<i64> = self.shown_pilots().map(|p| p.system_id).collect();
+        let distances = match self.universe() {
+            Some(universe) => universe.jumps_within(&starts, DISTANCE_LIMIT),
+            None => HashMap::new(),
+        };
+        self.distances = distances;
+    }
+
+    /// The fade time in seconds.
+    pub fn fade_seconds(&self) -> i64 {
+        i64::from(self.settings.fade_minutes.max(1)) * 60
+    }
+
+    /// The highest alert range the settings allow.
+    fn alert_jumps(&self) -> u32 {
+        self.settings.alert_jumps.min(sound::MAX_JUMPS)
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted_until
+            .is_some_and(|until| now().seconds_since(until) < 0)
+    }
+
+    /// "Mute 5 min", or unmute when clicked again.
+    fn toggle_mute(&mut self) {
+        self.muted_until = if self.is_muted() {
+            None
+        } else {
+            Some(LogTime {
+                unix_seconds: now().unix_seconds + MUTE_SECS,
+            })
+        };
+    }
+
+    /// The report at `at` just arrived live: raise an alert if it is close
+    /// enough to an own pilot. (It may not be the newest one: another
+    /// channel or pilot's log can be read a moment later.)
+    fn check_alert(&mut self, at: usize) {
+        let Some(report) = self.reports.get(at) else {
+            return;
+        };
+        let alert_jumps = self.alert_jumps();
+        let Some(level) = alerts::alert_for(
+            report,
+            &self.distances,
+            alert_jumps,
+            self.settings.loud_jumps.min(alert_jumps),
+        ) else {
+            return;
+        };
+        // The named system that is that close, and who is that close to it.
+        let Some(&system_id) = report
+            .message
+            .systems
+            .iter()
+            .find(|id| self.distances.get(id) == Some(&level.jumps))
+        else {
+            return;
+        };
+        let pilots = match self.universe() {
+            Some(universe) => {
+                let around = universe.jumps_within(&[system_id], level.jumps);
+                self.shown_pilots()
+                    .filter(|p| around.contains_key(&p.system_id))
+                    .map(|p| p.name.clone())
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        self.alert = Some(Alert {
+            report: report.clone(),
+            system_id,
+            jumps: level.jumps,
+            pilots,
+            loud: level.loud,
+        });
+        if self.is_muted() {
+            return;
+        }
+        self.sound.play(PlayRequest {
+            jumps: level.jumps,
+            kind: self.settings.sound,
+            volume: self.settings.volume,
+            loud: level.loud,
+        });
+        if self.settings.flash {
+            // Flashes the taskbar button until Athena gets the focus.
+            self.egui_ctx
+                .send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Critical,
+                ));
+        }
+    }
+
+    /// Plays the sound for a distance, from the play buttons in Settings.
+    fn play_sample(&self, jumps: u32) {
+        self.sound.play(PlayRequest {
+            jumps,
+            kind: self.settings.sound,
+            volume: self.settings.volume,
+            loud: false,
+        });
+    }
+
+    /// The clear words typed in Settings ("clr, clear"), saved lowercase.
+    fn set_clear_words(&mut self, text: &str) {
+        let words: Vec<String> = text
+            .split([',', ' '])
+            .map(|w| w.trim().to_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect();
+        if words != self.settings.clear_words {
+            self.settings.clear_words = words;
+            self.save_settings();
+        }
     }
 
     /// Rebuilds the set of systems that may be named by a prefix.
@@ -371,14 +532,14 @@ impl IntelSupervisor {
     }
 
     /// Reads one message from an intel channel and keeps it, unless it's a
-    /// copy of one we already have.
-    fn add_report(&mut self, channel: &str, line: ChatLine) {
+    /// copy of one we already have. Returns where it was put in `reports`.
+    fn add_report(&mut self, channel: &str, line: ChatLine) -> Option<usize> {
         // The channel's message of the day and similar.
         if line.sender == EVE_SYSTEM {
-            return;
+            return None;
         }
         if !self.deduper.is_new(line.time, &line.sender, &line.text) {
-            return;
+            return None;
         }
         let message = match self.universe() {
             Some(universe) => parser::parse(
@@ -406,6 +567,7 @@ impl IntelSupervisor {
             .unwrap_or(self.reports.len());
         self.reports.insert(at, report);
         self.reports.truncate(REPORTS_KEPT);
+        (at < REPORTS_KEPT).then_some(at)
     }
 
     /// A channel was ticked or unticked in Settings.
@@ -460,6 +622,12 @@ impl Module for IntelSupervisor {
         }
         // Cheap when nothing changed: a few comparisons.
         self.choose_region();
+        // The banner goes once its report has faded.
+        if let Some(alert) = &self.alert
+            && now().seconds_since(alert.report.time) >= self.fade_seconds()
+        {
+            self.alert = None;
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _ctx: &ModuleContext) {
@@ -479,6 +647,8 @@ impl Module for IntelSupervisor {
         self.channels_found.clear();
         self.pilots.clear();
         self.last_jump.clear();
+        self.distances.clear();
+        self.alert = None;
     }
 
     fn on_exit(&mut self) {
@@ -694,6 +864,81 @@ mod tests {
         // The picked pilot is hidden, so it falls back to the last jumper.
         assert_eq!(m.active_pilot().unwrap().name, "Pilot Bravo");
         assert!(!m.pilots_by_system().contains_key(&101));
+    }
+
+    #[test]
+    fn live_reports_near_a_pilot_raise_an_alert() {
+        let mut m = module();
+        jump(&mut m, "Pilot Alpha", 60, "A1-XYZ");
+        assert_eq!(m.distances.get(&102), Some(&1));
+        // Read at start-up: old news, no alert.
+        m.handle_lines(
+            "Branch Intel",
+            "Pilot Alpha",
+            vec![line(30, "Scout", "A2-XYZ")],
+            true,
+        );
+        assert!(m.alert.is_none());
+        // A clear word: no alert either.
+        m.handle_lines(
+            "Branch Intel",
+            "Pilot Alpha",
+            vec![line(20, "Scout", "A2-XYZ clr")],
+            false,
+        );
+        assert!(m.alert.is_none());
+        m.handle_lines(
+            "Branch Intel",
+            "Pilot Alpha",
+            vec![line(10, "Scout", "A2-XYZ loki")],
+            false,
+        );
+        let alert = m.alert.clone().unwrap();
+        assert_eq!((alert.system_id, alert.jumps, alert.loud), (102, 1, true));
+        assert_eq!(alert.pilots, ["Pilot Alpha"]);
+        // Out of range.
+        m.alert = None;
+        m.settings.alert_jumps = 0;
+        m.handle_lines(
+            "Branch Intel",
+            "Pilot Alpha",
+            vec![line(5, "Scout", "A3-QQQ")],
+            false,
+        );
+        assert!(m.alert.is_none());
+    }
+
+    #[test]
+    fn a_live_report_older_than_the_newest_still_alerts() {
+        let mut m = module();
+        jump(&mut m, "Pilot Alpha", 60, "A1-XYZ");
+        m.handle_lines(
+            "Region Intel",
+            "Pilot Alpha",
+            vec![line(5, "Scout", "hi")],
+            false,
+        );
+        // Read a moment later from the other channel, but written earlier.
+        m.handle_lines(
+            "Branch Intel",
+            "Pilot Alpha",
+            vec![line(8, "Scout", "A2-XYZ")],
+            false,
+        );
+        assert_eq!(m.reports[1].message.systems, [102]);
+        assert_eq!(m.alert.as_ref().map(|a| a.system_id), Some(102));
+    }
+
+    #[test]
+    fn mute_toggles_and_clear_words_are_cleaned_up() {
+        let mut m = module();
+        assert!(!m.is_muted());
+        m.toggle_mute();
+        assert!(m.is_muted());
+        m.toggle_mute();
+        assert!(!m.is_muted());
+        m.set_clear_words("Clr,  CLEAR  gone");
+        assert_eq!(m.settings.clear_words, ["clr", "clear", "gone"]);
     }
 
     #[test]

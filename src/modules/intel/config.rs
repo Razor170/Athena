@@ -1,10 +1,11 @@
 //! The Intel Supervisor's own settings (its Settings view), saved as
-//! `intel.toml` in the data folder. Later pull requests add the alert,
-//! sound and map settings here.
+//! `intel.toml` in the data folder.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use super::sound::SoundKind;
 
 const FILE_NAME: &str = "intel.toml";
 
@@ -28,6 +29,19 @@ pub struct IntelSettings {
     pub hidden_pilots: Vec<String>,
     /// Width of the intel list next to the map, in points.
     pub list_width: f32,
+    /// Alert when a report is at most this many jumps from an own pilot.
+    pub alert_jumps: u32,
+    /// Loud alert (full volume, played twice) at most this many jumps away.
+    pub loud_jumps: u32,
+    pub sound: SoundKind,
+    /// 0.0 to 1.0.
+    pub volume: f32,
+    /// Flash the taskbar button and draw a red frame around the map.
+    pub flash: bool,
+    /// Reports fade from red to grey over this many minutes.
+    pub fade_minutes: u32,
+    /// The intel list shows only reports within the alert range.
+    pub only_in_range: bool,
 }
 
 impl Default for IntelSettings {
@@ -39,6 +53,13 @@ impl Default for IntelSettings {
             follow_regions: true,
             hidden_pilots: Vec::new(),
             list_width: 420.0,
+            alert_jumps: 5,
+            loud_jumps: 2,
+            sound: SoundKind::Voice,
+            volume: 0.7,
+            flash: true,
+            fade_minutes: 10,
+            only_in_range: false,
         }
     }
 }
@@ -91,5 +112,6 @@ mod tests {
         let settings: IntelSettings = toml::from_str("").unwrap();
         assert_eq!(settings, IntelSettings::default());
         assert_eq!(settings.clear_words, ["clr", "clear"]);
+        assert_eq!((settings.alert_jumps, settings.loud_jumps), (5, 2));
     }
 }
