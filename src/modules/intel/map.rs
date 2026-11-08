@@ -285,7 +285,9 @@ impl MapView {
         let line_width = (1.5 * zoom).clamp(1.0, 3.0);
         let dot_radius = (drawing::DOT_RADIUS + 1.0) * zoom.max(0.6);
         // Anything this far outside the view can't reach into it.
-        let label_reach = 160.0 * zoom;
+        // Text never shrinks below 8 pt, so labels are relatively wider
+        // when zoomed out.
+        let label_reach = 160.0 * zoom.max(1.0);
         let visible = view.expand(label_reach);
 
         // Gate lines first, so dots and labels cover them.

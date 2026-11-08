@@ -172,10 +172,14 @@ fn pilot_chip(ui: &mut egui::Ui, text: &str, hidden: bool) -> egui::Response {
 fn map_and_list(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
     let area = ui.available_rect_before_wrap();
     let handle_width = 12.0;
-    let list_width = module.settings.list_width.clamp(
+    let mut list_width = module.settings.list_width.clamp(
         MIN_LIST_WIDTH,
         (area.width() - MIN_MAP_WIDTH - handle_width).max(MIN_LIST_WIDTH),
     );
+    // A very narrow tab: map and list share what there is.
+    if area.width() < MIN_MAP_WIDTH + MIN_LIST_WIDTH + handle_width {
+        list_width = ((area.width() - handle_width) / 2.0).max(0.0);
+    }
     let map_rect = egui::Rect::from_min_max(
         area.min,
         egui::pos2(area.right() - list_width - handle_width, area.bottom()),

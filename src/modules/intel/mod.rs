@@ -306,7 +306,13 @@ impl IntelSupervisor {
                 .settings
                 .region_id
                 .filter(|&id| universe.region(id).is_some());
-            if let Some(region) = pilot_region.or(saved).or(first) {
+            // With Follow off, the region picked last wins at start-up.
+            let pick = if self.settings.follow_regions {
+                pilot_region.or(saved)
+            } else {
+                saved.or(pilot_region)
+            };
+            if let Some(region) = pick.or(first) {
                 self.show_region(region);
             }
         }
@@ -662,6 +668,15 @@ mod tests {
         m.settings.follow_regions = false;
         jump(&mut m, "Pilot Alpha", 10, "B1");
         assert_eq!(m.map.region_id(), Some(1));
+    }
+
+    #[test]
+    fn with_follow_off_the_saved_region_wins_at_start_up() {
+        let mut m = module();
+        m.settings.follow_regions = false;
+        m.settings.region_id = Some(2);
+        jump(&mut m, "Pilot Alpha", 10, "A1-XYZ");
+        assert_eq!(m.map.region_id(), Some(2));
     }
 
     #[test]
