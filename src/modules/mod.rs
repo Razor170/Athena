@@ -14,6 +14,7 @@ use eframe::egui;
 
 use crate::settings::Settings;
 
+pub mod mining;
 pub mod welcome;
 
 /// What a module may read from the rest of the app while it runs.
