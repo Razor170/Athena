@@ -111,13 +111,9 @@ pub struct FinishedSession {
     /// Time of the last mining cycle.
     pub ended: LogTime,
     /// Units mined per ore name, as the log reports them (critical bonuses
-    /// included). This is what the session is valued by.
+    /// included). This is what the session is valued by. EVE only logs the
+    /// ore that fit in the hold, so nothing here was lost.
     pub mined_units: BTreeMap<String, u64>,
-    /// Of those, the units that probably didn't fit in the hold and were
-    /// discarded by EVE. Only an estimate: it relies on the user clicking
-    /// "Emptied" after each unload, so it is shown as information and not
-    /// subtracted from the session's value.
-    pub voided_units: BTreeMap<String, u64>,
     pub cycles: u64,
 }
 
@@ -128,9 +124,6 @@ pub struct ActiveSession {
     pub last_cycle: LogTime,
     /// Units mined per ore name, as the log reports them.
     pub mined_units: BTreeMap<String, u64>,
-    /// Estimated units discarded because the hold was full (see
-    /// [`FinishedSession::voided_units`]).
-    pub voided_units: BTreeMap<String, u64>,
     pub cycles: u64,
 }
 
@@ -174,8 +167,13 @@ pub struct CharacterTracker {
     /// compare the yield before and after a crystal breaks. m³ rather than
     /// units, because the pilot often moves to another ore after a break.
     recent_yield: VecDeque<(LogTime, f64)>,
-    /// Set by `tick` when no cycle came in time; cleared by the next cycle.
+    /// Set by `tick` when no cycle came in time, or when EVE says the hold
+    /// is full; cleared by the next cycle.
     stopped: bool,
+    /// EVE said the hold is full. Then the hold counts as full whatever our
+    /// own m³ count says (it can't know about ore from before Athena ran,
+    /// or a wrong hold size). Cleared by compressing, "Emptied" or mining.
+    reported_full: bool,
     crystal_break: Option<CrystalBreak>,
     /// Alerts already raised, so each one fires once instead of every tick.
     /// They re-arm when the situation changes (hold emptied, mining resumes).
@@ -195,6 +193,7 @@ impl CharacterTracker {
             recent_cycles: VecDeque::new(),
             recent_yield: VecDeque::new(),
             stopped: false,
+            reported_full: false,
             crystal_break: None,
             raised_fill: false,
             raised_full: false,
@@ -231,24 +230,6 @@ impl CharacterTracker {
             .map(|(earlier, later)| later.seconds_since(*earlier))
             .max()?;
         Some((longest_gap * 2).max(self.settings.miner_stopped_min_secs))
-    }
-
-    /// How many of `units` of `ore` still fit in the hold. All of them if
-    /// the hold size or the ore's volume is unknown.
-    fn units_that_fit(&self, ore: &str, units: u64, volumes: &VolumeTable) -> u64 {
-        let (Some(capacity), Some(unit_volume)) =
-            (self.settings.hold_capacity_m3, volumes.get(ore))
-        else {
-            return units;
-        };
-        if unit_volume <= 0.0 {
-            return units;
-        }
-        let free_m3 = (capacity - self.hold_fill(volumes).total_m3()).max(0.0);
-        // `as u64` rounds down, which is what we want: a partial unit doesn't fit.
-        // A tiny tolerance keeps float rounding from losing a whole unit.
-        let fitting = ((free_m3 + 1e-6) / unit_volume) as u64;
-        units.min(fitting)
     }
 
     /// The card border state, see [`GuardState`].
@@ -360,6 +341,7 @@ impl CharacterTracker {
     /// The user unloaded the hold at a station.
     pub fn mark_emptied(&mut self) {
         self.hold_units.clear();
+        self.reported_full = false;
         self.raised_fill = false;
         self.raised_full = false;
     }
@@ -388,11 +370,16 @@ impl CharacterTracker {
 
     /// Hold fill in percent of capacity, if the capacity is known.
     pub fn fill_percent(&self, volumes: &VolumeTable) -> Option<f64> {
-        let capacity = self.settings.hold_capacity_m3?;
-        if capacity <= 0.0 {
-            return None;
+        let counted = self
+            .settings
+            .hold_capacity_m3
+            .filter(|&capacity| capacity > 0.0)
+            .map(|capacity| self.hold_fill(volumes).total_m3() / capacity * 100.0);
+        if self.reported_full {
+            // EVE knows best: at least 100%, even without a hold size.
+            return Some(counted.unwrap_or(100.0).max(100.0));
         }
-        Some(self.hold_fill(volumes).total_m3() / capacity * 100.0)
+        counted
     }
 
     /// Applies one event from the log and returns any alerts it caused.
@@ -409,23 +396,14 @@ impl CharacterTracker {
                 ore,
                 critical,
             } => {
-                // Ore that doesn't fit in the hold is discarded by EVE, so it
-                // never reaches the hold count below.
-                let kept = self.units_that_fit(ore, *units, volumes);
-                let voided = units - kept;
-
                 let session = self.session.get_or_insert_with(|| ActiveSession {
                     started: event.time,
                     last_cycle: event.time,
                     mined_units: BTreeMap::new(),
-                    voided_units: BTreeMap::new(),
                     cycles: 0,
                 });
                 session.last_cycle = event.time;
                 *session.mined_units.entry(ore.clone()).or_insert(0) += units;
-                if voided > 0 {
-                    *session.voided_units.entry(ore.clone()).or_insert(0) += voided;
-                }
                 // A critical success is a bonus on a cycle that already has
                 // its own "You mined" line, so it is not a cycle of its own.
                 if !critical {
@@ -438,9 +416,13 @@ impl CharacterTracker {
                     }
                 }
                 self.stopped = false;
+                // Ore went in, so there was room after all.
+                self.reported_full = false;
 
-                if kept > 0 {
-                    *self.hold_units.entry(ore.clone()).or_insert(0) += kept;
+                // EVE logs only the ore that fit (the last cycle before
+                // "hold is full" is smaller), so all of it is in the hold.
+                if *units > 0 {
+                    *self.hold_units.entry(ore.clone()).or_insert(0) += units;
                 }
 
                 // Mining again re-arms the time based alerts.
@@ -458,6 +440,14 @@ impl CharacterTracker {
                     }
                 }
                 *self.hold_units.entry(to.clone()).or_insert(0) += units;
+                self.reported_full = false;
+            }
+            MiningEvent::HoldFull { .. } => {
+                // The miners switched off. That is the reason they stopped,
+                // so the "miner stopped" alert would only repeat it.
+                self.reported_full = true;
+                self.stopped = true;
+                self.raised_stopped = true;
             }
             MiningEvent::MinerStopped {
                 module,
@@ -548,7 +538,6 @@ impl CharacterTracker {
             started: session.started,
             ended: session.last_cycle,
             mined_units: session.mined_units,
-            voided_units: session.voided_units,
             cycles: session.cycles,
         })
     }
@@ -612,6 +601,15 @@ mod tests {
                 from: from.to_string(),
                 to: format!("Compressed {from}"),
                 units,
+            },
+        }
+    }
+
+    fn hold_full(secs: i64) -> TimedMiningEvent {
+        TimedMiningEvent {
+            time: at(secs),
+            event: MiningEvent::HoldFull {
+                module: "Strip Miner I".to_string(),
             },
         }
     }
@@ -817,22 +815,50 @@ mod tests {
     }
 
     #[test]
-    fn overflow_is_voided() {
+    fn everything_logged_goes_in_the_hold() {
+        // EVE logs only what fit, so even past our own hold size (a wrong
+        // setting) nothing is dropped.
         let v = volumes();
         let mut t = tracker(1_000.0);
-        // 95 units = 950 m³; then 20 more but only 5 fit.
         t.apply(&mined(0, 95, "Rock"), &v);
-        let alerts = t.apply(&mined(10, 20, "Rock"), &v);
+        t.apply(&mined(10, 20, "Rock"), &v);
+        assert_eq!(t.hold_units().get("Rock"), Some(&115));
+        assert_eq!(t.session().unwrap().mined_units.get("Rock"), Some(&115));
+    }
+
+    #[test]
+    fn hold_full_line_counts_as_full_and_stopped() {
+        let v = volumes();
+        // Our own count says 50%, but EVE knows better.
+        let mut t = tracker(1_000.0);
+        t.apply(&mined(0, 50, "Rock"), &v);
+        let alerts = t.apply(&hold_full(10), &v);
         assert_eq!(alerts, vec![Alert::HoldFull]);
-        assert_eq!(t.hold_units().get("Rock"), Some(&100));
-        let session = t.session().unwrap();
-        // The session keeps what the log says; voiding is only an estimate.
-        assert_eq!(session.mined_units.get("Rock"), Some(&115));
-        assert_eq!(session.voided_units.get("Rock"), Some(&15));
-        // Completely full: everything is voided.
-        t.apply(&mined(20, 10, "Rock"), &v);
-        assert_eq!(t.hold_units().get("Rock"), Some(&100));
-        assert_eq!(t.session().unwrap().voided_units.get("Rock"), Some(&25));
+        assert_eq!(t.fill_percent(&v), Some(100.0));
+        assert_eq!(t.guard_state(), GuardState::Stopped);
+        // The second module's line raises nothing new, and neither does the
+        // stopped check (the hold being full already says why).
+        assert!(t.apply(&hold_full(10), &v).is_empty());
+        assert!(
+            t.tick(at(400))
+                .iter()
+                .all(|a| !matches!(a, Alert::MinerStopped { .. }))
+        );
+        // Compressing frees room.
+        t.apply(&compressed(20, 50, "Rock"), &v);
+        assert!(t.fill_percent(&v).unwrap() < 1.0);
+    }
+
+    #[test]
+    fn hold_full_line_without_hold_size() {
+        let v = volumes();
+        let mut t = CharacterTracker::new("Test Pilot", TrackerSettings::default());
+        t.apply(&mined(0, 50, "Rock"), &v);
+        assert_eq!(t.fill_percent(&v), None);
+        assert_eq!(t.apply(&hold_full(10), &v), vec![Alert::HoldFull]);
+        assert_eq!(t.fill_percent(&v), Some(100.0));
+        t.mark_emptied();
+        assert_eq!(t.fill_percent(&v), None);
     }
 
     #[test]

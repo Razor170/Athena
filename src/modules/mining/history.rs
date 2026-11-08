@@ -48,7 +48,6 @@ mod tests {
             started: at(start),
             ended: at(end),
             mined_units: BTreeMap::new(),
-            voided_units: BTreeMap::new(),
             cycles: 1,
         }
     }
