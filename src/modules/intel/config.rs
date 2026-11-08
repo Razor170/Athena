@@ -42,6 +42,8 @@ pub struct IntelSettings {
     pub fade_minutes: u32,
     /// The intel list shows only reports within the alert range.
     pub only_in_range: bool,
+    /// Tag groups not shown on the map (unticked in Settings).
+    pub hidden_tag_groups: Vec<String>,
 }
 
 impl Default for IntelSettings {
@@ -60,6 +62,7 @@ impl Default for IntelSettings {
             flash: true,
             fade_minutes: 10,
             only_in_range: false,
+            hidden_tag_groups: Vec::new(),
         }
     }
 }

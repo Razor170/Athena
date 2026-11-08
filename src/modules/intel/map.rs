@@ -17,10 +17,11 @@
 use std::collections::HashMap;
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2,
+    self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2,
 };
 
 use super::alerts::{self, SystemMark};
+use super::tags::{self, Tag};
 use crate::universe::{Universe, drawing};
 
 // Colours from the mockup.
@@ -35,6 +36,7 @@ const OTHER_REGION_TEXT: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9a);
 pub const PILOT_BLUE: Color32 = Color32::from_rgb(0x4e, 0xa1, 0xff);
 const PILOT_TEXT: Color32 = Color32::from_rgb(0x8f, 0xc3, 0xff);
 const LEGEND_TEXT: Color32 = Color32::from_rgb(0xa8, 0xa8, 0xa8);
+const TAG_TEXT: Color32 = Color32::from_rgb(0xcf, 0xcf, 0xcf);
 
 /// Zoom limits. 1.0 is the size the xtask laid the map out for.
 const MIN_ZOOM: f32 = 0.3;
@@ -174,6 +176,16 @@ pub struct MapContent<'a> {
     pub alert_frame: bool,
     /// For the legend's "Fading (10 min)".
     pub fade_minutes: u32,
+    /// Tags to show under system names (hidden groups already left out).
+    pub tags: &'a HashMap<i64, Vec<&'a Tag>>,
+}
+
+/// Something picked in the map's right-click menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapAction {
+    AddTag(i64),
+    OpenOnDotlan(i64),
+    MarkClear(i64),
 }
 
 /// The map's camera and cached shapes. Lives in the module.
@@ -191,6 +203,8 @@ pub struct MapView {
     fitted: bool,
     /// The size of the view last frame.
     last_size: Vec2,
+    /// The system the right-click menu is open for.
+    menu_system: Option<i64>,
 }
 
 impl Default for MapView {
@@ -202,6 +216,7 @@ impl Default for MapView {
             fit_pending: true,
             fitted: false,
             last_size: Vec2::ZERO,
+            menu_system: None,
         }
     }
 }
@@ -220,8 +235,9 @@ impl MapView {
         self.fit_pending = true;
     }
 
-    /// Draws the map into all of `ui`'s available space.
-    pub fn show(&mut self, ui: &mut egui::Ui, content: &MapContent) {
+    /// Draws the map into all of `ui`'s available space. Returns what was
+    /// picked in the right-click menu, if anything.
+    pub fn show(&mut self, ui: &mut egui::Ui, content: &MapContent) -> Option<MapAction> {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect(
@@ -239,7 +255,7 @@ impl MapView {
                 FontId::proportional(13.0),
                 LEGEND_TEXT,
             );
-            return;
+            return None;
         };
         let bounds = drawing.bounds;
 
@@ -276,6 +292,43 @@ impl MapView {
         }
         self.controls(ui, rect, bounds);
         legend(&painter, rect, content.fade_minutes);
+        self.context_menu(&response, rect)
+    }
+
+    /// The right-click menu on a system: Add tag…, Open on Dotlan, Mark
+    /// clear. A right-click away from any dot opens nothing.
+    fn context_menu(&mut self, response: &egui::Response, view: Rect) -> Option<MapAction> {
+        if response.secondary_clicked() {
+            self.menu_system = response
+                .interact_pointer_pos()
+                .and_then(|pointer| self.system_at(pointer, view));
+        }
+        let system = self.menu_system?;
+        let name = self
+            .drawing
+            .as_ref()?
+            .nodes
+            .iter()
+            .find(|n| n.id == system)
+            .map(|n| n.name.clone())
+            .unwrap_or_default();
+        let mut action = None;
+        response.context_menu(|ui| {
+            ui.label(RichText::new(name).color(OTHER_REGION_TEXT).size(11.0));
+            if ui.button("Add tag…").clicked() {
+                action = Some(MapAction::AddTag(system));
+                ui.close();
+            }
+            if ui.button("Open on Dotlan").clicked() {
+                action = Some(MapAction::OpenOnDotlan(system));
+                ui.close();
+            }
+            if ui.button("Mark clear").clicked() {
+                action = Some(MapAction::MarkClear(system));
+                ui.close();
+            }
+        });
+        action
     }
 
     fn fit(&mut self, bounds: Rect, view: Rect) {
@@ -404,16 +457,51 @@ impl MapView {
                 painter.rect_filled(chip, CornerRadius::same(3), mark.color);
                 painter.galley(at, galley, Color32::WHITE);
             }
+            let mut below = label_pos + Vec2::new(0.0, line_height + 1.0);
             if let Some(pilots) = pilots {
-                painter.text(
-                    label_pos + Vec2::new(0.0, line_height + 1.0),
+                let rect = painter.text(
+                    below,
                     Align2::LEFT_TOP,
                     pilots.join(", "),
                     FontId::proportional(small_size),
                     PILOT_TEXT,
                 );
+                below.y = rect.bottom() + 1.0;
+            }
+            // Tags, one per line: icon, then the label.
+            for tag in content.tags.get(&node.id).into_iter().flatten() {
+                let icon_size = small_size;
+                tags::paint_icon(
+                    painter,
+                    below + Vec2::new(icon_size * 0.5, icon_size * 0.6),
+                    icon_size,
+                    &tag.icon,
+                    tag.color,
+                );
+                let rect = painter.text(
+                    below + Vec2::new(icon_size + 3.0, 0.0),
+                    Align2::LEFT_TOP,
+                    &tag.label,
+                    FontId::proportional(small_size),
+                    TAG_TEXT,
+                );
+                below.y = rect.bottom() + 1.0;
             }
         }
+    }
+
+    /// The system whose dot is under `pointer`, if any (within a few
+    /// points, so small dots are easy to hit).
+    fn system_at(&self, pointer: Pos2, view: Rect) -> Option<i64> {
+        let drawing = self.drawing.as_ref()?;
+        let reach = (drawing::DOT_RADIUS + 1.0) * self.zoom.max(0.6) + 6.0;
+        drawing
+            .nodes
+            .iter()
+            .map(|node| (node.id, self.to_screen(node.pos, view).distance(pointer)))
+            .filter(|&(_, distance)| distance <= reach)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(id, _)| id)
     }
 
     /// The zoom buttons and "Fit region", bottom right.

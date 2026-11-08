@@ -7,6 +7,7 @@ mod esi;
 mod layout;
 mod modules;
 mod settings;
+mod shell;
 mod static_data;
 mod storage;
 mod universe;

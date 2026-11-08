@@ -67,7 +67,7 @@ pub fn open_sounds_folder() -> Result<(), String> {
     let folder = sounds_folder().ok_or("Can't find the folder Athena runs from.")?;
     std::fs::create_dir_all(&folder)
         .map_err(|e| format!("Can't create {}: {e}", folder.display()))?;
-    platform::open_folder(&folder)
+    crate::shell::open_folder(&folder)
 }
 
 /// One thing to play.
@@ -230,14 +230,6 @@ mod platform {
         }
     }
 
-    pub fn open_folder(folder: &std::path::Path) -> Result<(), String> {
-        std::process::Command::new("explorer")
-            .arg(folder)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("Can't open {}: {e}", folder.display()))
-    }
-
     /// The Windows "exclamation" sound. MessageBeep returns at once, so
     /// wait a moment to let a second beep be heard as a second one.
     pub fn beep() {
@@ -254,9 +246,6 @@ mod platform {
     // Sounds are Windows-only; elsewhere (the Linux sandbox) they are silent.
     pub fn play_wav(_bytes: &[u8]) {}
     pub fn beep() {}
-    pub fn open_folder(_folder: &std::path::Path) -> Result<(), String> {
-        Err("Opening folders works on Windows only.".to_string())
-    }
 }
 
 #[cfg(test)]
