@@ -1,0 +1,4 @@
+# `cargo xtask <command>` runs the helper program in the `xtask` folder.
+# See xtask/src/main.rs for the commands.
+[alias]
+xtask = "run --package xtask --"

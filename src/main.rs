@@ -6,6 +6,7 @@ mod app;
 mod layout;
 mod modules;
 mod settings;
+mod static_data;
 mod storage;
 
 use std::path::PathBuf;

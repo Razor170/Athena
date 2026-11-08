@@ -35,22 +35,46 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Clippy (wgpu renderer)
         run: cargo clippy --locked --all-targets --features wgpu -- -D warnings
 
       - name: Tests
-        run: cargo test --locked
+        run: cargo test --locked --workspace
 
       - name: Release build
         run: cargo build --release --locked
+
+      # Static game data (ore volumes, reprocessing): built from the official
+      # SDE by `cargo xtask sde` and shipped next to the exe. The ~100 MB SDE
+      # zip is cached per SDE build, so it is only downloaded after a patch.
+      - name: Find latest SDE build
+        id: sde
+        shell: pwsh
+        run: |
+          $info = (Invoke-WebRequest -UseBasicParsing https://developers.eveonline.com/static-data/tranquility/latest.jsonl).Content | ConvertFrom-Json
+          "build=$($info.buildNumber)" >> $env:GITHUB_OUTPUT
+
+      - name: Cache SDE
+        id: sde-cache
+        uses: actions/cache@v4
+        with:
+          path: sde.zip
+          key: sde-${{ steps.sde.outputs.build }}
+
+      - name: Download SDE
+        if: steps.sde-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: Invoke-WebRequest -UseBasicParsing -OutFile sde.zip "https://developers.eveonline.com/static-data/tranquility/eve-online-static-data-${{ steps.sde.outputs.build }}-jsonl.zip"
 
       - name: Package portable zip
         shell: pwsh
         run: |
           $dir = "dist/Athena"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          cargo run --locked --package xtask -- sde sde.zip "$dir/static.sqlite"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           Copy-Item target/release/athena.exe "$dir/Athena.exe"
           Copy-Item README.md "$dir/README.md"
           Compress-Archive -Path "$dir" -DestinationPath dist/Athena-windows.zip -Force

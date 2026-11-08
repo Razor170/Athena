@@ -6,6 +6,10 @@ rust-version = "1.95"
 description = "A lightweight, portable Windows desktop companion for EVE Online"
 publish = false
 
+# The app plus the `xtask` build helper (see .cargo/config.toml).
+[workspace]
+members = [".", "xtask"]
+
 [features]
 # Build with the wgpu renderer instead of glow (OpenGL). Only used to compare
 # the two backends: `cargo build --release --features wgpu`.
@@ -28,6 +32,9 @@ directories = "6"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 anyhow = "1"
+# SQLite, compiled into the exe (`bundled`), so there is no DLL to ship.
+# Reads static.sqlite (game data) and, later, the mining history.
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 [profile.release]
 # Smaller, faster exe at the cost of a slower release build.

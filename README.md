@@ -35,12 +35,25 @@ cargo build --release           # target/release/athena.exe
 cargo build --release --features wgpu   # same, with the wgpu renderer instead of OpenGL
 ```
 
+### Static game data
+
+Ore volumes, compression and reprocessing come from EVE's static data export (SDE).
+`cargo xtask sde` turns it into a small `static.sqlite`, which Athena reads from the
+folder next to the exe (or the current folder when you use `cargo run`). CI does this
+for every build and puts the file in the zip. To do it by hand:
+
+1. Download the "JSON Lines" zip from <https://developers.eveonline.com/static-data>
+   (for example `eve-online-static-data-latest-jsonl.zip`).
+2. Run `cargo xtask sde path\to\that.zip` in the repo folder. It writes `static.sqlite`.
+
+`static.sqlite` and the SDE zip are not committed.
+
 Before pushing, run:
 
 ```
 cargo fmt --all
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
 ## Adding a module
