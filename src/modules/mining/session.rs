@@ -174,6 +174,10 @@ pub struct CharacterTracker {
     /// own m³ count says (it can't know about ore from before Athena ran,
     /// or a wrong hold size). Cleared by compressing, "Emptied" or mining.
     reported_full: bool,
+    /// A module's "deactivates" line (e.g. asteroid depleted) came in and
+    /// no cycle since. Unlike `stopped` from `tick`, this keeps the red
+    /// dashed border even once the card shows "Idle".
+    stopped_by_log: bool,
     crystal_break: Option<CrystalBreak>,
     /// Alerts already raised, so each one fires once instead of every tick.
     /// They re-arm when the situation changes (hold emptied, mining resumes).
@@ -194,6 +198,7 @@ impl CharacterTracker {
             recent_yield: VecDeque::new(),
             stopped: false,
             reported_full: false,
+            stopped_by_log: false,
             crystal_break: None,
             raised_fill: false,
             raised_full: false,
@@ -209,16 +214,19 @@ impl CharacterTracker {
         hold_units: BTreeMap<String, u64>,
         session: Option<ActiveSession>,
         reported_full: bool,
+        stopped_by_log: bool,
     ) {
         self.hold_units = hold_units;
         self.session = session;
         // A hold EVE called full before the restart is still full, and
         // its alert was already shown.
         self.reported_full = reported_full;
-        self.stopped = reported_full;
         self.raised_full = reported_full;
         self.raised_fill = reported_full;
-        self.raised_stopped = reported_full;
+        self.raised_stopped = reported_full || stopped_by_log;
+        // A miner that reported stopping keeps its red dashed border.
+        self.stopped_by_log = stopped_by_log;
+        self.stopped = reported_full || stopped_by_log;
     }
 
     /// Marks the fill alerts that the current fill would raise as already
@@ -226,6 +234,12 @@ impl CharacterTracker {
     /// was at 80% before doesn't beep again on the first cycle.
     pub fn settle_fill_alerts(&mut self, volumes: &VolumeTable) {
         let _ = self.fill_alerts(volumes);
+    }
+
+    /// True when a module's "deactivates" line (e.g. asteroid depleted) is
+    /// the latest news, with no cycle since.
+    pub fn stopped_by_log(&self) -> bool {
+        self.stopped_by_log
     }
 
     /// True while EVE's "cargo hold is full" line is the latest word on the
@@ -448,6 +462,7 @@ impl CharacterTracker {
                     }
                 }
                 self.stopped = false;
+                self.stopped_by_log = false;
                 // Ore went in, so there was room after all.
                 self.reported_full = false;
 
@@ -505,6 +520,10 @@ impl CharacterTracker {
                 }
             }
             MiningEvent::MinerStopped { reason, .. } => {
+                // E.g. the asteroid is depleted: the card shows "stopped"
+                // (red dashed border) until the next cycle comes in.
+                self.stopped = true;
+                self.stopped_by_log = true;
                 if !self.raised_stopped {
                     self.raised_stopped = true;
                     alerts.push(Alert::MinerStopped {
@@ -562,6 +581,7 @@ impl CharacterTracker {
         self.recent_cycles.clear();
         self.recent_yield.clear();
         self.stopped = false;
+        self.stopped_by_log = false;
         self.crystal_break = None;
         self.raised_stopped = false;
         self.raised_idle = false;
@@ -887,7 +907,7 @@ mod tests {
         let mut t = tracker(1_000.0);
         let mut hold = BTreeMap::new();
         hold.insert("Rock".to_string(), 50);
-        t.restore(hold, None, true);
+        t.restore(hold, None, true, false);
         assert!(t.hold_reported_full());
         assert_eq!(t.fill_percent(&v), Some(100.0));
         assert_eq!(t.guard_state(), GuardState::Stopped);
@@ -901,12 +921,35 @@ mod tests {
         let mut t = tracker(1_000.0);
         let mut hold = BTreeMap::new();
         hold.insert("Rock".to_string(), 80);
-        t.restore(hold, None, false);
+        t.restore(hold, None, false, false);
         t.settle_fill_alerts(&v);
         // 81%: still above the 70% alert level, which was shown before.
         assert!(t.apply(&mined(0, 1, "Rock"), &v).is_empty());
         // Full is new, though.
         assert_eq!(t.apply(&mined(10, 19, "Rock"), &v), vec![Alert::HoldFull]);
+    }
+
+    #[test]
+    fn depleted_asteroid_counts_as_stopped_until_the_next_cycle() {
+        let v = volumes();
+        let mut t = tracker(10_000.0);
+        t.apply(&mined(0, 10, "Rock"), &v);
+        let depleted = TimedMiningEvent {
+            time: at(5),
+            event: MiningEvent::MinerStopped {
+                module: "Strip Miner I".to_string(),
+                reason:
+                    "as it finds the resource it was harvesting a pale shadow of its former glory."
+                        .to_string(),
+                crystal_destroyed: false,
+            },
+        };
+        assert_eq!(t.apply(&depleted, &v).len(), 1);
+        assert_eq!(t.guard_state(), GuardState::Stopped);
+        assert!(t.stopped_by_log());
+        t.apply(&mined(60, 10, "Rock"), &v);
+        assert_eq!(t.guard_state(), GuardState::Ok);
+        assert!(!t.stopped_by_log());
     }
 
     #[test]
