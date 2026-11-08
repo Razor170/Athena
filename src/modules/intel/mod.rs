@@ -14,14 +14,24 @@
 //! - [`alerts`]: report colours on the map, and which reports raise an alert.
 //! - [`sound`]: plays the alert voice lines or a beep on its own thread.
 //! - [`tags`]: labels on systems, in RIFT's text format.
+<<<<<<< HEAD
 //! - [`lookup`]: ESI on a background thread: which pilot-name guesses are
 //!   real characters (for zKillboard links), and the optional kills/jumps
 //!   tint.
+=======
+>>>>>>> origin/claude/project-thread-3tt5b0
 //! - [`ui`]: draws the panel.
 //!
 //! This file holds the [`IntelSupervisor`] module: it owns the watcher,
 //! drains its channel in `update`, and keeps the reports and where each own
 //! pilot is.
+<<<<<<< HEAD
+=======
+//!
+//! So far (PR 5 of 6) the panel has the map with the own pilots, the
+//! reports and system tags, the intel list, and alerts with sound; the
+//! zKillboard links and the ESI tint come next.
+>>>>>>> origin/claude/project-thread-3tt5b0
 
 pub mod alerts;
 pub mod chatlog;
@@ -169,6 +179,7 @@ pub struct IntelSupervisor {
     tag_dialog: Option<TagDialog>,
     /// The group of the last tag added with that window.
     last_tag_group: Option<String>,
+<<<<<<< HEAD
 
     /// ESI lookups on a background thread.
     lookup: Lookup,
@@ -179,6 +190,8 @@ pub struct IntelSupervisor {
     asked: HashSet<String>,
     /// Kills and jumps of the last hour, while the tint is on.
     activity: HashMap<i64, SystemActivity>,
+=======
+>>>>>>> origin/claude/project-thread-3tt5b0
     /// What the last tag import or export did, shown in Settings.
     tag_message: Option<String>,
 
@@ -230,10 +243,13 @@ impl IntelSupervisor {
             egui_ctx.clone(),
         );
         let clear_words_text = settings.clear_words.join(", ");
+<<<<<<< HEAD
         let lookup = Lookup::start(egui_ctx.clone());
         if settings.esi_tint {
             lookup.ask(lookup::Request::Activity(true));
         }
+=======
+>>>>>>> origin/claude/project-thread-3tt5b0
         // If the tag file can't be read, it is never written either, so
         // nothing in it gets lost.
         let (tags, unread_tag_lines, tags_writable, tag_message) = match &shared.data {
@@ -283,10 +299,13 @@ impl IntelSupervisor {
             tags_writable,
             tag_dialog: None,
             last_tag_group: None,
+<<<<<<< HEAD
             lookup,
             characters: HashMap::new(),
             asked: HashSet::new(),
             activity: HashMap::new(),
+=======
+>>>>>>> origin/claude/project-thread-3tt5b0
             tag_message,
             problems,
             view: View::Map,
@@ -746,6 +765,7 @@ impl IntelSupervisor {
         }
     }
 
+<<<<<<< HEAD
     /// Asks ESI about pilot-name guesses it hasn't been asked about.
     fn look_up_names(&mut self, candidates: &[String]) {
         let new: Vec<String> = candidates
@@ -770,6 +790,8 @@ impl IntelSupervisor {
         }
     }
 
+=======
+>>>>>>> origin/claude/project-thread-3tt5b0
     /// "Mark clear": a clear report from the user, which turns the system
     /// green like a "clr" in an intel channel.
     fn mark_clear(&mut self, system: i64) {
