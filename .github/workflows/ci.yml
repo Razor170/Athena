@@ -139,13 +139,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Copy-Item target/release/athena.exe "$dir/Athena.exe"
           Copy-Item README.md "$dir/README.md"
-          Compress-Archive -Path "$dir" -DestinationPath dist/Athena-windows.zip -Force
 
-      - name: Upload zip
+      # Uploads the folder itself: GitHub zips an artifact on download, so
+      # uploading a ready-made zip would give a zip inside a zip. `dist` holds
+      # only the Athena folder, so the download unpacks to `Athena\...`.
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Athena-windows
-          path: dist/Athena-windows.zip
+          path: dist
           if-no-files-found: error
 
   release:
@@ -156,9 +158,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      # download-artifact unpacks the folder again; zip it for the release.
       - uses: actions/download-artifact@v4
         with:
           name: Athena-windows
+          path: dist
+
+      - name: Zip the Athena folder
+        run: cd dist && zip -r ../Athena-windows.zip Athena
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
