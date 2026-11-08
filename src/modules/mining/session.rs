@@ -221,6 +221,13 @@ impl CharacterTracker {
         self.raised_stopped = reported_full;
     }
 
+    /// Marks the fill alerts that the current fill would raise as already
+    /// shown, without returning them. Used after a restart, so a hold that
+    /// was at 80% before doesn't beep again on the first cycle.
+    pub fn settle_fill_alerts(&mut self, volumes: &VolumeTable) {
+        let _ = self.fill_alerts(volumes);
+    }
+
     /// True while EVE's "cargo hold is full" line is the latest word on the
     /// hold (saved across restarts).
     pub fn hold_reported_full(&self) -> bool {
@@ -886,6 +893,20 @@ mod tests {
         assert_eq!(t.guard_state(), GuardState::Stopped);
         // The second module's line after the restart repeats nothing.
         assert!(t.apply(&hold_full(10), &v).is_empty());
+    }
+
+    #[test]
+    fn restored_hold_does_not_repeat_the_threshold_alert() {
+        let v = volumes();
+        let mut t = tracker(1_000.0);
+        let mut hold = BTreeMap::new();
+        hold.insert("Rock".to_string(), 80);
+        t.restore(hold, None, false);
+        t.settle_fill_alerts(&v);
+        // 81%: still above the 70% alert level, which was shown before.
+        assert!(t.apply(&mined(0, 1, "Rock"), &v).is_empty());
+        // Full is new, though.
+        assert_eq!(t.apply(&mined(10, 19, "Rock"), &v), vec![Alert::HoldFull]);
     }
 
     #[test]
