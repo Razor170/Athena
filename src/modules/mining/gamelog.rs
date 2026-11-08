@@ -493,6 +493,14 @@ mod tests {
                 }
             );
         }
+        // Any module name works, with tags around it and no final period.
+        let tagged = "[ 2026.11.08 09:37:13 ] (notify) Your <color=0xffffffff>Modulated Strip Miner II<color=0x77ffffff> has completed operations. Ship&#39;s ore hold is full";
+        assert_eq!(
+            parse_mining_line(tagged).unwrap().event,
+            MiningEvent::HoldFull {
+                module: "Modulated Strip Miner II".to_string(),
+            }
+        );
     }
 
     #[test]
