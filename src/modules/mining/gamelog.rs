@@ -308,6 +308,27 @@ impl GameLogReader {
         GameLogReader::default()
     }
 
+    /// A reader that continues a file from the middle, after Athena was
+    /// restarted. The header was read last time, so we only need the
+    /// character's name. Pass bytes starting at a line start.
+    pub fn resume(character: &str) -> GameLogReader {
+        GameLogReader {
+            header: Some(GameLogHeader {
+                character: character.to_string(),
+                session_started: None,
+            }),
+            header_done: true,
+            ..GameLogReader::default()
+        }
+    }
+
+    /// How many of the bytes pushed so far are an unfinished line, still
+    /// waiting for the rest. "Bytes read minus this" is where the next
+    /// line starts, which is the place to resume from after a restart.
+    pub fn buffered_len(&self) -> usize {
+        self.partial_line.len()
+    }
+
     /// The header, once it has been read.
     pub fn header(&self) -> Option<&GameLogHeader> {
         self.header.as_ref()

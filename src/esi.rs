@@ -9,8 +9,9 @@
 //! - sends `If-None-Match` with the last ETag, so unchanged data costs ESI
 //!   (and us) almost nothing,
 //! - backs off on both rate-limit schemes: the error limit
-//!   (`X-ESI-Error-Limit-*`) and the newer token buckets (`X-Ratelimit-*`,
-//!   HTTP 429 with `Retry-After`).
+//!   (`X-ESI-Error-Limit-*`) and the newer token buckets (a 429 answer is
+//!   waited out using `Retry-After`; `X-Ratelimit-Remaining` isn't read yet,
+//!   since our ~42 requests an hour are far below any bucket).
 //!
 //! Requests block, so only use this from a background thread, never the UI
 //! thread.
