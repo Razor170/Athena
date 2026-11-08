@@ -54,9 +54,10 @@ pub struct Region {
     /// drawn as hollow dots at `map_pos`, which is on this region's map
     /// (not where they are on their own region's map).
     pub borders: Vec<BorderSystem>,
-    /// The size of the region's map at zoom 1.0, in points: the bottom-right
-    /// corner of its last label. The top-left is (0, 0).
-    pub size: [f32; 2],
+    /// The area its dots and labels cover at zoom 1.0, in points, as
+    /// [left, top, right, bottom]. Its own systems start at (0, 0), but
+    /// border systems and the dots' radius reach a little beyond that.
+    pub bounds: [f32; 4],
 }
 
 /// A system of a neighbouring region, drawn on another region's map.
@@ -135,7 +136,7 @@ impl Universe {
                     name,
                     systems: Vec::new(),
                     borders: Vec::new(),
-                    size: [0.0, 0.0],
+                    bounds: [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
                 },
             );
         }
@@ -161,7 +162,7 @@ impl Universe {
                 .get_mut(&system.region_id)
                 .with_context(|| format!("{} is in an unknown region", system.name))?;
             region.systems.push(system.id);
-            grow_to_fit(&mut region.size, system.map_pos, &system.name);
+            grow_to_fit(&mut region.bounds, system.map_pos, &system.name);
             universe
                 .system_by_name
                 .insert(system.name.to_lowercase(), system.id);
@@ -198,7 +199,7 @@ impl Universe {
                 .map(|s| s.name.clone())
                 .unwrap_or_default();
             if let Some(region) = universe.regions.get_mut(&region_id) {
-                grow_to_fit(&mut region.size, border.map_pos, &name);
+                grow_to_fit(&mut region.bounds, border.map_pos, &name);
                 region.borders.push(border);
             }
         }
@@ -314,12 +315,14 @@ impl Universe {
     }
 }
 
-/// Makes `size` big enough to hold the dot and label of a system at `pos`.
-fn grow_to_fit(size: &mut [f32; 2], pos: [f32; 2], name: &str) {
+/// Makes `bounds` big enough to hold the dot and label of a system at `pos`.
+fn grow_to_fit(bounds: &mut [f32; 4], pos: [f32; 2], name: &str) {
+    bounds[0] = bounds[0].min(pos[0] - drawing::DOT_RADIUS);
+    bounds[1] = bounds[1].min(pos[1] - drawing::DOT_RADIUS);
     let right = pos[0] + drawing::LABEL_OFFSET[0] + drawing::label_width(name);
     let bottom = pos[1] + drawing::LABEL_OFFSET[1] + drawing::LABEL_HEIGHT;
-    size[0] = size[0].max(right);
-    size[1] = size[1].max(bottom);
+    bounds[2] = bounds[2].max(right);
+    bounds[3] = bounds[3].max(bottom);
 }
 
 #[cfg(test)]
@@ -389,11 +392,14 @@ pub mod tests {
                 map_pos: [36.0, 64.0]
             }]
         );
-        // Wide enough for the label of A4 at x = 108.
+        // From the first dot's edge to the end of A4's label at x = 108
+        // and the bottom of the border system's label at y = 64.
         assert_eq!(
-            alpha.size,
-            [108.0 + 6.0 + 7.0 * 6.0 + 6.0, 64.0 + 3.0 + 14.0]
+            alpha.bounds,
+            [-4.0, -4.0, 108.0 + 6.0 + 7.0 * 6.0 + 6.0, 64.0 + 3.0 + 14.0]
         );
+        // Beta's border system sits above its own systems.
+        assert_eq!(universe.region(2).unwrap().bounds[1], -64.0 - 4.0);
         assert_eq!(universe.neighbour_regions(1), [2]);
         assert_eq!(universe.neighbour_regions(2), [1]);
     }

@@ -10,23 +10,26 @@
 //! - [`dedupe`]: drops the copies of a report that every pilot's log has.
 //! - [`parser`]: finds systems, ships, "clear"/"nv" and pilot names in a line.
 //! - [`config`]: the module's settings (`intel.toml`).
+//! - [`map`]: draws a region map with pan and zoom.
 //! - [`ui`]: draws the panel.
 //!
 //! This file holds the [`IntelSupervisor`] module: it owns the watcher,
 //! drains its channel in `update`, and keeps the reports and where each own
 //! pilot is.
 //!
-//! So far (PR 2 of 6) the panel shows the channel picker in Settings and a
-//! plain list of pilots and reports instead of the map; the map comes next.
+//! So far (PR 3 of 6) the panel has the map with the own pilots, the
+//! region picker, Follow and the pilot chips, plus a plain list of reports
+//! next to it; the styled intel list and alerts come next.
 
 pub mod chatlog;
 pub mod config;
 pub mod dedupe;
+pub mod map;
 pub mod parser;
 mod ui;
 pub mod watcher;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -36,6 +39,7 @@ use eframe::egui;
 use self::chatlog::{ChatLine, EVE_SYSTEM, local_system_change};
 use self::config::IntelSettings;
 use self::dedupe::Deduper;
+use self::map::MapView;
 use self::parser::{IntelMessage, ParseContext};
 use self::watcher::{ChatLogWatcher, LOCAL, WatchEvent, last_downtime};
 use super::{Module, ModuleContext, SharedStaticData};
@@ -108,6 +112,13 @@ pub struct IntelSupervisor {
     /// Things the user should know about, by source.
     problems: BTreeMap<&'static str, String>,
     view: View,
+    map: MapView,
+    /// The pilot picked on the Follow button; `None` follows whoever
+    /// jumped most recently.
+    follow: Option<String>,
+    /// The active pilot's region at the last check, to notice when they
+    /// jump into another one.
+    followed_region: Option<i64>,
 }
 
 /// The current time as EVE time (UTC).
@@ -162,6 +173,9 @@ impl IntelSupervisor {
             nearby_regions: BTreeSet::new(),
             problems,
             view: View::Map,
+            map: MapView::default(),
+            follow: None,
+            followed_region: None,
         }
     }
 
@@ -233,9 +247,94 @@ impl IntelSupervisor {
 
     /// Own pilots who logged in since the last downtime; the others are
     /// old news (a character not played for weeks still has Local logs).
-    pub fn shown_pilots(&self) -> impl Iterator<Item = &Pilot> {
+    /// Includes pilots hidden on their chip (see [`Self::shown_pilots`]).
+    pub fn current_pilots(&self) -> impl Iterator<Item = &Pilot> {
         let downtime = to_log_time(last_downtime(SystemTime::now()));
         self.pilots.values().filter(move |p| p.since >= downtime)
+    }
+
+    /// The pilots on the map, who count for jump distances.
+    pub fn shown_pilots(&self) -> impl Iterator<Item = &Pilot> {
+        self.current_pilots()
+            .filter(|p| !self.settings.hidden_pilots.contains(&p.name))
+    }
+
+    /// The pilot the map follows: the one picked on the Follow button, or
+    /// whoever jumped most recently.
+    pub fn active_pilot(&self) -> Option<&Pilot> {
+        if let Some(name) = &self.follow
+            && let Some(pilot) = self.shown_pilots().find(|p| &p.name == name)
+        {
+            return Some(pilot);
+        }
+        self.shown_pilots().max_by_key(|p| p.since)
+    }
+
+    /// Own pilot names by the system they're in, for the map.
+    pub fn pilots_by_system(&self) -> HashMap<i64, Vec<String>> {
+        let mut by_system: HashMap<i64, Vec<String>> = HashMap::new();
+        for pilot in self.shown_pilots() {
+            by_system
+                .entry(pilot.system_id)
+                .or_default()
+                .push(pilot.name.clone());
+        }
+        by_system
+    }
+
+    /// Picks the map's region. At first the one shown last (or the first
+    /// one). With Follow on, it switches whenever the active pilot turns up
+    /// in another region, but a region picked by hand stays until then.
+    fn choose_region(&mut self) {
+        let Some(data) = self.static_data.clone() else {
+            return;
+        };
+        let universe = &data.universe;
+        let pilot_region = self
+            .active_pilot()
+            .and_then(|p| universe.system(p.system_id))
+            .map(|s| s.region_id);
+        let pilot_moved_region = pilot_region.is_some() && pilot_region != self.followed_region;
+        self.followed_region = pilot_region;
+        if pilot_moved_region && self.settings.follow_regions {
+            if let Some(region) = pilot_region {
+                self.show_region(region);
+            }
+        } else if self.map.region_id().is_none() {
+            let first = universe.regions_by_name().first().map(|r| r.id);
+            let saved = self
+                .settings
+                .region_id
+                .filter(|&id| universe.region(id).is_some());
+            if let Some(region) = pilot_region.or(saved).or(first) {
+                self.show_region(region);
+            }
+        }
+    }
+
+    /// Shows a region on the map and remembers it.
+    fn show_region(&mut self, region_id: i64) {
+        let Some(data) = self.static_data.clone() else {
+            return;
+        };
+        self.map.show_region(&data.universe, region_id);
+        if self.settings.region_id != Some(region_id) {
+            self.settings.region_id = Some(region_id);
+            self.save_settings();
+        }
+        self.update_nearby();
+    }
+
+    /// A pilot chip was clicked: hide or show that pilot.
+    fn toggle_pilot_hidden(&mut self, name: &str) {
+        if self.settings.hidden_pilots.iter().any(|n| n == name) {
+            self.settings.hidden_pilots.retain(|n| n != name);
+        } else {
+            self.settings.hidden_pilots.push(name.to_string());
+        }
+        self.save_settings();
+        self.update_nearby();
+        self.choose_region();
     }
 
     /// Rebuilds the set of systems that may be named by a prefix.
@@ -244,6 +343,10 @@ impl IntelSupervisor {
             return;
         };
         let mut regions = BTreeSet::new();
+        if let Some(shown) = self.map.region_id() {
+            regions.insert(shown);
+            regions.extend(universe.neighbour_regions(shown));
+        }
         for pilot in self.shown_pilots() {
             if let Some(system) = universe.system(pilot.system_id) {
                 regions.insert(system.region_id);
@@ -349,6 +452,8 @@ impl Module for IntelSupervisor {
                 }
             }
         }
+        // Cheap when nothing changed: a few comparisons.
+        self.choose_region();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _ctx: &ModuleContext) {
@@ -522,5 +627,61 @@ mod tests {
             false,
         );
         assert_eq!(m.shown_pilots().count(), 0);
+    }
+
+    fn jump(m: &mut IntelSupervisor, pilot: &str, seconds_ago: i64, system: &str) {
+        let text = format!("Channel changed to Local : {system}");
+        m.handle_lines(
+            LOCAL,
+            pilot,
+            vec![line(seconds_ago, EVE_SYSTEM, &text)],
+            false,
+        );
+        m.choose_region();
+    }
+
+    #[test]
+    fn follow_switches_region_only_when_the_pilot_does() {
+        let mut m = module();
+        jump(&mut m, "Pilot Alpha", 50, "A1-XYZ");
+        assert_eq!(m.map.region_id(), Some(1));
+        // Picked by hand: stays while the pilot moves inside region 1.
+        m.show_region(2);
+        jump(&mut m, "Pilot Alpha", 40, "A2-XYZ");
+        assert_eq!(m.map.region_id(), Some(2));
+        // Into region 2 and back to region 1: the map follows.
+        jump(&mut m, "Pilot Alpha", 30, "B1");
+        jump(&mut m, "Pilot Alpha", 20, "A2-XYZ");
+        assert_eq!(m.map.region_id(), Some(1));
+        // With Follow off it stays.
+        m.settings.follow_regions = false;
+        jump(&mut m, "Pilot Alpha", 10, "B1");
+        assert_eq!(m.map.region_id(), Some(1));
+    }
+
+    #[test]
+    fn hidden_pilots_are_left_out_and_the_follow_pick_wins() {
+        let mut m = module();
+        jump(&mut m, "Pilot Alpha", 20, "A1-XYZ");
+        jump(&mut m, "Pilot Bravo", 10, "B2");
+        // Whoever jumped last.
+        assert_eq!(m.active_pilot().unwrap().name, "Pilot Bravo");
+        m.follow = Some("Pilot Alpha".into());
+        assert_eq!(m.active_pilot().unwrap().name, "Pilot Alpha");
+        m.toggle_pilot_hidden("Pilot Alpha");
+        assert_eq!(m.shown_pilots().count(), 1);
+        assert_eq!(m.current_pilots().count(), 2);
+        // The picked pilot is hidden, so it falls back to the last jumper.
+        assert_eq!(m.active_pilot().unwrap().name, "Pilot Bravo");
+        assert!(!m.pilots_by_system().contains_key(&101));
+    }
+
+    #[test]
+    fn the_shown_region_counts_as_nearby() {
+        let mut m = module();
+        // No pilots: only the shown region (and its neighbours) are nearby.
+        m.show_region(2);
+        assert!(m.nearby.contains(&202));
+        assert!(m.nearby.contains(&101));
     }
 }
