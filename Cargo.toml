@@ -32,6 +32,15 @@ directories = "6"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 anyhow = "1"
+# HTTP for ESI. `blocking` runs requests from a plain background thread, so the
+# app needs no async code of its own. TLS is rustls (no OpenSSL DLLs), and it
+# trusts the Windows certificate store. `gzip` makes ESI responses smaller.
+reqwest = { version = "0.13", default-features = false, features = [
+    "blocking",
+    "rustls",
+    "json",
+    "gzip",
+] }
 # SQLite, compiled into the exe (`bundled`), so there is no DLL to ship.
 # Reads static.sqlite (game data) and, later, the mining history.
 rusqlite = { version = "0.41", features = ["bundled"] }
