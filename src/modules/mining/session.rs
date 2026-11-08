@@ -117,8 +117,8 @@ pub struct FinishedSession {
     pub cycles: u64,
 }
 
-/// The session that is running now.
-#[derive(Debug, Clone, PartialEq)]
+/// The session that is running now. Saved across restarts.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ActiveSession {
     pub started: LogTime,
     pub last_cycle: LogTime,
@@ -200,6 +200,13 @@ impl CharacterTracker {
             raised_stopped: false,
             raised_idle: false,
         }
+    }
+
+    /// Puts back the hold contents and running session saved before a
+    /// restart. The guard (cycle rhythm, crystal) starts fresh.
+    pub fn restore(&mut self, hold_units: BTreeMap<String, u64>, session: Option<ActiveSession>) {
+        self.hold_units = hold_units;
+        self.session = session;
     }
 
     /// Units in the hold per item name.

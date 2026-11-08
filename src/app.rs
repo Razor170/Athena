@@ -40,7 +40,7 @@ impl AthenaApp {
         settings_warning: Option<String>,
         saver: Saver,
     ) -> AthenaApp {
-        let modules = modules::create_all(egui_ctx, &settings);
+        let modules = modules::create_all(egui_ctx, &settings, &data_dir.path);
         let module_ids: Vec<String> = modules.iter().map(|m| m.id().to_string()).collect();
         // Reading the layout file here is fine: this runs once before the window shows.
         let (layout, layout_warning) = Layout::load(&data_dir.path, &module_ids);
@@ -163,6 +163,9 @@ impl eframe::App for AthenaApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_settings();
         self.save_layout_if_changed();
+        for module in &mut self.modules {
+            module.on_exit();
+        }
         // Wait for the writes to finish before the process ends.
         self.saver.finish();
     }

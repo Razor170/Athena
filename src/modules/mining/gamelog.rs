@@ -23,7 +23,9 @@
 ///
 /// We keep our own small type instead of adding a date crate: the log only
 /// needs parsing, ordering and "seconds between two times".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct LogTime {
     /// Seconds since 1970-01-01 00:00:00 UTC.
     pub unix_seconds: i64,
