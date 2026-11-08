@@ -35,6 +35,7 @@ pub mod watcher;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -49,7 +50,7 @@ use self::session::{Alert, CharacterTracker, VolumeTable};
 use self::state::{SavedCharacter, SavedState};
 use self::store::{HistorySnapshot, HistoryStore, HistoryUpdate};
 use self::watcher::{FileOffset, GameLogWatcher, WatchEvent};
-use super::{Module, ModuleContext};
+use super::{Module, ModuleContext, SharedStaticData};
 use crate::settings::Settings;
 use crate::static_data::StaticData;
 use crate::storage::Saver;
@@ -107,7 +108,7 @@ pub struct MiningSupervisor {
     settings: MiningSettings,
 
     /// `None` if static.sqlite is missing or broken (see `problems`).
-    static_data: Option<StaticData>,
+    static_data: Option<Arc<StaticData>>,
     volumes: VolumeTable,
     prices: Option<JitaPrices>,
 
@@ -159,7 +160,12 @@ fn now() -> LogTime {
 impl MiningSupervisor {
     /// Runs once at startup, before the window shows: reads the small
     /// settings, state and static data files, then starts the threads.
-    pub fn new(egui_ctx: &egui::Context, app_settings: &Settings, data_dir: &Path) -> Self {
+    pub fn new(
+        egui_ctx: &egui::Context,
+        app_settings: &Settings,
+        data_dir: &Path,
+        shared: &SharedStaticData,
+    ) -> Self {
         let mut problems = BTreeMap::new();
         let (settings, settings_problem) = MiningSettings::load(data_dir);
         let (saved, state_problem) = SavedState::load(data_dir);
@@ -170,25 +176,10 @@ impl MiningSupervisor {
             problems.insert("state", problem);
         }
 
-        let static_data = match StaticData::find_file() {
-            Some(path) => match StaticData::load(&path) {
-                Ok(data) => Some(data),
-                Err(e) => {
-                    problems.insert("static", format!("Ore data could not be read: {e:#}"));
-                    None
-                }
-            },
-            None => {
-                problems.insert(
-                    "static",
-                    format!(
-                        "{} is missing next to Athena.exe, so ore volumes and values are unknown.",
-                        crate::static_data::FILE_NAME
-                    ),
-                );
-                None
-            }
-        };
+        let static_data = shared.data.clone();
+        if let Some(problem) = &shared.problem {
+            problems.insert("static", problem.clone());
+        }
         let mut volumes = VolumeTable::default();
         if let Some(data) = &static_data {
             for item in data.minable_items() {
@@ -349,7 +340,7 @@ impl MiningSupervisor {
             .collect();
         if let Some(group) = GroupSession::from_pilots(pilots) {
             let empty = StaticData::default();
-            let data = self.static_data.as_ref().unwrap_or(&empty);
+            let data = self.static_data.as_deref().unwrap_or(&empty);
             let no_prices = JitaPrices::default();
             let prices = self.prices.as_ref().unwrap_or(&no_prices);
             let stored = store::value_group(
