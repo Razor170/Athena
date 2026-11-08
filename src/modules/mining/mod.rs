@@ -6,6 +6,8 @@
 //! - [`session`]: adds those events up into per-character mining sessions.
 //! - [`history`]: one History entry per "End session" click, with all pilots.
 //! - [`prices`]: Jita prices from ESI (refreshed hourly) and ore values.
+//! - [`watcher`]: follows the game log files on a background thread.
+//! - [`clipboard`]: picks up belt scans copied in EVE (Windows only).
 //! - [`scan`]: parses pasted Mining Survey Scanner results and works out how
 //!   fast a belt is being mined.
 //!
@@ -24,8 +26,10 @@
 // about "dead code". Remove this line when the panel is wired in.
 #![allow(dead_code)]
 
+pub mod clipboard;
 pub mod gamelog;
 pub mod history;
 pub mod prices;
 pub mod scan;
 pub mod session;
+pub mod watcher;
