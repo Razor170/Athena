@@ -236,6 +236,43 @@ pub fn week_start(unix: i64) -> i64 {
     monday * SECONDS_PER_DAY
 }
 
+/// The schema version this code reads and writes.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Creates the tables of a new file, in one transaction.
+const CREATE_SCHEMA_V1: &str = "
+    BEGIN;
+    CREATE TABLE sessions (
+        id                  INTEGER PRIMARY KEY,
+        started             INTEGER NOT NULL,  -- Unix seconds, UTC
+        ended               INTEGER NOT NULL,
+        kind                TEXT NOT NULL,     -- ore, moon, ice, gas, mixed
+        price_side          TEXT NOT NULL,     -- buy or sell
+        prices_fetched      INTEGER NOT NULL   -- when the prices used were fetched
+    );
+    CREATE TABLE pilots (
+        session_id  INTEGER NOT NULL REFERENCES sessions(id),
+        character   TEXT NOT NULL,
+        started     INTEGER NOT NULL,
+        ended       INTEGER NOT NULL,
+        cycles      INTEGER NOT NULL,
+        PRIMARY KEY (session_id, character)
+    );
+    -- ISK is frozen when the session ends and never recalculated.
+    CREATE TABLE pilot_ores (
+        session_id  INTEGER NOT NULL REFERENCES sessions(id),
+        character   TEXT NOT NULL,
+        ore         TEXT NOT NULL,
+        units       INTEGER NOT NULL,
+        m3          REAL NOT NULL,
+        isk         REAL NOT NULL,
+        PRIMARY KEY (session_id, character, ore)
+    );
+    CREATE INDEX sessions_started ON sessions(started);
+    PRAGMA user_version = 1;
+    COMMIT;
+";
+
 /// The database. Only used on the history thread (and in tests).
 pub struct Database {
     db: Connection,
@@ -248,41 +285,25 @@ impl Database {
     }
 
     fn with_connection(db: Connection) -> Result<Database> {
-        // `IF NOT EXISTS` makes this safe to run on every start. A later
-        // version that changes tables checks `user_version` first.
-        db.execute_batch(
-            "
-            PRAGMA user_version = 1;
-            CREATE TABLE IF NOT EXISTS sessions (
-                id                  INTEGER PRIMARY KEY,
-                started             INTEGER NOT NULL,  -- Unix seconds, UTC
-                ended               INTEGER NOT NULL,
-                kind                TEXT NOT NULL,     -- ore, moon, ice, gas, mixed
-                price_side          TEXT NOT NULL,     -- buy or sell
-                prices_fetched      INTEGER NOT NULL   -- when the prices used were fetched
-            );
-            CREATE TABLE IF NOT EXISTS pilots (
-                session_id  INTEGER NOT NULL REFERENCES sessions(id),
-                character   TEXT NOT NULL,
-                started     INTEGER NOT NULL,
-                ended       INTEGER NOT NULL,
-                cycles      INTEGER NOT NULL,
-                PRIMARY KEY (session_id, character)
-            );
-            -- ISK is frozen when the session ends and never recalculated.
-            CREATE TABLE IF NOT EXISTS pilot_ores (
-                session_id  INTEGER NOT NULL REFERENCES sessions(id),
-                character   TEXT NOT NULL,
-                ore         TEXT NOT NULL,
-                units       INTEGER NOT NULL,
-                m3          REAL NOT NULL,
-                isk         REAL NOT NULL,
-                PRIMARY KEY (session_id, character, ore)
-            );
-            CREATE INDEX IF NOT EXISTS sessions_started ON sessions(started);
-            ",
-        )
-        .context("setting up the mining history database")?;
+        // Foreign keys are off in SQLite unless switched on per connection.
+        db.execute_batch("PRAGMA foreign_keys = ON;")
+            .context("setting up the mining history database")?;
+        // `user_version` is the schema version stored in the file (0 for a
+        // new file). It is only ever raised, never written back down, so an
+        // older Athena can't hide a newer schema from a later migration.
+        let version: i64 = db
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .context("reading the mining history version")?;
+        match version {
+            0 => db
+                .execute_batch(CREATE_SCHEMA_V1)
+                .context("setting up the mining history database")?,
+            SCHEMA_VERSION => {}
+            newer => anyhow::bail!(
+                "mining.sqlite was written by a newer Athena (version {newer}); \
+                 please use that version"
+            ),
+        }
         Ok(Database { db })
     }
 
@@ -665,6 +686,30 @@ mod tests {
         let mut expected = original;
         expected.id = id;
         assert_eq!(read[0], expected);
+    }
+
+    #[test]
+    fn opening_again_keeps_the_data() {
+        let dir = std::env::temp_dir().join(format!("athena-reopen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(FILE_NAME);
+        Database::open(&path)
+            .unwrap()
+            .insert(&session(SUNDAY))
+            .unwrap();
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.recent_sessions(10).unwrap().len(), 1);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn newer_schema_is_refused_and_left_alone() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA user_version = 2;").unwrap();
+        let error = Database::with_connection(db).err().unwrap();
+        assert!(format!("{error:#}").contains("newer Athena"));
     }
 
     #[test]
