@@ -17,7 +17,12 @@
 //! - what each of them reprocesses into (`typeMaterials`),
 //! - which type each one compresses into (`compressibleTypes`),
 //! - the names of the minerals and other materials they reprocess into, so
-//!   their Jita prices can be looked up.
+//!   their Jita prices can be looked up,
+//! - for the Intel Supervisor: regions, constellations, solar systems with
+//!   their security and map position, stargate connections and the names of
+//!   all ship types (see `map.rs`).
+
+mod map;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -28,12 +33,14 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 /// Bump when the tables change, so the app can refuse a file it can't read.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// The SDE category that holds all asteroid ore, ice and moon ore.
 const CATEGORY_ASTEROID: i64 = 25;
 /// Gas: "Harvestable Cloud" (raw gas) and "Compressed Gas".
 const GAS_GROUPS: [i64; 2] = [711, 4168];
+/// The SDE category of all ships.
+const CATEGORY_SHIP: i64 = 6;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -54,7 +61,7 @@ fn main() -> Result<()> {
 
 /// A name in all languages; we only keep English, which is what the logs use.
 #[derive(Deserialize)]
-struct Name {
+pub struct Name {
     en: Option<String>,
 }
 
@@ -148,7 +155,7 @@ fn read_jsonl<T: serde::de::DeserializeOwned>(
     Ok(rows)
 }
 
-fn english(name: &Option<Name>) -> Option<String> {
+pub fn english(name: &Option<Name>) -> Option<String> {
     name.as_ref()?.en.clone()
 }
 
@@ -253,6 +260,29 @@ fn build_static_data(zip_path: &Path, out: &Path) -> Result<()> {
         );
     }
 
+    // Ship type names, so intel lines like "loki + 2" can be read.
+    let mut ships: BTreeMap<i64, (String, String)> = BTreeMap::new();
+    for t in &types {
+        let Some((category, group_name)) = groups.get(&t.group_id) else {
+            continue;
+        };
+        if *category != CATEGORY_SHIP || !t.published {
+            continue;
+        }
+        if let Some(name) = english(&t.name) {
+            ships.insert(t.id, (name, group_name.clone()));
+        }
+    }
+    drop(types);
+
+    println!("Reading the map...");
+    let map = map::build(
+        read_jsonl(&mut archive, "mapRegions.jsonl")?,
+        read_jsonl(&mut archive, "mapConstellations.jsonl")?,
+        read_jsonl(&mut archive, "mapSolarSystems.jsonl")?,
+        read_jsonl(&mut archive, "mapStargates.jsonl")?,
+    )?;
+
     let compressed: Vec<(i64, i64)> = compressible
         .iter()
         .filter(|c| items.contains_key(&c.id) && items.contains_key(&c.compressed_id))
@@ -274,14 +304,37 @@ fn build_static_data(zip_path: &Path, out: &Path) -> Result<()> {
     if reprocess.is_empty() || compressed.is_empty() {
         bail!("no reprocessing or compression data found; has the SDE format changed?");
     }
+    for must_have in ["Rifter", "Loki", "Capsule"] {
+        if !ships.values().any(|(name, _)| name == must_have) {
+            bail!("ship {must_have} not found; has the SDE format changed?");
+        }
+    }
+    for must_have in ["Jita", "X7R-JW", "Zarzakh"] {
+        if !map.systems.values().any(|s| s.name == must_have) {
+            bail!("system {must_have} not found; has the SDE format changed?");
+        }
+    }
+    if map.systems.len() < 5000 || map.regions.len() < 60 || map.gates.len() < 6000 {
+        bail!(
+            "only {} systems, {} regions and {} gates found; has the SDE format changed?",
+            map.systems.len(),
+            map.regions.len(),
+            map.gates.len()
+        );
+    }
 
-    write_database(out, info, &items, &reprocess, &compressed)?;
+    write_database(out, info, &items, &reprocess, &compressed, &ships, &map)?;
     println!(
-        "Wrote {}: {} items, {} reprocessing rows, {} compressible types",
+        "Wrote {}: {} items, {} reprocessing rows, {} compressible types, {} ships, \
+         {} regions, {} systems, {} gates",
         out.display(),
         items.len(),
         reprocess.len(),
-        compressed.len()
+        compressed.len(),
+        ships.len(),
+        map.regions.len(),
+        map.systems.len(),
+        map.gates.len()
     );
     Ok(())
 }
@@ -317,6 +370,51 @@ fn create_schema(db: &rusqlite::Connection) -> Result<()> {
             type_id            INTEGER PRIMARY KEY,
             compressed_type_id INTEGER NOT NULL
         );
+
+        -- Every published ship type, for reading intel lines.
+        CREATE TABLE ship_types (
+            type_id    INTEGER PRIMARY KEY,
+            name       TEXT NOT NULL,
+            group_name TEXT NOT NULL  -- e.g. Frigate, Strategic Cruiser
+        );
+
+        -- The map: only regions, constellations and systems that have
+        -- stargates (known space, Pochven, Zarzakh).
+        CREATE TABLE regions (
+            region_id INTEGER PRIMARY KEY,
+            name      TEXT NOT NULL
+        );
+        CREATE TABLE constellations (
+            constellation_id INTEGER PRIMARY KEY,
+            name             TEXT NOT NULL,
+            region_id        INTEGER NOT NULL
+        );
+        -- map_x/map_y: where the system is drawn on its region's map, in
+        -- points at zoom 1.0, y down, the region's top-left at (0, 0).
+        CREATE TABLE systems (
+            system_id        INTEGER PRIMARY KEY,
+            name             TEXT NOT NULL,
+            constellation_id INTEGER NOT NULL,
+            region_id        INTEGER NOT NULL,
+            security         REAL NOT NULL,  -- unrounded, e.g. -0.3684
+            map_x            REAL NOT NULL,
+            map_y            REAL NOT NULL
+        );
+        -- Each gate connection once (from_id < to_id); gates work both ways.
+        CREATE TABLE gates (
+            from_id INTEGER NOT NULL,
+            to_id   INTEGER NOT NULL,
+            PRIMARY KEY (from_id, to_id)
+        );
+        -- Systems of other regions drawn on a region's map (hollow dots)
+        -- because a gate leads there, with their spot on that map.
+        CREATE TABLE region_borders (
+            region_id INTEGER NOT NULL,
+            system_id INTEGER NOT NULL,
+            map_x     REAL NOT NULL,
+            map_y     REAL NOT NULL,
+            PRIMARY KEY (region_id, system_id)
+        );
         ",
     )?;
     Ok(())
@@ -328,6 +426,8 @@ fn write_database(
     items: &BTreeMap<i64, Item>,
     reprocess: &[(i64, i64, i64)],
     compressed: &[(i64, i64)],
+    ships: &BTreeMap<i64, (String, String)>,
+    map: &map::MapData,
 ) -> Result<()> {
     // Write to a temporary file first, so a failed run never leaves a
     // half-written static.sqlite behind.
@@ -374,6 +474,52 @@ fn write_database(
             tx.prepare("INSERT INTO compressed (type_id, compressed_type_id) VALUES (?1, ?2)")?;
         for row in compressed {
             insert.execute(*row)?;
+        }
+
+        let mut insert =
+            tx.prepare("INSERT INTO ship_types (type_id, name, group_name) VALUES (?1, ?2, ?3)")?;
+        for (id, (name, group_name)) in ships {
+            insert.execute((id, name, group_name))?;
+        }
+
+        let mut insert = tx.prepare("INSERT INTO regions (region_id, name) VALUES (?1, ?2)")?;
+        for (id, region) in &map.regions {
+            insert.execute((id, &region.name))?;
+        }
+
+        let mut insert = tx.prepare(
+            "INSERT INTO constellations (constellation_id, name, region_id) VALUES (?1, ?2, ?3)",
+        )?;
+        for (id, c) in &map.constellations {
+            insert.execute((id, &c.name, c.region_id))?;
+        }
+
+        let mut insert = tx.prepare(
+            "INSERT INTO systems (system_id, name, constellation_id, region_id, security, map_x, map_y)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for (id, s) in &map.systems {
+            insert.execute((
+                id,
+                &s.name,
+                s.constellation_id,
+                s.region_id,
+                s.security,
+                s.map_x,
+                s.map_y,
+            ))?;
+        }
+
+        let mut insert = tx.prepare("INSERT INTO gates (from_id, to_id) VALUES (?1, ?2)")?;
+        for row in &map.gates {
+            insert.execute(*row)?;
+        }
+
+        let mut insert = tx.prepare(
+            "INSERT INTO region_borders (region_id, system_id, map_x, map_y) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for b in &map.borders {
+            insert.execute((b.region_id, b.system_id, b.map_x, b.map_y))?;
         }
     }
     tx.commit()?;

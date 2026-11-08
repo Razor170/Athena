@@ -9,6 +9,7 @@ mod modules;
 mod settings;
 mod static_data;
 mod storage;
+mod universe;
 
 use std::path::PathBuf;
 
