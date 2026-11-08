@@ -471,10 +471,13 @@ pub enum HistoryUpdate {
 }
 
 /// Handle to the history thread. Dropping it lets the thread finish the
-/// writes it already has and then stop.
+/// writes it already has and then stop; [`HistoryStore::finish`] also waits
+/// for that.
 pub struct HistoryStore {
-    commands: Sender<Command>,
+    /// `Option` so `finish` can drop it, which tells the thread to stop.
+    commands: Option<Sender<Command>>,
     pub updates: Receiver<HistoryUpdate>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl HistoryStore {
@@ -484,20 +487,42 @@ impl HistoryStore {
         let (commands, command_rx) = mpsc::channel();
         let (update_tx, updates) = mpsc::channel();
         let path = data_dir.join(FILE_NAME);
-        std::thread::spawn(move || history_thread(&path, command_rx, update_tx, egui_ctx));
-        let store = HistoryStore { commands, updates };
+        let thread =
+            std::thread::spawn(move || history_thread(&path, command_rx, update_tx, egui_ctx));
+        let store = HistoryStore {
+            commands: Some(commands),
+            updates,
+            thread: Some(thread),
+        };
         store.refresh();
         store
     }
 
     /// Saves a finished session; a new snapshot follows.
     pub fn store(&self, session: StoredSession) {
-        let _ = self.commands.send(Command::Store(Box::new(session)));
+        self.send(Command::Store(Box::new(session)));
     }
 
     /// Asks for a new snapshot, e.g. after midnight so "Today" moves on.
     pub fn refresh(&self) {
-        let _ = self.commands.send(Command::Refresh);
+        self.send(Command::Refresh);
+    }
+
+    /// Waits until every session handed over so far is written. Called when
+    /// Athena closes, so an "End session" just before closing isn't lost.
+    pub fn finish(&mut self) {
+        self.commands = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+
+    fn send(&self, command: Command) {
+        if let Some(commands) = &self.commands {
+            // An error only means the thread already stopped (it reported
+            // why as a `Problem`).
+            let _ = commands.send(command);
+        }
     }
 }
 
@@ -640,6 +665,23 @@ mod tests {
         let mut expected = original;
         expected.id = id;
         assert_eq!(read[0], expected);
+    }
+
+    #[test]
+    fn finish_waits_for_pending_writes() {
+        let dir = std::env::temp_dir().join(format!("athena-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut store = HistoryStore::start(&dir, egui::Context::default());
+        store.store(session(SUNDAY + 3_600));
+        store.finish();
+        // Sending after `finish` is ignored instead of failing.
+        store.refresh();
+
+        let db = Database::open(&dir.join(FILE_NAME)).unwrap();
+        assert_eq!(db.recent_sessions(10).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
