@@ -115,6 +115,8 @@ pub fn parse(text: &str, context: &ParseContext) -> IntelMessage {
         } else if word == "nv" {
             message.no_visual = true;
             used[index] = Used::Taken;
+        } else if STOP_WORDS.contains(&word.as_str()) {
+            // "out" would find Outuni, "gate" a system starting "Gate...".
         } else if let Some(id) = system_by_prefix(word, context) {
             systems.push((index, id));
             used[index] = Used::Taken;
@@ -157,10 +159,14 @@ fn clean_word(word: &str) -> &str {
     })
 }
 
-/// A ship by name, also accepting a plural "s" ("sabres").
+/// A ship by name, also accepting a plural "s" ("sabres"), but not for
+/// intel words ("probes" isn't two Probes).
 fn ship_by_name(universe: &Universe, phrase: &str) -> Option<String> {
     if let Some(ship) = universe.ship_by_name(phrase) {
         return Some(ship.name.clone());
+    }
+    if STOP_WORDS.contains(&phrase) {
+        return None;
     }
     let singular = phrase.strip_suffix('s')?;
     universe
@@ -237,9 +243,11 @@ mod tests {
         // A multi-word system name too.
         db.execute_batch(
             "INSERT INTO systems VALUES (105, 'New Caldari', 11, 1, 1.0, 0, 36),
-                 (106, 'ZZA-111', 11, 1, -0.5, 36, 36), (107, 'ZZA-222', 11, 1, -0.5, 72, 36);
+                 (106, 'ZZA-111', 11, 1, -0.5, 36, 36), (107, 'ZZA-222', 11, 1, -0.5, 72, 36),
+                 (108, 'Outuni', 11, 1, 0.4, 108, 36);
              INSERT INTO ship_types VALUES (22456, 'Sabre', 'Interdictor'),
-                 (72811, 'Federation Navy Comet', 'Frigate');",
+                 (72811, 'Federation Navy Comet', 'Frigate'),
+                 (3532, 'Probe', 'Frigate');",
         )
         .unwrap();
         Universe::from_connection(&db).unwrap()
@@ -304,6 +312,18 @@ mod tests {
         assert_eq!(m.systems, [101]);
         assert!(m.clear);
         assert!(m.pilot_candidates.is_empty());
+    }
+
+    #[test]
+    fn stop_words_are_not_prefixes_or_plurals() {
+        // "out" would match Outuni as a prefix; "probes" the ship Probe.
+        let m = parse_with("out probes", &[108]);
+        assert!(m.systems.is_empty());
+        assert!(m.ships.is_empty());
+        // The real names still work.
+        let m = parse_with("outun probe", &[108]);
+        assert_eq!(m.systems, [108]);
+        assert_eq!(m.ships, ["Probe"]);
     }
 
     #[test]

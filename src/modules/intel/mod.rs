@@ -94,6 +94,9 @@ pub struct IntelSupervisor {
     channels_found: Vec<String>,
     /// By character name.
     pilots: BTreeMap<String, Pilot>,
+    /// The time of each pilot's newest system change, also when it was
+    /// into a wormhole (and the pilot left `pilots`).
+    last_jump: BTreeMap<String, LogTime>,
     /// Newest first.
     reports: VecDeque<Report>,
     /// Systems whose names may be shortened to a prefix in intel: the own
@@ -153,6 +156,7 @@ impl IntelSupervisor {
             deduper: Deduper::new(),
             channels_found: Vec::new(),
             pilots: BTreeMap::new(),
+            last_jump: BTreeMap::new(),
             reports: VecDeque::new(),
             nearby: HashSet::new(),
             nearby_regions: BTreeSet::new(),
@@ -193,27 +197,37 @@ impl IntelSupervisor {
 
     /// A "Channel changed to Local" line: the pilot is now in that system.
     fn pilot_moved(&mut self, pilot: &str, line: &ChatLine) {
-        let (Some(universe), Some(name)) = (self.universe(), local_system_change(line)) else {
+        // A clone of the `Arc` (cheap: it only counts up), so `self` can be
+        // changed below while the map is in use.
+        let (Some(data), Some(name)) = (self.static_data.clone(), local_system_change(line)) else {
             return;
         };
-        // Wormhole systems have no gates and aren't on the map.
-        let Some(system) = universe.system_by_name(name) else {
-            self.pilots.remove(pilot);
-            return;
-        };
+        let universe = &data.universe;
+        // Lines from a relog's files can arrive out of order; only a newer
+        // line moves the pilot.
         let newer = self
-            .pilots
+            .last_jump
             .get(pilot)
-            .is_none_or(|known| known.since <= line.time);
-        if newer {
-            self.pilots.insert(
-                pilot.to_string(),
-                Pilot {
-                    name: pilot.to_string(),
-                    system_id: system.id,
-                    since: line.time,
-                },
-            );
+            .is_none_or(|&known| known <= line.time);
+        if !newer {
+            return;
+        }
+        self.last_jump.insert(pilot.to_string(), line.time);
+        match universe.system_by_name(name) {
+            // Wormhole systems have no gates and aren't on the map.
+            None => {
+                self.pilots.remove(pilot);
+            }
+            Some(system) => {
+                self.pilots.insert(
+                    pilot.to_string(),
+                    Pilot {
+                        name: pilot.to_string(),
+                        system_id: system.id,
+                        since: line.time,
+                    },
+                );
+            }
         }
     }
 
@@ -326,11 +340,12 @@ impl Module for IntelSupervisor {
                     lines,
                     catch_up,
                 } => self.handle_lines(&channel, &listener, lines, catch_up),
-                WatchEvent::CaughtUp => {
-                    self.problems.remove("chatlogs");
-                }
-                WatchEvent::Problem(text) => {
+                WatchEvent::CaughtUp => {}
+                WatchEvent::Problem(Some(text)) => {
                     self.problems.insert("chatlogs", text);
+                }
+                WatchEvent::Problem(None) => {
+                    self.problems.remove("chatlogs");
                 }
             }
         }
@@ -352,6 +367,7 @@ impl Module for IntelSupervisor {
         );
         self.channels_found.clear();
         self.pilots.clear();
+        self.last_jump.clear();
     }
 
     fn on_exit(&mut self) {
@@ -468,6 +484,41 @@ mod tests {
                 line(2, EVE_SYSTEM, "Channel changed to Local : A1-XYZ"),
                 line(1, EVE_SYSTEM, "Channel changed to Local : J123456"),
             ],
+            false,
+        );
+        assert_eq!(m.shown_pilots().count(), 0);
+    }
+
+    #[test]
+    fn an_older_wormhole_line_doesnt_remove_a_pilot() {
+        let mut m = module();
+        m.handle_lines(
+            LOCAL,
+            "Pilot Alpha",
+            vec![line(1, EVE_SYSTEM, "Channel changed to Local : A1-XYZ")],
+            false,
+        );
+        // An earlier session's file, read later.
+        m.handle_lines(
+            LOCAL,
+            "Pilot Alpha",
+            vec![line(2, EVE_SYSTEM, "Channel changed to Local : J123456")],
+            false,
+        );
+        assert_eq!(m.shown_pilots().count(), 1);
+        // And the other way round: an older system line after a newer
+        // wormhole line doesn't bring the pilot back.
+        let mut m = module();
+        m.handle_lines(
+            LOCAL,
+            "Pilot Alpha",
+            vec![line(1, EVE_SYSTEM, "Channel changed to Local : J123456")],
+            false,
+        );
+        m.handle_lines(
+            LOCAL,
+            "Pilot Alpha",
+            vec![line(2, EVE_SYSTEM, "Channel changed to Local : A1-XYZ")],
             false,
         );
         assert_eq!(m.shown_pilots().count(), 0);

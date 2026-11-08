@@ -63,8 +63,9 @@ pub enum WatchEvent {
     },
     /// The first pass over the existing files is done.
     CaughtUp,
-    /// Something is wrong, e.g. the folder doesn't exist. Shown to the user.
-    Problem(String),
+    /// Something is wrong, e.g. the folder doesn't exist (shown to the
+    /// user), or `None` once it's fixed.
+    Problem(Option<String>),
 }
 
 /// Handle to the watcher thread. Dropping it stops the thread.
@@ -183,9 +184,11 @@ impl Watcher {
         sent
     }
 
-    fn problem(&mut self, text: String) {
-        if self.last_problem.as_ref() != Some(&text) {
-            self.last_problem = Some(text.clone());
+    /// Reports a problem, or `None` when things work again. Only changes
+    /// are sent, so the same problem isn't sent every few seconds.
+    fn problem(&mut self, text: Option<String>) {
+        if self.last_problem != text {
+            self.last_problem = text.clone();
             self.send(WatchEvent::Problem(text));
         }
     }
@@ -225,11 +228,11 @@ impl Watcher {
             Ok(entries) => entries,
             Err(e) => {
                 let text = format!("Can't read {}: {e}", self.folder.display());
-                self.problem(text);
+                self.problem(Some(text));
                 return;
             }
         };
-        self.last_problem = None;
+        self.problem(None);
         let downtime = last_downtime(now);
         let list_since = now - Duration::from_secs(CHANNEL_LIST_DAYS * 86_400);
         let mut new_channels = false;
@@ -325,6 +328,12 @@ impl Watcher {
                 }
             }
         }
+        // Local first: a pilot's system decides which short system names
+        // ("x7r") the module recognises in the intel lines. `sort_by_key`
+        // keeps the order otherwise (false sorts before true).
+        batches.sort_by_key(
+            |batch| !matches!(batch, WatchEvent::Lines { channel, .. } if channel == LOCAL),
+        );
         for batch in batches {
             if !self.send(batch) {
                 return false;
@@ -508,9 +517,51 @@ mod tests {
         w.list_folder(SystemTime::now());
         let problems = receive
             .try_iter()
-            .filter(|e| matches!(e, WatchEvent::Problem(_)))
+            .filter(|e| matches!(e, WatchEvent::Problem(Some(_))))
             .count();
         assert_eq!(problems, 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn problem_clears_when_the_folder_appears() {
+        let dir = temp_folder("appears");
+        let folder = dir.join("later");
+        let (mut w, receive) = watcher(&folder, &[]);
+        w.list_folder(SystemTime::now());
+        std::fs::create_dir_all(&folder).unwrap();
+        w.list_folder(SystemTime::now());
+        let problems: Vec<WatchEvent> = receive
+            .try_iter()
+            .filter(|e| matches!(e, WatchEvent::Problem(_)))
+            .collect();
+        assert!(matches!(problems[0], WatchEvent::Problem(Some(_))));
+        assert_eq!(problems[1], WatchEvent::Problem(None));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn local_is_sent_before_intel() {
+        let dir = temp_folder("order");
+        // Several intel files, so the HashMap order would often put one first.
+        for i in 0..5 {
+            write(
+                &dir,
+                &format!("Branch Intel_{i}.txt"),
+                "Branch Intel",
+                "Pilot Alpha",
+                INTEL,
+            );
+        }
+        write(&dir, "Local_1.txt", "Local", "Pilot Alpha", JUMP);
+        let (mut w, receive) = watcher(&dir, &["Branch Intel"]);
+        w.list_folder(SystemTime::now());
+        w.poll_files(true);
+        let first = receive
+            .try_iter()
+            .find(|e| matches!(e, WatchEvent::Lines { .. }))
+            .unwrap();
+        assert!(matches!(first, WatchEvent::Lines { channel, .. } if channel == LOCAL));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
