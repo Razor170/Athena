@@ -49,7 +49,7 @@ pub enum FilePollRate {
 }
 
 impl FilePollRate {
-    /// Every choice, in the order the Settings dropdown shows them.
+    /// Every choice, in the order Settings shows them as radio buttons.
     pub const ALL: [FilePollRate; 6] = [
         FilePollRate::Ms100,
         FilePollRate::Ms250,
