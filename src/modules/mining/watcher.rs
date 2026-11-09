@@ -4,7 +4,9 @@
 //! How it works:
 //! - Every [`LIST_EVERY`] it lists the folder to find new log files (a new
 //!   file starts each time a character logs in).
-//! - Every [`POLL_EVERY`] it checks the size of the files it follows and
+//! - Every 100 ms to 3 s (the "Check log files" setting in Settings, read
+//!   through [`crate::settings::file_poll_interval`] before each sleep, so a
+//!   change applies at once) it checks the size of the files it follows and
 //!   reads only the bytes that were added. Windows doesn't reliably report
 //!   changes to a file that another program keeps open, so we look ourselves;
 //!   a size check is one cheap system call per file.
@@ -33,8 +35,6 @@ use super::gamelog::{GameLogReader, TimedMiningEvent};
 
 /// How often new files are looked for.
 const LIST_EVERY: Duration = Duration::from_secs(3);
-/// How often followed files are checked for new lines.
-const POLL_EVERY: Duration = Duration::from_millis(500);
 /// Files changed longer ago than this are not followed at all.
 const FOLLOW_HOURS: u64 = 48;
 /// Files we haven't seen before are read from the start if they changed
@@ -133,7 +133,7 @@ impl Watcher {
         let mut last_list = Instant::now();
         loop {
             // Sleep, but wake up at once when the module is dropped.
-            match stop.recv_timeout(POLL_EVERY) {
+            match stop.recv_timeout(crate::settings::file_poll_interval()) {
                 Err(RecvTimeoutError::Timeout) => {}
                 _ => return,
             }

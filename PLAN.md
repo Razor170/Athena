@@ -36,7 +36,7 @@ Considered and rejected: **Tauri** (WebView uses more memory), **C# / WPF** (lar
 ### Local logs
 - Default location: `Documents\EVE\logs\Chatlogs` and `...\Gamelogs` (configurable).
 - **Encoding:** chat logs are UTF-16 LE, game logs are UTF-8. The parser handles both.
-- **Watching:** a new file starts each session. `notify` catches new files; the currently active files are also polled for size every 250 to 500 ms, and only appended bytes are read. Verify the latency early in step 3 with a live client.
+- **Watching:** a new file starts each session. `notify` catches new files; the currently active files are also polled for size at the rate set in Settings ("Check log files for new lines every", 100 ms to 3 s, default 250 ms; applies without restart), and only appended bytes are read. Verify the latency early in step 3 with a live client.
 - **Multiple clients:** all clients write to the same folders. Each file's header names the character (`Listener:` in chat logs, the character line in game logs), and files are matched to characters through that header.
 - **Character location:** the Local chat log writes `Channel changed to Local : <system>` on every jump. That is the primary location source (faster than ESI); the ESI location endpoint is only a fallback.
 - Game logs contain combat, mining and notification lines (used by the Mining Supervisor).

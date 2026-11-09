@@ -1063,6 +1063,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let settings = Settings {
             log_folder: dir.join("no-logs-here"),
+            ..Settings::default()
         };
         // The sample static data includes a tiny made-up map.
         let data = crate::static_data::tests::sample();
