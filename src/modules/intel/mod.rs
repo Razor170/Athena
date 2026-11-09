@@ -53,6 +53,7 @@ use self::tags::Tag;
 use self::watcher::{ChatLogWatcher, LOCAL, WatchEvent, last_downtime};
 use super::{Module, ModuleContext, SharedStaticData};
 use crate::modules::mining::gamelog::LogTime;
+use crate::overlay::popup::{AlertPopup, PopupContent};
 use crate::settings::Settings;
 use crate::static_data::StaticData;
 use crate::storage::Saver;
@@ -154,6 +155,8 @@ pub struct IntelSupervisor {
     sound: SoundPlayer,
     /// The banner over the map, until dismissed or faded.
     alert: Option<Alert>,
+    /// The alert popup over EVE (shown even while muted).
+    popup: AlertPopup,
     /// "Mute 5 min" was clicked: no sound or flashing until then.
     muted_until: Option<LogTime>,
     /// The clear words box in Settings while it is being typed in.
@@ -277,6 +280,7 @@ impl IntelSupervisor {
             sound: SoundPlayer::start(),
             alert: None,
             muted_until: None,
+            popup: AlertPopup::new(),
             clear_words_text,
             tags,
             unread_tag_lines,
@@ -545,13 +549,26 @@ impl IntelSupervisor {
             .as_ref()
             .is_some_and(|shown| shown.jumps < level.jumps && shown.report.time >= report.time);
         if !keep_banner {
-            self.alert = Some(Alert {
+            let alert = Alert {
                 report: report.clone(),
                 system_id,
                 jumps: level.jumps,
                 pilots,
                 loud: level.loud,
-            });
+            };
+            // Same rule as the banner: what replaces the banner replaces
+            // the popup. Muting doesn't stop it (mute is about sound).
+            if self.settings.popup && (level.loud || !self.settings.popup_only_loud) {
+                let (title, details) = ui::alert_texts(self, &alert);
+                let content = PopupContent {
+                    title,
+                    details,
+                    loud: alert.loud,
+                };
+                let hide_after = self.popup_hide_after();
+                self.popup.show(&self.egui_ctx, content, hide_after);
+            }
+            self.alert = Some(alert);
         }
         if self.is_muted() {
             return;
@@ -896,6 +913,29 @@ impl IntelSupervisor {
         self.save_settings();
     }
 
+    /// How long the popup stays, `None` until ✕.
+    fn popup_hide_after(&self) -> Option<std::time::Duration> {
+        (self.settings.popup_hide_secs > 0)
+            .then(|| std::time::Duration::from_secs(self.settings.popup_hide_secs.into()))
+    }
+
+    /// "Show popup to move it" in Settings: an example that stays until ✕.
+    fn show_example_popup(&mut self) {
+        let content = PopupContent {
+            title: "Example · drag me by the grip".to_string(),
+            details: "Put the popup where you want alerts to show, then close it with ✕."
+                .to_string(),
+            loud: true,
+        };
+        self.popup.show(&self.egui_ctx, content, None);
+    }
+
+    fn reset_popup_position(&mut self) {
+        self.settings.popup_position = None;
+        self.popup.reset_position(&self.egui_ctx);
+        self.save_settings();
+    }
+
     fn save_settings(&mut self) {
         if let Ok(text) = self.settings.to_toml() {
             self.saver
@@ -914,6 +954,17 @@ impl Module for IntelSupervisor {
     }
 
     fn update(&mut self, _ctx: &ModuleContext) {
+        // Keeps the popup's window alive (hidden until an alert) and saves
+        // where the user dragged it.
+        let saved = self.settings.popup_position.map(|[x, y]| egui::pos2(x, y));
+        if let Some(moved) = self
+            .popup
+            .keep_alive(&self.egui_ctx, self.settings.popup, saved)
+        {
+            self.settings.popup_position = Some([moved.x, moved.y]);
+            self.save_settings();
+        }
+
         // `try_recv` returns at once when the channel is empty.
         while let Ok(event) = self.watcher.events.try_recv() {
             match event {

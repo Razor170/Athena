@@ -15,7 +15,7 @@ use super::alerts::{self, SystemMark};
 use super::lookup;
 use super::sound::{self, SoundKind};
 use super::tags;
-use super::{IntelSupervisor, Report, View, map, now};
+use super::{Alert, IntelSupervisor, Report, View, map, now};
 
 /// The Settings view has the same width as the Mining panel.
 const SETTINGS_WIDTH: f32 = 480.0;
@@ -301,24 +301,7 @@ fn alert_banner(module: &mut IntelSupervisor, ui: &mut egui::Ui, map_rect: egui:
     let Some(alert) = &module.alert else {
         return;
     };
-    let universe = module.universe();
-    let system = universe
-        .and_then(|u| u.system(alert.system_id))
-        .map(|s| s.name.clone())
-        .unwrap_or_default();
-    let pilots = and_list(&alert.pilots);
-    let title = match alert.jumps {
-        0 => format!("{system} · in system with {pilots}"),
-        n => format!("{system} · {} from {pilots}", alerts::jumps_text(n)),
-    };
-    let mut details: Vec<String> = alert.report.message.ships.clone();
-    details.extend(
-        lookup::pilots_to_show(&alert.report.message.pilot_candidates, &module.characters)
-            .into_iter()
-            .map(|(name, _)| name),
-    );
-    details.push(format!("reported by {}", alert.report.sender));
-    details.push(clock_text(alert.report.time.unix_seconds));
+    let (title, details) = alert_texts(module, alert);
 
     let area = egui::Rect::from_min_size(
         map_rect.min + Vec2::splat(12.0),
@@ -343,16 +326,38 @@ fn alert_banner(module: &mut IntelSupervisor, ui: &mut egui::Ui, map_rect: egui:
                         egui::Label::new(RichText::new(title).color(BANNER_TITLE).strong())
                             .truncate(),
                     );
-                    ui.add(
-                        egui::Label::new(RichText::new(details.join(" · ")).color(BANNER_TEXT))
-                            .truncate(),
-                    );
+                    ui.add(egui::Label::new(RichText::new(details).color(BANNER_TEXT)).truncate());
                 });
             });
         });
     if dismissed {
         module.alert = None;
     }
+}
+
+/// An alert's two lines, as the banner and the popup show them: "E-312G ·
+/// 2 jumps from Noa Askari" and "Sabre · Some Pilot · reported by Scout
+/// Alt · 07:42:10".
+pub(super) fn alert_texts(module: &IntelSupervisor, alert: &Alert) -> (String, String) {
+    let system = module
+        .universe()
+        .and_then(|u| u.system(alert.system_id))
+        .map(|s| s.name.clone())
+        .unwrap_or_default();
+    let pilots = and_list(&alert.pilots);
+    let title = match alert.jumps {
+        0 => format!("{system} · in system with {pilots}"),
+        n => format!("{system} · {} from {pilots}", alerts::jumps_text(n)),
+    };
+    let mut details: Vec<String> = alert.report.message.ships.clone();
+    details.extend(
+        lookup::pilots_to_show(&alert.report.message.pilot_candidates, &module.characters)
+            .into_iter()
+            .map(|(name, _)| name),
+    );
+    details.push(format!("reported by {}", alert.report.sender));
+    details.push(clock_text(alert.report.time.unix_seconds));
+    (title, details.join(" · "))
 }
 
 /// "Pilot Alpha", "Pilot Alpha and Pilot Bravo", "A, B and C".
@@ -570,6 +575,7 @@ fn settings_view(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
     }
 
     alerts_settings(module, ui);
+    popup_settings(module, ui);
 
     section_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -838,6 +844,60 @@ fn save_when_done(module: &mut IntelSupervisor, response: &egui::Response) {
         || (response.changed() && !response.dragged() && !response.has_focus());
     if done {
         module.save_settings();
+    }
+}
+
+/// The "Intel popup" box in Settings, as in the overlay mockup.
+fn popup_settings(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
+    let mut show_example = false;
+    let mut reset = false;
+    section_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new("Intel popup").color(BRIGHT).strong());
+        if ui
+            .checkbox(&mut module.settings.popup, "Show a popup on intel alerts")
+            .changed()
+        {
+            module.save_settings();
+        }
+        ui.add_enabled_ui(module.settings.popup, |ui| {
+            if ui
+                .checkbox(
+                    &mut module.settings.popup_only_loud,
+                    "Only for close alerts (loud range)",
+                )
+                .changed()
+            {
+                module.save_settings();
+            }
+            ui.horizontal(|ui| {
+                ui.label("Hide after");
+                let response = ui.add(
+                    egui::DragValue::new(&mut module.settings.popup_hide_secs)
+                        .range(0..=600)
+                        .suffix(" s"),
+                );
+                save_when_done(module, &response);
+                ui.label(small("0 = keep until closed").color(DIM));
+            });
+            ui.horizontal(|ui| {
+                show_example = ui.button("Show popup to move it").clicked();
+                reset = ui.button("Reset position").clicked();
+            });
+        });
+        ui.label(
+            small(
+                "Shows over EVE (Window or Fixed Window mode) without taking the focus, \
+                 also while sounds are muted.",
+            )
+            .color(DIM),
+        );
+    });
+    if show_example {
+        module.show_example_popup();
+    }
+    if reset {
+        module.reset_popup_position();
     }
 }
 
