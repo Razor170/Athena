@@ -5,7 +5,7 @@ use egui_dock::{DockArea, Style};
 
 use crate::layout::{Layout, Tab};
 use crate::modules::{self, Module, ModuleContext};
-use crate::overlay::CardOverlay;
+use crate::overlay::{CardOverlay, OverlayStatus};
 use crate::settings::Settings;
 use crate::storage::{DataDir, Saver};
 
@@ -18,6 +18,8 @@ pub struct AthenaApp {
     settings_panel: SettingsPanel,
     /// The window drawn over EVE-APM Preview's cards.
     card_overlay: CardOverlay,
+    /// What the overlay saw on the last frame, shown in the modules' settings.
+    overlay_status: OverlayStatus,
     /// The layout text we last handed to the saver, so we only save when it changed.
     last_saved_layout: String,
 }
@@ -60,6 +62,7 @@ impl AthenaApp {
         };
         AthenaApp {
             card_overlay: CardOverlay::new(egui_ctx),
+            overlay_status: OverlayStatus::default(),
             modules,
             layout,
             settings,
@@ -121,13 +124,15 @@ impl eframe::App for AthenaApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let module_ctx = ModuleContext {
             settings: &self.settings,
+            overlay: self.overlay_status,
         };
         for module in &mut self.modules {
             module.update(&module_ctx);
         }
         // Here rather than in `ui`, because `logic` also runs while the main
         // window is minimized, and the overlay must stay open then.
-        self.card_overlay.keep_alive(ctx);
+        let bars = self.modules.iter().find_map(|m| m.card_bars());
+        self.overlay_status = self.card_overlay.keep_alive(ctx, bars);
     }
 
     /// The colour every window is cleared to before drawing. eframe uses one
@@ -154,6 +159,7 @@ impl eframe::App for AthenaApp {
             data_dir: &self.data_dir,
             panel: &mut self.settings_panel,
             card_overlay: &mut self.card_overlay,
+            overlay_status: self.overlay_status,
             settings_changed: &mut settings_changed,
         };
         DockArea::new(&mut self.layout.dock)
@@ -197,6 +203,7 @@ struct TabViewer<'a> {
     data_dir: &'a DataDir,
     panel: &'a mut SettingsPanel,
     card_overlay: &'a mut CardOverlay,
+    overlay_status: OverlayStatus,
     settings_changed: &'a mut bool,
 }
 
@@ -222,6 +229,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
             Tab::Module(id) => {
                 let ctx = ModuleContext {
                     settings: self.settings,
+                    overlay: self.overlay_status,
                 };
                 match self.modules.iter_mut().find(|m| m.id() == id) {
                     Some(module) => module.ui(ui, &ctx),

@@ -14,6 +14,7 @@ use super::scan::{self, BeltScan};
 use super::session::{CharacterTracker, GuardState};
 use super::store::{PeriodTotal, SessionKind, StoredSession, Totals};
 use super::{AlertLevel, HistoryMode, MiningSupervisor, View};
+use crate::overlay::bars::CardBar;
 
 /// The panel is designed for a quarter of a 1080p screen.
 const MAX_WIDTH: f32 = 480.0;
@@ -24,7 +25,7 @@ const NAME_WIDTH: f32 = 92.0;
 const GREEN: Color32 = Color32::from_rgb(0x5c, 0xbf, 0x6a);
 const YELLOW: Color32 = Color32::from_rgb(0xe8, 0xc5, 0x47);
 const RED: Color32 = Color32::from_rgb(0xe5, 0x53, 0x4b);
-const PURPLE: Color32 = Color32::from_rgb(0xa3, 0x7e, 0xf0);
+pub(super) const PURPLE: Color32 = Color32::from_rgb(0xa3, 0x7e, 0xf0);
 const LIGHT_PURPLE: Color32 = Color32::from_rgb(0xc5, 0xa8, 0xff);
 const TEXT: Color32 = Color32::from_rgb(0xdc, 0xdc, 0xdc);
 const BRIGHT: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
@@ -64,8 +65,19 @@ fn view_tabs(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
         ui.selectable_value(&mut module.view, View::Live, "Live");
         ui.selectable_value(&mut module.view, View::History, "History");
         ui.selectable_value(&mut module.view, View::Settings, "Settings");
-        if module.view == View::Live {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if module.overlay_status.supported {
+                let mut on = module.settings.card_bars;
+                if ui
+                    .toggle_value(&mut on, small("Card bars"))
+                    .on_hover_text("Draw each character's hold bar on their EVE-APM Preview card.")
+                    .changed()
+                {
+                    module.settings.card_bars = on;
+                    module.settings_edited();
+                }
+            }
+            if module.view == View::Live {
                 let text = match &module.prices {
                     Some(prices) => {
                         let age = prices.age_secs(now_unix());
@@ -74,8 +86,8 @@ fn view_tabs(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
                     None => "Waiting for Jita prices".to_string(),
                 };
                 ui.label(small(text).color(DIM));
-            });
-        }
+            }
+        });
     });
 }
 
@@ -251,13 +263,7 @@ fn character_card(
     let capacity = tracker.settings.hold_capacity_m3.unwrap_or(0.0);
     let alert_at = tracker.settings.fill_alert_percent;
     let percent = tracker.fill_percent(&module.volumes).unwrap_or(0.0);
-    let bar_color = if percent >= tracker.settings.full_percent {
-        RED
-    } else if percent >= alert_at {
-        YELLOW
-    } else {
-        GREEN
-    };
+    let bar_color = fill_color(tracker, percent);
 
     // What the character is doing, and how the border looks.
     let quiet_secs = tracker
@@ -345,11 +351,7 @@ fn character_card(
                 // When EVE says the hold is full but our count is lower
                 // (ore from before Athena ran, or a hold size set too big),
                 // stretch the bar so it looks full too.
-                let bar_capacity = if percent >= 100.0 && fill.total_m3() > 0.0 {
-                    capacity.min(fill.total_m3())
-                } else {
-                    capacity
-                };
+                let bar_capacity = bar_capacity(capacity, percent, fill.total_m3());
                 hold_bar(
                     ui,
                     width,
@@ -409,6 +411,55 @@ fn name_label(ui: &mut egui::Ui, text: &str, color: Color32, strong: bool) {
             ui.add(egui::Label::new(rich).truncate());
         },
     );
+}
+
+/// Green, yellow from the alert level, red when full.
+fn fill_color(tracker: &CharacterTracker, percent: f64) -> Color32 {
+    if percent >= tracker.settings.full_percent {
+        RED
+    } else if percent >= tracker.settings.fill_alert_percent {
+        YELLOW
+    } else {
+        GREEN
+    }
+}
+
+/// The m³ the bar's full width stands for. When EVE says the hold is full
+/// but our count is lower (ore from before Athena ran, or a hold size set
+/// too big), the bar is stretched so it looks full too.
+fn bar_capacity(capacity: f64, percent: f64, total_m3: f64) -> f64 {
+    if percent >= 100.0 && total_m3 > 0.0 {
+        capacity.min(total_m3)
+    } else {
+        capacity
+    }
+}
+
+/// A character's hold bar for the card overlay: the same parts and colours
+/// as the bar on the Live view.
+pub(super) fn card_bar(module: &MiningSupervisor, tracker: &CharacterTracker) -> CardBar {
+    let fill = tracker.hold_fill(&module.volumes);
+    let percent = tracker.fill_percent(&module.volumes).unwrap_or(0.0);
+    let capacity = bar_capacity(
+        tracker.settings.hold_capacity_m3.unwrap_or(0.0),
+        percent,
+        fill.total_m3(),
+    );
+    let share = |m3: f64| {
+        if capacity > 0.0 {
+            (m3 / capacity).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        }
+    };
+    CardBar {
+        character: tracker.character.clone(),
+        compressed: share(fill.compressed_m3),
+        uncompressed: share(fill.uncompressed_m3),
+        color: fill_color(tracker, percent),
+        alert_mark: (capacity > 0.0)
+            .then(|| (tracker.settings.fill_alert_percent / 100.0).clamp(0.0, 1.0) as f32),
+    }
 }
 
 /// The ore hold bar: compressed ore (purple), then the rest, plus a white
@@ -1189,6 +1240,49 @@ fn settings_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
             small("Prices come from ESI market data and refresh at most once an hour.").color(DIM),
         );
     });
+
+    if module.overlay_status.supported {
+        let status = module.overlay_status;
+        section_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("Mining overlay").color(BRIGHT).strong());
+            if ui
+                .checkbox(
+                    &mut settings.card_bars,
+                    "Show hold bars on EVE-APM Preview cards",
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            ui.horizontal(|ui| {
+                ui.label("Bar height (px)");
+                if let Some(Some(value)) = number_field(
+                    ui,
+                    buffers,
+                    "bar_height",
+                    Some(settings.card_bar_height_px),
+                    "6",
+                    60.0,
+                ) {
+                    settings.card_bar_height_px = value.round().clamp(2.0, 20.0);
+                    changed = true;
+                }
+                ui.label(small("width is always half the card").color(DIM));
+            });
+            let found = if !status.active {
+                "Looks for cards while the bars are on.".to_string()
+            } else if !status.apm_running {
+                "EVE-APM Preview isn't running, or shows no cards.".to_string()
+            } else {
+                format!(
+                    "Found {} cards · {} matched to miners",
+                    status.cards_found, status.bars_matched
+                )
+            };
+            ui.label(small(found).color(DIM));
+        });
+    }
 
     let static_text = match &module.static_data {
         Some(data) => format!("Ore data from SDE build {}.", data.sde_build),

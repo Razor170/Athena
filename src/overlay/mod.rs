@@ -1,11 +1,13 @@
 //! Overlays: Athena windows drawn on top of the screen, over EVE.
 //!
 //! This holds the card overlay: one borderless, transparent, always-on-top,
-//! click-through window that covers the cards of EVE-APM Preview. For now it
-//! only draws a debug outline around each card it found (turned on in
-//! Settings › Diagnostics); the Mining Supervisor's hold bars come next.
+//! click-through window that covers the cards of EVE-APM Preview. It draws
+//! the Mining Supervisor's hold bars on the cards ("Card bars"), and, for
+//! checking, a debug outline around each card it found (Settings ›
+//! Diagnostics).
 //!
 //! - [`cards`]: what a card is and how it is told apart from other windows.
+//! - [`bars`]: which card belongs to which character, and the bars' look.
 //! - [`finder`]: the background thread that finds the cards, follows them
 //!   and keeps the overlay window on top of them (Windows only).
 //!
@@ -17,6 +19,7 @@
 //! cards it sees into a shared [`CardsView`], shows, hides and moves the
 //! window in physical pixels, and asks the overlay to repaint.
 
+pub mod bars;
 pub mod cards;
 pub mod finder;
 
@@ -26,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use self::bars::CardBars;
 use self::cards::{PixelRect, covered_area};
 use self::finder::{CardFinder, CardsView};
 
@@ -46,6 +50,20 @@ pub struct OverlayStats {
     pub last_draw: Duration,
 }
 
+/// What the overlay sees, for the modules' settings (for example "Found 7
+/// cards · 5 matched to miners").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OverlayStatus {
+    /// Whether the overlay works on this system (Windows only).
+    pub supported: bool,
+    /// Whether the finder is running (something wants the overlay).
+    pub active: bool,
+    pub apm_running: bool,
+    pub cards_found: usize,
+    /// How many hold bars have a card to sit on.
+    pub bars_matched: usize,
+}
+
 /// The card overlay, owned by the app.
 pub struct CardOverlay {
     finder: CardFinder,
@@ -54,6 +72,8 @@ pub struct CardOverlay {
     /// window repaints. `Arc` lets both hold it; the atomic and the mutex
     /// make it safe to use from both.
     debug_outlines: Arc<AtomicBool>,
+    /// The hold bars to draw, `None` while "Card bars" is off.
+    bars: Arc<Mutex<Option<CardBars>>>,
     stats: Arc<Mutex<OverlayStats>>,
 }
 
@@ -64,6 +84,7 @@ impl CardOverlay {
             finder: CardFinder::start(egui_ctx, OVERLAY_TITLE, viewport_id),
             viewport_id,
             debug_outlines: Arc::new(AtomicBool::new(false)),
+            bars: Arc::new(Mutex::new(None)),
             stats: Arc::new(Mutex::new(OverlayStats::default())),
         }
     }
@@ -102,11 +123,36 @@ impl CardOverlay {
     /// thread shows, hides and moves it with plain Windows calls, so it can
     /// appear over new cards even while Athena is minimized, and never takes
     /// focus.
-    pub fn keep_alive(&mut self, ctx: &egui::Context) {
-        let wanted = self.debug_outlines() && CardOverlay::is_supported();
+    ///
+    /// `bars` are the Mining Supervisor's hold bars, `None` while its "Card
+    /// bars" switch is off. Returns what the overlay sees, for Settings.
+    pub fn keep_alive(&mut self, ctx: &egui::Context, bars: Option<CardBars>) -> OverlayStatus {
+        let supported = CardOverlay::is_supported();
+        let wanted = supported && (self.debug_outlines() || bars.is_some());
         self.finder.set_wanted(wanted);
+
+        let view = self.finder.view();
+        let status = OverlayStatus {
+            supported,
+            active: wanted,
+            apm_running: view.apm_running,
+            cards_found: view.cards.len(),
+            bars_matched: bars
+                .as_ref()
+                .map_or(0, |b| bars::matched_count(&view.cards, b)),
+        };
+
+        // Hand new bars to the overlay. Only a real change repaints it, so
+        // this costs nothing on frames where no hold changed.
+        if let Ok(mut shown) = self.bars.lock()
+            && *shown != bars
+        {
+            *shown = bars;
+            ctx.request_repaint_of(self.viewport_id);
+        }
+
         if !wanted {
-            return;
+            return status;
         }
 
         let builder = egui::ViewportBuilder::default()
@@ -125,6 +171,7 @@ impl CardOverlay {
 
         let view = self.finder.shared_view();
         let debug_outlines = self.debug_outlines.clone();
+        let bars = self.bars.clone();
         let stats = self.stats.clone();
         // `move` hands the clones to the callback, which egui keeps and
         // calls whenever the overlay repaints, possibly later. That's why it
@@ -136,11 +183,35 @@ impl CardOverlay {
             if debug_outlines.load(Ordering::Relaxed) {
                 draw_outlines(ui, &cards);
             }
+            if let Ok(bars) = bars.lock()
+                && let Some(bars) = bars.as_ref()
+            {
+                draw_bars(ui, &cards, bars);
+            }
             if let Ok(mut stats) = stats.lock() {
                 stats.frames_drawn += 1;
                 stats.last_draw = started.elapsed();
             }
         });
+        status
+    }
+}
+
+/// Draws each character's hold bar on their card.
+fn draw_bars(ui: &mut egui::Ui, cards: &[cards::Card], card_bars: &CardBars) {
+    let Some(area) = covered_area(cards) else {
+        return;
+    };
+    let pixels_per_point = ui.ctx().pixels_per_point();
+    let painter = ui.painter();
+    let names: Vec<&str> = card_bars.all_names.iter().map(String::as_str).collect();
+    for bar in &card_bars.bars {
+        let Some(card) = bars::card_for(cards, &bar.character, &names) else {
+            continue;
+        };
+        let pixels = bars::bar_rect(card.rect, card_bars.height_px);
+        let rect = card_rect_in_overlay(pixels, area, pixels_per_point);
+        bars::draw_bar(painter, rect, bar, card_bars);
     }
 }
 

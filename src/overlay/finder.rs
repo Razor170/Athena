@@ -410,8 +410,9 @@ mod win {
         }
         // The main window only shows whether APM runs and which cards there
         // are (in Settings), so it needn't repaint while a card is dragged.
+        let titles = |v: &CardsView| v.cards.iter().map(|c| c.title.clone()).collect::<Vec<_>>();
         let main_window_changed =
-            current.apm_running != view.apm_running || current.cards.len() != view.cards.len();
+            current.apm_running != view.apm_running || titles(&current) != titles(&view);
         *current = view;
         drop(current);
         if main_window_changed {
