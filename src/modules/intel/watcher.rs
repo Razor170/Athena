@@ -6,7 +6,9 @@
 //! - Every [`LIST_EVERY`] it lists the folder. Each new file's header is
 //!   read once to learn its channel and character; files are matched to a
 //!   channel by the header, not by the file name.
-//! - Every [`POLL_EVERY`] it checks the size of the files it follows and
+//! - Every 100 ms to 3 s (the "Check log files" setting in Settings, read
+//!   through [`crate::settings::file_poll_interval`] before each sleep, so a
+//!   change applies at once) it checks the size of the files it follows and
 //!   reads only the bytes that were added.
 //! - It follows files changed since the last downtime (11:00 UTC). No
 //!   client stays logged in across downtime, so older files are finished.
@@ -33,9 +35,6 @@ use super::chatlog::{ChatLine, ChatLogHeader, ChatLogReader, local_system_change
 
 /// How often new files are looked for.
 const LIST_EVERY: Duration = Duration::from_secs(3);
-/// How often followed files are checked for new lines. Intel should show
-/// up fast; checking the size of a dozen files is cheap.
-const POLL_EVERY: Duration = Duration::from_millis(500);
 /// Files changed within this many days add their channel to the list.
 const CHANNEL_LIST_DAYS: u64 = 14;
 /// Read at most this much per file per poll.
@@ -155,7 +154,7 @@ impl Watcher {
         loop {
             // Sleep, but wake up at once for a new channel list or when
             // the module is dropped.
-            match watched.recv_timeout(POLL_EVERY) {
+            match watched.recv_timeout(crate::settings::file_poll_interval()) {
                 Ok(channels) => self.set_watched(channels),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,

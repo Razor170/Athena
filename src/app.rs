@@ -6,7 +6,7 @@ use egui_dock::{DockArea, Style};
 use crate::layout::{Layout, Tab};
 use crate::modules::{self, Module, ModuleContext};
 use crate::overlay::{CardOverlay, OverlayStatus};
-use crate::settings::Settings;
+use crate::settings::{FilePollRate, Settings};
 use crate::storage::{DataDir, Saver};
 
 pub struct AthenaApp {
@@ -45,6 +45,8 @@ impl AthenaApp {
         settings_warning: Option<String>,
         saver: Saver,
     ) -> AthenaApp {
+        // Set before the modules start their log watchers.
+        crate::settings::set_file_poll_rate(settings.file_poll_rate);
         let modules = modules::create_all(egui_ctx, &settings, &data_dir.path);
         let module_ids: Vec<String> = modules.iter().map(|m| m.id().to_string()).collect();
         // Reading the layout file here is fine: this runs once before the window shows.
@@ -268,6 +270,29 @@ fn settings_ui(ui: &mut egui::Ui, viewer: &mut TabViewer) {
             panel.log_folder_text = viewer.settings.log_folder.display().to_string();
             *viewer.settings_changed = true;
         }
+
+        ui.add_space(8.0);
+        ui.label("Check log files for new lines every");
+        // `horizontal_wrapped` puts the choices in one row and wraps them
+        // to a second row if the panel is narrow.
+        ui.horizontal_wrapped(|ui| {
+            let current = viewer.settings.file_poll_rate;
+            for rate in FilePollRate::ALL {
+                ui.radio_value(&mut viewer.settings.file_poll_rate, rate, rate.label());
+            }
+            if viewer.settings.file_poll_rate != current {
+                // The watcher threads read this before each sleep, so
+                // nothing needs to restart.
+                crate::settings::set_file_poll_rate(viewer.settings.file_poll_rate);
+                *viewer.settings_changed = true;
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "Used by every module that reads EVE logs. Shorter shows intel and mining changes sooner; longer uses a little less CPU. Default 250 ms.",
+            )
+            .weak(),
+        );
 
         ui.add_space(12.0);
         ui.heading("Data folder");
