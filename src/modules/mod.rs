@@ -15,6 +15,8 @@ use std::sync::Arc;
 
 use eframe::egui;
 
+use crate::overlay::OverlayStatus;
+use crate::overlay::bars::CardBars;
 use crate::settings::Settings;
 use crate::static_data::StaticData;
 
@@ -25,6 +27,8 @@ pub mod welcome;
 /// What a module may read from the rest of the app while it runs.
 pub struct ModuleContext<'a> {
     pub settings: &'a Settings,
+    /// What the card overlay sees (as of the last frame).
+    pub overlay: OverlayStatus,
 }
 
 /// The shared interface every dashboard module implements.
@@ -50,6 +54,13 @@ pub trait Module {
 
     /// Draws the module's panel. Only called while its tab is visible.
     fn ui(&mut self, ui: &mut egui::Ui, ctx: &ModuleContext);
+
+    /// The hold bars to draw over EVE-APM Preview's cards, or `None` while
+    /// the module doesn't want any. Called before every frame, so keep it
+    /// cheap; the overlay only repaints when the result changes.
+    fn card_bars(&self) -> Option<CardBars> {
+        None
+    }
 
     /// Called after the user changed a setting, with the new settings.
     /// For example, a log watcher restarts here when the log folder changed.

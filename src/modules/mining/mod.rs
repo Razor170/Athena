@@ -51,6 +51,8 @@ use self::state::{SavedCharacter, SavedState};
 use self::store::{HistorySnapshot, HistoryStore, HistoryUpdate};
 use self::watcher::{FileOffset, GameLogWatcher, WatchEvent};
 use super::{Module, ModuleContext, SharedStaticData};
+use crate::overlay::OverlayStatus;
+use crate::overlay::bars::CardBars;
 use crate::settings::Settings;
 use crate::static_data::StaticData;
 use crate::storage::Saver;
@@ -146,6 +148,8 @@ pub struct MiningSupervisor {
     last_tick: Instant,
     /// The EVE day the history snapshot was made on, to refresh it at midnight.
     history_day: i64,
+    /// What the card overlay saw on the last frame, for Settings.
+    overlay_status: OverlayStatus,
 }
 
 /// The current time as EVE time (UTC).
@@ -244,6 +248,7 @@ impl MiningSupervisor {
             last_state_save: Instant::now(),
             last_tick: Instant::now(),
             history_day: store::day_start(now().unix_seconds),
+            overlay_status: OverlayStatus::default(),
         }
     }
 
@@ -433,7 +438,8 @@ impl Module for MiningSupervisor {
         "Mining Supervisor"
     }
 
-    fn update(&mut self, _ctx: &ModuleContext) {
+    fn update(&mut self, ctx: &ModuleContext) {
+        self.overlay_status = ctx.overlay;
         // Drain every channel. `try_recv` returns at once when it's empty.
         while let Ok(event) = self.watcher.events.try_recv() {
             match event {
@@ -527,6 +533,24 @@ impl Module for MiningSupervisor {
 
     fn ui(&mut self, ui: &mut egui::Ui, _ctx: &ModuleContext) {
         ui::show(self, ui);
+    }
+
+    fn card_bars(&self) -> Option<CardBars> {
+        if !self.settings.card_bars {
+            return None;
+        }
+        let bars = self
+            .trackers
+            .values()
+            // Characters hidden from the Live view get no bar either.
+            .filter(|t| self.settings.character(&t.character).show)
+            .map(|t| ui::card_bar(self, t))
+            .collect();
+        Some(CardBars {
+            bars,
+            height_px: self.settings.card_bar_height_px as f32,
+            compressed_color: ui::PURPLE,
+        })
     }
 
     fn settings_changed(&mut self, settings: &Settings) {

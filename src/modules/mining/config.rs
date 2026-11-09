@@ -55,6 +55,10 @@ pub struct MiningSettings {
     pub order: Vec<String>,
     /// By character name.
     pub characters: BTreeMap<String, CharacterSettings>,
+    /// Draw each character's hold bar on their EVE-APM Preview card.
+    pub card_bars: bool,
+    /// Height of those bars in pixels.
+    pub card_bar_height_px: f64,
 }
 
 impl Default for MiningSettings {
@@ -69,6 +73,10 @@ impl Default for MiningSettings {
             price_side: PriceSide::Buy,
             order: Vec::new(),
             characters: BTreeMap::new(),
+            // Off until switched on, so Athena opens no overlay window for
+            // people who don't use EVE-APM Preview.
+            card_bars: false,
+            card_bar_height_px: 6.0,
         }
     }
 }
