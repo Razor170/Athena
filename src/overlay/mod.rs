@@ -63,9 +63,7 @@ impl CardOverlay {
         CardOverlay {
             finder: CardFinder::start(egui_ctx, OVERLAY_TITLE, viewport_id),
             viewport_id,
-            debug_outlines: Arc::new(AtomicBool::new(
-                std::env::var("ATHENA_TEST_OUTLINES").is_ok(),
-            )),
+            debug_outlines: Arc::new(AtomicBool::new(false)),
             stats: Arc::new(Mutex::new(OverlayStats::default())),
         }
     }

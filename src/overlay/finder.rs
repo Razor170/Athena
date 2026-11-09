@@ -128,13 +128,13 @@ mod win {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CHILDID_SELF, DispatchMessageW, EVENT_OBJECT_CREATE, EVENT_OBJECT_NAMECHANGE,
         EVENT_SYSTEM_FOREGROUND, EnumWindows, GWL_EXSTYLE, GetClassNameW, GetWindowLongPtrW,
-        GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_TOPMOST, IsIconic, IsWindow,
-        IsWindowVisible, LWA_ALPHA, MSG, MsgWaitForMultipleObjects, OBJID_WINDOW, PM_NOREMOVE,
-        PM_REMOVE, PeekMessageW, PostThreadMessageW, QS_ALLINPUT, SW_HIDE, SW_SHOWNOACTIVATE,
-        SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetLayeredWindowAttributes,
-        SetWindowLongPtrW, SetWindowPos, ShowWindowAsync, WINEVENT_OUTOFCONTEXT,
-        WINEVENT_SKIPOWNPROCESS, WM_NULL, WM_QUIT, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW,
+        GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_TOPMOST,
+        InternalGetWindowText, IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, MSG,
+        MsgWaitForMultipleObjects, OBJID_WINDOW, PM_NOREMOVE, PM_REMOVE, PeekMessageW,
+        PostThreadMessageW, QS_ALLINPUT, SW_HIDE, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetLayeredWindowAttributes, SetWindowLongPtrW,
+        SetWindowPos, ShowWindowAsync, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_NULL,
+        WM_QUIT, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     };
 
     use super::super::cards::{
@@ -184,10 +184,13 @@ mod win {
     pub fn start(shared: ThreadShared) -> ThreadHandle {
         let thread_id = Arc::new(AtomicU32::new(0));
         let id_for_thread = thread_id.clone();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("apm-card-finder".to_string())
-            .spawn(move || run(shared, &id_for_thread))
-            .ok();
+            .spawn(move || run(shared, &id_for_thread));
+        if let Err(e) = spawned {
+            // Not fatal: the overlay just never shows.
+            eprintln!("Can't start the card finder thread: {e}");
+        }
         ThreadHandle { thread_id }
     }
 
@@ -272,6 +275,10 @@ mod win {
                         WINEVENT_OUTOFCONTEXT,
                     )
                 };
+                if self.apm.is_null() {
+                    // Leave `apm_pid` empty, so the next scan tries again.
+                    return;
+                }
             }
             self.apm_pid = apm_pid;
         }
@@ -401,11 +408,15 @@ mod win {
         if *current == view {
             return;
         }
+        // The main window only shows whether APM runs and which cards there
+        // are (in Settings), so it needn't repaint while a card is dragged.
+        let main_window_changed =
+            current.apm_running != view.apm_running || current.cards.len() != view.cards.len();
         *current = view;
         drop(current);
-        // The main window decides whether the overlay exists; the overlay
-        // draws the cards. Both have to know.
-        shared.egui_ctx.request_repaint();
+        if main_window_changed {
+            shared.egui_ctx.request_repaint();
+        }
         shared.egui_ctx.request_repaint_of(shared.overlay_viewport);
     }
 
@@ -547,12 +558,11 @@ mod win {
             GetWindowThreadProcessId(hwnd, &mut pid);
             if pid == state.own_pid {
                 // Our overlay counts even while it is hidden.
-                if window_text(hwnd) == state.overlay_title {
+                // `InternalGetWindowText` reads the title without asking
+                // our own UI thread, so the scan never waits for a frame.
+                if own_window_text(hwnd) == state.overlay_title {
                     state.result.overlay = hwnd;
                 }
-                return 1;
-            }
-            if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
                 return 1;
             }
             // 1) The class: skips every EVE client before anything else.
@@ -572,7 +582,12 @@ mod win {
             if !is_apm {
                 return 1;
             }
+            // APM counts as running even while it hides its cards, so its
+            // hook stays and shows the overlay again as soon as they're back.
             state.result.apm_pid = Some(pid);
+            if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
+                return 1;
+            }
             let mut rect: RECT = std::mem::zeroed();
             if GetWindowRect(hwnd, &mut rect) == 0 {
                 return 1;
@@ -621,6 +636,16 @@ mod win {
         let mut buffer = [0u16; 256];
         // SAFETY: the buffer length passed matches the buffer.
         let length = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
+        String::from_utf16_lossy(&buffer[..length.max(0) as usize])
+    }
+
+    /// The title of one of Athena's own windows. Unlike `GetWindowTextW`,
+    /// this doesn't send a message to the window's thread.
+    fn own_window_text(hwnd: HWND) -> String {
+        let mut buffer = [0u16; 256];
+        // SAFETY: the buffer length passed matches the buffer.
+        let length =
+            unsafe { InternalGetWindowText(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
         String::from_utf16_lossy(&buffer[..length.max(0) as usize])
     }
 
