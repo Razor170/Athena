@@ -22,6 +22,7 @@
 pub mod bars;
 pub mod cards;
 pub mod finder;
+pub mod popup;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

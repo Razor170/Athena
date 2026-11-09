@@ -46,6 +46,15 @@ pub struct IntelSettings {
     pub hidden_tag_groups: Vec<String>,
     /// Tint systems by ESI's kills and jumps of the last hour.
     pub esi_tint: bool,
+    /// Show the alert popup over EVE.
+    pub popup: bool,
+    /// Only for loud (close) alerts.
+    pub popup_only_loud: bool,
+    /// The popup hides after this many seconds; 0 keeps it until ✕.
+    pub popup_hide_secs: u32,
+    /// Where the popup's top-left corner is, in points; `None` is top
+    /// centre of the screen.
+    pub popup_position: Option<[f32; 2]>,
 }
 
 impl Default for IntelSettings {
@@ -66,6 +75,10 @@ impl Default for IntelSettings {
             only_in_range: false,
             hidden_tag_groups: Vec::new(),
             esi_tint: false,
+            popup: true,
+            popup_only_loud: false,
+            popup_hide_secs: 5,
+            popup_position: None,
         }
     }
 }
