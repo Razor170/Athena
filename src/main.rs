@@ -6,6 +6,7 @@ mod app;
 mod esi;
 mod layout;
 mod modules;
+mod overlay;
 mod settings;
 mod shell;
 mod static_data;

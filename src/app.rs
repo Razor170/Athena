@@ -5,6 +5,7 @@ use egui_dock::{DockArea, Style};
 
 use crate::layout::{Layout, Tab};
 use crate::modules::{self, Module, ModuleContext};
+use crate::overlay::CardOverlay;
 use crate::settings::Settings;
 use crate::storage::{DataDir, Saver};
 
@@ -15,6 +16,8 @@ pub struct AthenaApp {
     data_dir: DataDir,
     saver: Saver,
     settings_panel: SettingsPanel,
+    /// The window drawn over EVE-APM Preview's cards.
+    card_overlay: CardOverlay,
     /// The layout text we last handed to the saver, so we only save when it changed.
     last_saved_layout: String,
 }
@@ -56,6 +59,7 @@ impl AthenaApp {
             last_frame_cpu: None,
         };
         AthenaApp {
+            card_overlay: CardOverlay::new(egui_ctx),
             modules,
             layout,
             settings,
@@ -114,18 +118,32 @@ fn toggle_tab(ui: &mut egui::Ui, layout: &mut Layout, tab: Tab, title: &str) {
 impl eframe::App for AthenaApp {
     // Runs before every frame, and also while the window is minimized when a
     // background thread called `request_repaint`. Modules drain their channels here.
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let ctx = ModuleContext {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let module_ctx = ModuleContext {
             settings: &self.settings,
         };
         for module in &mut self.modules {
-            module.update(&ctx);
+            module.update(&module_ctx);
         }
+        // Here rather than in `ui`, because `logic` also runs while the main
+        // window is minimized, and the overlay must stay open then.
+        self.card_overlay.keep_alive(ctx);
+    }
+
+    /// The colour every window is cleared to before drawing. eframe uses one
+    /// colour for all windows, and the overlay must be see-through, so it is
+    /// fully transparent; the main window paints its own background in `ui`.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.settings_panel.frames_drawn += 1;
         self.settings_panel.last_frame_cpu = frame.info().cpu_usage;
+        // The clear colour is transparent (see `clear_color`), so fill the
+        // main window first.
+        ui.painter()
+            .rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
 
         egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
 
@@ -135,6 +153,7 @@ impl eframe::App for AthenaApp {
             settings: &mut self.settings,
             data_dir: &self.data_dir,
             panel: &mut self.settings_panel,
+            card_overlay: &mut self.card_overlay,
             settings_changed: &mut settings_changed,
         };
         DockArea::new(&mut self.layout.dock)
@@ -177,6 +196,7 @@ struct TabViewer<'a> {
     settings: &'a mut Settings,
     data_dir: &'a DataDir,
     panel: &'a mut SettingsPanel,
+    card_overlay: &'a mut CardOverlay,
     settings_changed: &'a mut bool,
 }
 
@@ -262,7 +282,55 @@ fn settings_ui(ui: &mut egui::Ui, viewer: &mut TabViewer) {
         if let Some(cpu) = panel.last_frame_cpu {
             ui.label(format!("Last frame CPU time: {:.2} ms", cpu * 1000.0));
         }
+
+        ui.add_space(12.0);
+        overlay_diagnostics_ui(ui, viewer.card_overlay);
     });
+}
+
+/// The overlay part of Diagnostics: a switch for the debug outlines and what
+/// the card finder sees, to check the overlay and measure its cost.
+fn overlay_diagnostics_ui(ui: &mut egui::Ui, overlay: &mut CardOverlay) {
+    ui.label(egui::RichText::new("Overlay").strong());
+    if !CardOverlay::is_supported() {
+        ui.label("The overlay works on Windows only.");
+        return;
+    }
+    let mut outlines = overlay.debug_outlines();
+    if ui
+        .checkbox(
+            &mut outlines,
+            "Outline the EVE-APM Preview cards Athena finds",
+        )
+        .changed()
+    {
+        overlay.set_debug_outlines(outlines);
+    }
+    if !outlines {
+        return;
+    }
+    let view = overlay.cards();
+    if !view.apm_running {
+        ui.label("No EVE-APM Preview cards found.");
+    } else {
+        ui.label(format!("Cards found: {}", view.cards.len()));
+        for card in &view.cards {
+            ui.label(format!(
+                "  {} ({} × {} px at {}, {})",
+                card.title,
+                card.rect.width(),
+                card.rect.height(),
+                card.rect.left,
+                card.rect.top
+            ));
+        }
+    }
+    let stats = overlay.stats();
+    ui.label(format!("Overlay frames drawn: {}", stats.frames_drawn));
+    ui.label(format!(
+        "Last overlay frame: {:.2} ms",
+        stats.last_draw.as_secs_f64() * 1000.0
+    ));
 }
 
 fn renderer_name() -> &'static str {
