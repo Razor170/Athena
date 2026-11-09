@@ -6,3 +6,5 @@
 /sde.zip
 /sde-latest.jsonl
 /sde.new.zip
+# DOTLAN region maps (© Wollari): downloaded by xtask/dotlan.ps1, never committed.
+/dotlan

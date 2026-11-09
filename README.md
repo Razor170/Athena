@@ -70,6 +70,16 @@ for every build and puts the file in the zip. To do it by hand:
 
 `static.sqlite` and the SDE zip are not committed.
 
+The Intel map's layout comes from DOTLAN EveMaps' region maps. CI downloads them for
+every build; by hand, in PowerShell:
+
+1. `./xtask/dotlan.ps1 -Sde path\to\that.zip` downloads the missing region maps into a
+   `dotlan` folder (add `-Refresh` to download all of them again).
+2. `cargo xtask sde path\to\that.zip --dotlan dotlan` builds `static.sqlite` with them.
+
+Without `--dotlan` (or when the folder is missing) the map uses CCP's own `position2D`
+layout. The Dotlan files are never committed.
+
 Before pushing, run:
 
 ```
@@ -83,3 +93,19 @@ cargo test --workspace
 See the top of [`src/modules/mod.rs`](src/modules/mod.rs). In short: create
 `src/modules/<name>/mod.rs`, implement the `Module` trait, and add one line to
 `create_all`.
+
+## Credits
+
+Map layouts: [DOTLAN EveMaps](https://evemaps.dotlan.net) by Wollari.
+
+EVE Online and the EVE logo are the registered trademarks of CCP hf. All rights are
+reserved worldwide. All other trademarks are the property of their respective owners.
+EVE Online, the EVE logo, EVE and all associated logos and designs are the intellectual
+property of CCP hf. All artwork, screenshots, characters, vehicles, storylines, world
+facts or other recognizable features of the intellectual property relating to these
+trademarks are likewise the intellectual property of CCP hf. CCP hf. has granted
+permission to Athena to use EVE Online and all associated logos and designs for
+promotional and information purposes on its website but does not endorse, and is not
+in any way affiliated with, Athena. CCP is in no way responsible for the content on or
+functioning of this program, nor can it be liable for any damage arising from the use
+of this program.
