@@ -272,16 +272,14 @@ fn settings_ui(ui: &mut egui::Ui, viewer: &mut TabViewer) {
         }
 
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label("Check log files for new lines every");
+        ui.label("Check log files for new lines every");
+        // `horizontal_wrapped` puts the choices in one row and wraps them
+        // to a second row if the panel is narrow.
+        ui.horizontal_wrapped(|ui| {
             let current = viewer.settings.file_poll_rate;
-            egui::ComboBox::from_id_salt("file_poll_rate")
-                .selected_text(current.label())
-                .show_ui(ui, |ui| {
-                    for rate in FilePollRate::ALL {
-                        ui.selectable_value(&mut viewer.settings.file_poll_rate, rate, rate.label());
-                    }
-                });
+            for rate in FilePollRate::ALL {
+                ui.radio_value(&mut viewer.settings.file_poll_rate, rate, rate.label());
+            }
             if viewer.settings.file_poll_rate != current {
                 // The watcher threads read this before each sleep, so
                 // nothing needs to restart.
