@@ -1,24 +1,26 @@
 //! Overlays: Athena windows drawn on top of the screen, over EVE.
 //!
-//! This holds the card overlay: one borderless, transparent, always-on-top,
-//! click-through window that covers the cards of EVE-APM Preview. It draws
-//! the Mining Supervisor's hold bars on the cards ("Card bars"), and, for
-//! checking, a debug outline around each card it found (Settings ›
-//! Diagnostics).
+//! This holds the card overlay: the Mining Supervisor's hold bars on the
+//! cards of EVE-APM Preview ("Card bars"), and, for checking, a debug
+//! outline around each card found (Settings › Diagnostics).
 //!
 //! - [`cards`]: what a card is and how it is told apart from other windows.
 //! - [`bars`]: which card belongs to which character, and the bars' look.
 //! - [`finder`]: the background thread that finds the cards, follows them
-//!   and keeps the overlay window on top of them (Windows only).
+//!   and keeps the overlay windows on top of them (Windows only).
+//! - `bar_windows`: one small window per hold bar, made and moved by the
+//!   finder thread (Windows only).
 //!
 //! How it fits together: the app's `logic` calls
-//! [`CardOverlay::keep_alive`] before every frame, which keeps the overlay
-//! window alive while it is wanted. egui draws that window separately from
-//! the main window (a "deferred viewport"), so it can repaint on its own,
-//! also while the main window is minimized. The finder thread writes the
-//! cards it sees into a shared [`CardsView`], shows, hides and moves the
-//! window in physical pixels, and asks the overlay to repaint.
+//! [`CardOverlay::keep_alive`] before every frame. It hands the bars to the
+//! finder thread, which draws each one in its own small window and keeps
+//! them on their cards and on top. The debug outlines are drawn by egui in
+//! one borderless, transparent, click-through window over all cards (a
+//! "deferred viewport", repainted on its own, also while the main window
+//! is minimized), which the finder thread shows, hides and moves.
 
+#[cfg(windows)]
+mod bar_windows;
 pub mod bars;
 pub mod cards;
 pub mod finder;
@@ -34,14 +36,14 @@ use self::bars::CardBars;
 use self::cards::{PixelRect, covered_area};
 use self::finder::{CardFinder, CardsView};
 
-/// The overlay window's title. The finder finds the window by it, so it
+/// The outline window's title. The finder finds the window by it, so it
 /// must be unique to Athena. Nobody sees it (no taskbar, no Alt+Tab entry).
-const OVERLAY_TITLE: &str = "Athena card bars";
+const OVERLAY_TITLE: &str = "Athena card outlines";
 
 /// Colour of the debug outlines.
 const OUTLINE_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 214, 0);
 
-/// Numbers about the overlay window, shown in Settings › Diagnostics so its
+/// Numbers about the outline window, shown in Settings › Diagnostics so its
 /// cost can be checked.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OverlayStats {
@@ -73,19 +75,17 @@ pub struct CardOverlay {
     /// window repaints. `Arc` lets both hold it; the atomic and the mutex
     /// make it safe to use from both.
     debug_outlines: Arc<AtomicBool>,
-    /// The hold bars to draw, `None` while "Card bars" is off.
-    bars: Arc<Mutex<Option<CardBars>>>,
     stats: Arc<Mutex<OverlayStats>>,
 }
 
 impl CardOverlay {
     pub fn new(egui_ctx: &egui::Context) -> CardOverlay {
         let viewport_id = egui::ViewportId::from_hash_of("athena_card_overlay");
+        let debug_outlines = Arc::new(AtomicBool::new(false));
         CardOverlay {
-            finder: CardFinder::start(egui_ctx, OVERLAY_TITLE, viewport_id),
+            finder: CardFinder::start(egui_ctx, OVERLAY_TITLE, viewport_id, debug_outlines.clone()),
             viewport_id,
-            debug_outlines: Arc::new(AtomicBool::new(false)),
-            bars: Arc::new(Mutex::new(None)),
+            debug_outlines,
             stats: Arc::new(Mutex::new(OverlayStats::default())),
         }
     }
@@ -113,23 +113,22 @@ impl CardOverlay {
         CardFinder::is_supported()
     }
 
-    /// Keeps the overlay window alive while something wants it. Called from
-    /// the app's `logic`, which runs before every frame of the main window
-    /// and also while it is minimized: egui closes a viewport that isn't
-    /// shown for one frame.
+    /// Hands the bars to the finder and keeps the outline window alive
+    /// while the outlines are on. Called from the app's `logic`, which runs
+    /// before every frame of the main window and also while it is
+    /// minimized: egui closes a viewport that isn't shown for one frame.
     ///
-    /// The window is made once, hidden, when it is first wanted (egui can
-    /// only make windows while the main window is drawn, which it is when
-    /// the outlines or the bars are switched on). From then on the finder
-    /// thread shows, hides and moves it with plain Windows calls, so it can
-    /// appear over new cards even while Athena is minimized, and never takes
-    /// focus.
+    /// The outline window is made once, hidden, when the outlines are
+    /// switched on (egui can only make windows while the main window is
+    /// drawn, which it is then). From then on the finder thread shows,
+    /// hides and moves it with plain Windows calls, so it never takes focus.
     ///
     /// `bars` are the Mining Supervisor's hold bars, `None` while its "Card
     /// bars" switch is off. Returns what the overlay sees, for Settings.
     pub fn keep_alive(&mut self, ctx: &egui::Context, bars: Option<CardBars>) -> OverlayStatus {
         let supported = CardOverlay::is_supported();
-        let wanted = supported && (self.debug_outlines() || bars.is_some());
+        let outlines = supported && self.debug_outlines();
+        let wanted = supported && (outlines || bars.is_some());
         self.finder.set_wanted(wanted);
 
         let view = self.finder.view();
@@ -143,16 +142,11 @@ impl CardOverlay {
                 .map_or(0, |b| bars::matched_count(&view.cards, b)),
         };
 
-        // Hand new bars to the overlay. Only a real change repaints it, so
-        // this costs nothing on frames where no hold changed.
-        if let Ok(mut shown) = self.bars.lock()
-            && *shown != bars
-        {
-            *shown = bars;
-            ctx.request_repaint_of(self.viewport_id);
-        }
+        // Hand new bars to the finder thread, which draws them. Only a real
+        // change wakes it, so this costs nothing when no hold changed.
+        self.finder.set_bars(bars);
 
-        if !wanted {
+        if !outlines {
             return status;
         }
 
@@ -171,8 +165,6 @@ impl CardOverlay {
             .with_active(false);
 
         let view = self.finder.shared_view();
-        let debug_outlines = self.debug_outlines.clone();
-        let bars = self.bars.clone();
         let stats = self.stats.clone();
         // `move` hands the clones to the callback, which egui keeps and
         // calls whenever the overlay repaints, possibly later. That's why it
@@ -181,38 +173,13 @@ impl CardOverlay {
             let started = Instant::now();
             // Copy the cards out so the lock isn't held while drawing.
             let cards = view.lock().map(|v| v.cards.clone()).unwrap_or_default();
-            if debug_outlines.load(Ordering::Relaxed) {
-                draw_outlines(ui, &cards);
-            }
-            if let Ok(bars) = bars.lock()
-                && let Some(bars) = bars.as_ref()
-            {
-                draw_bars(ui, &cards, bars);
-            }
+            draw_outlines(ui, &cards);
             if let Ok(mut stats) = stats.lock() {
                 stats.frames_drawn += 1;
                 stats.last_draw = started.elapsed();
             }
         });
         status
-    }
-}
-
-/// Draws each character's hold bar on their card.
-fn draw_bars(ui: &mut egui::Ui, cards: &[cards::Card], card_bars: &CardBars) {
-    let Some(area) = covered_area(cards) else {
-        return;
-    };
-    let pixels_per_point = ui.ctx().pixels_per_point();
-    let painter = ui.painter();
-    let names: Vec<&str> = card_bars.all_names.iter().map(String::as_str).collect();
-    for bar in &card_bars.bars {
-        let Some(card) = bars::card_for(cards, &bar.character, &names) else {
-            continue;
-        };
-        let pixels = bars::bar_rect(card.rect, card_bars.height_px);
-        let rect = card_rect_in_overlay(pixels, area, pixels_per_point);
-        bars::draw_bar(painter, rect, bar, card_bars);
     }
 }
 

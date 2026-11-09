@@ -2,9 +2,15 @@
 //!
 //! The Mining Supervisor hands over one [`CardBar`] per tracked character
 //! (see `Module::card_bars`); this file works out where on a card the bar
-//! goes and draws it, in the same look as the bar in the Mining panel.
+//! goes and what it looks like, in the same look as the bar in the Mining
+//! panel. Each bar gets a small window of its own (`bar_windows`), which
+//! shows the pixels [`bar_pixels`] makes.
 
-use eframe::egui::{self, Color32, CornerRadius, Stroke};
+// The drawing part is used only by the Windows bar windows; on other
+// systems (the Linux sandbox) it is still built and tested.
+#![cfg_attr(not(windows), allow(dead_code))]
+
+use eframe::egui::Color32;
 
 use super::cards::{Card, PixelRect};
 
@@ -16,6 +22,8 @@ const BOTTOM_INSET_PX: i32 = 4;
 const BAR_BACK: Color32 = Color32::from_rgba_premultiplied(43, 43, 43, 217);
 /// The alert-level mark.
 const MARK: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
+/// The alert-level mark's width in pixels.
+const MARK_WIDTH_PX: usize = 2;
 
 /// One character's hold bar, as fractions of the bar's width (0.0 to 1.0).
 #[derive(Debug, Clone, PartialEq)]
@@ -107,36 +115,58 @@ pub fn bar_rect(card: PixelRect, height_px: f32) -> PixelRect {
     }
 }
 
-/// Draws one bar into `rect` (already in the overlay's points).
-pub fn draw_bar(painter: &egui::Painter, rect: egui::Rect, bar: &CardBar, bars: &CardBars) {
-    painter.rect_filled(rect, CornerRadius::same(2), BAR_BACK);
-    let width = rect.width();
-    let compressed_w = bar.compressed.clamp(0.0, 1.0) * width;
-    let uncompressed_w = (bar.uncompressed.clamp(0.0, 1.0) * width).min(width - compressed_w);
-    let part = |x: f32, w: f32| {
-        egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(w, rect.height()))
-    };
-    if compressed_w > 0.0 {
-        painter.rect_filled(
-            part(rect.left(), compressed_w),
-            CornerRadius::ZERO,
-            bars.compressed_color,
-        );
+/// One bar as pixels, `width` × `height`, row by row from the top. Each
+/// pixel is `0xAARRGGBB` with the colour already multiplied by its alpha,
+/// which is what Windows' `UpdateLayeredWindow` wants (and what egui's
+/// `Color32` stores anyway).
+///
+/// Left to right: compressed ore in `compressed_color`, then the rest of
+/// the hold in the bar's colour, then the dark background, with a white
+/// mark at the alert level. The four corner pixels stay clear, so the bar
+/// looks slightly rounded.
+pub fn bar_pixels(
+    width: usize,
+    height: usize,
+    bar: &CardBar,
+    compressed_color: Color32,
+) -> Vec<u32> {
+    let part_width = |fraction: f32| (fraction.clamp(0.0, 1.0) * width as f32).round() as usize;
+    let compressed_end = part_width(bar.compressed).min(width);
+    let uncompressed_end = (compressed_end + part_width(bar.uncompressed)).min(width);
+    // The mark is centred on its spot and kept inside the bar.
+    let mark_columns = bar.alert_mark.map(|mark| {
+        let centre = part_width(mark);
+        let first = centre
+            .saturating_sub(MARK_WIDTH_PX / 2)
+            .min(width.saturating_sub(MARK_WIDTH_PX));
+        first..first + MARK_WIDTH_PX
+    });
+
+    let mut pixels = Vec::with_capacity(width * height);
+    for y in 0..height {
+        for x in 0..width {
+            let corner = (x == 0 || x + 1 == width) && (y == 0 || y + 1 == height);
+            let color = if corner {
+                Color32::TRANSPARENT
+            } else if mark_columns.as_ref().is_some_and(|m| m.contains(&x)) {
+                MARK
+            } else if x < compressed_end {
+                compressed_color
+            } else if x < uncompressed_end {
+                bar.color
+            } else {
+                BAR_BACK
+            };
+            pixels.push(premultiplied_argb(color));
+        }
     }
-    if uncompressed_w > 0.0 {
-        painter.rect_filled(
-            part(rect.left() + compressed_w, uncompressed_w),
-            CornerRadius::ZERO,
-            bar.color,
-        );
-    }
-    if let Some(mark) = bar.alert_mark {
-        let x = rect.left() + mark.clamp(0.0, 1.0) * width;
-        painter.line_segment(
-            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-            Stroke::new(2.0, MARK),
-        );
-    }
+    pixels
+}
+
+/// `Color32` (already premultiplied) as `0xAARRGGBB`.
+fn premultiplied_argb(color: Color32) -> u32 {
+    let [r, g, b, a] = color.to_array();
+    u32::from_be_bytes([a, r, g, b])
 }
 
 #[cfg(test)]
@@ -224,6 +254,44 @@ mod tests {
             compressed_color: Color32::BLUE,
         };
         assert_eq!(matched_count(&cards, &bars), 1);
+    }
+
+    #[test]
+    fn bar_pixels_follow_the_live_bar() {
+        // 10 x 3 px: 2 px compressed, 3 px uncompressed, mark at 70%.
+        let purple = Color32::from_rgb(0x80, 0x40, 0xc0);
+        let pixels = bar_pixels(10, 3, &bar("A"), purple);
+        assert_eq!(pixels.len(), 30);
+        let middle_row = &pixels[10..20];
+        let argb = premultiplied_argb;
+        assert_eq!(middle_row[0], argb(purple));
+        assert_eq!(middle_row[1], argb(purple));
+        assert_eq!(middle_row[2], argb(Color32::GREEN));
+        assert_eq!(middle_row[4], argb(Color32::GREEN));
+        assert_eq!(middle_row[5], argb(BAR_BACK));
+        // The mark: two columns around 7.
+        assert_eq!(middle_row[6], argb(MARK));
+        assert_eq!(middle_row[7], argb(MARK));
+        assert_eq!(middle_row[8], argb(BAR_BACK));
+        // Corners are clear, the top row's inside isn't.
+        assert_eq!(pixels[0], 0);
+        assert_eq!(pixels[9], 0);
+        assert_eq!(pixels[29], 0);
+        assert_eq!(pixels[1], argb(purple));
+        assert_eq!(argb(Color32::from_rgb(1, 2, 3)), 0xff01_0203);
+    }
+
+    #[test]
+    fn bar_pixels_stay_inside_the_bar() {
+        let mut full = bar("A");
+        full.compressed = 0.8;
+        full.uncompressed = 0.8;
+        full.alert_mark = Some(1.0);
+        let pixels = bar_pixels(10, 2, &full, Color32::BLUE);
+        assert_eq!(pixels.len(), 20);
+        // No background left; the mark sits in the last two columns.
+        assert!(!pixels.contains(&premultiplied_argb(BAR_BACK)));
+        assert_eq!(pixels[8], premultiplied_argb(MARK));
     }
 
     #[test]
