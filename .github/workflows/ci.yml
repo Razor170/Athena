@@ -46,7 +46,7 @@ jobs:
       - name: Release build
         run: cargo build --release --locked
 
-      # Static game data (ore volumes, reprocessing): built from the official
+      # Static game data (ore volumes, reprocessing, the map): built from the official
       # SDE by `cargo xtask sde` and shipped next to the exe. The ~100 MB SDE
       # zip is cached per SDE build, so it is only downloaded after a patch.
       # If CCP's site is down, the newest cached SDE is used instead.
@@ -130,15 +130,55 @@ jobs:
           $voice.Dispose()
           Get-ChildItem $dir | Format-Table Name, Length
 
+      # Intel map layout: DOTLAN EveMaps' region maps (© Wollari), which are
+      # never committed (PLAN.md Step 6). Cached per month; a new month
+      # starts from last month's files and downloads them all again. Only
+      # pushes to main save the cache, because GitHub doesn't share a PR's
+      # cache with main or other PRs.
+      - name: Dotlan cache key
+        id: dotlan-key
+        shell: pwsh
+        run: |
+          "key=dotlan-$((Get-Date).ToUniversalTime().ToString('yyyy-MM'))" >> $env:GITHUB_OUTPUT
+
+      - name: Restore Dotlan maps
+        id: dotlan-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: dotlan
+          key: ${{ steps.dotlan-key.outputs.key }}
+          restore-keys: dotlan-
+
+      # Fetches the missing files (all of them, with -Refresh, when this
+      # month's cache missed). A failed download keeps the cached copy and
+      # never fails the build.
+      - name: Download Dotlan maps
+        shell: pwsh
+        run: |
+          if ("${{ steps.dotlan-cache.outputs.cache-hit }}" -eq "true") {
+            ./xtask/dotlan.ps1 -Sde sde.zip -Folder dotlan
+          } else {
+            ./xtask/dotlan.ps1 -Sde sde.zip -Folder dotlan -Refresh
+          }
+
       - name: Package portable zip
         shell: pwsh
         run: |
           $dir = "dist/Athena"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          cargo run --locked --package xtask -- sde sde.zip "$dir/static.sqlite"
+          cargo run --locked --package xtask -- sde sde.zip "$dir/static.sqlite" --dotlan dotlan
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Copy-Item target/release/athena.exe "$dir/Athena.exe"
           Copy-Item README.md "$dir/README.md"
+
+      # Saved only after the build used the files, so a broken download
+      # (which fails the build) is never cached.
+      - name: Save Dotlan maps
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.dotlan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: dotlan
+          key: ${{ steps.dotlan-key.outputs.key }}
 
       # Uploads the folder itself: GitHub zips an artifact on download, so
       # uploading a ready-made zip would give a zip inside a zip. `dist` holds

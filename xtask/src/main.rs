@@ -1,7 +1,8 @@
 //! Build helpers for Athena. Not part of the app and never shipped.
 //!
 //! ```text
-//! cargo xtask sde <sde-jsonl.zip> [<out file>]
+//! cargo xtask sde <sde-jsonl.zip> [<out file>] [--dotlan <folder>]
+//! cargo xtask regions <sde-jsonl.zip>
 //! ```
 //!
 //! Turns the official EVE static data export (SDE) into the small
@@ -21,7 +22,13 @@
 //! - for the Intel Supervisor: regions, constellations, solar systems with
 //!   their security and map position, stargate connections and the names of
 //!   all ship types (see `map.rs`).
+//!
+//! With `--dotlan <folder>`, the Intel map's layout comes from DOTLAN
+//! EveMaps' region maps in that folder (see `dotlan.rs`). `cargo xtask
+//! regions` prints the file name of every region map to fetch, one per line;
+//! `xtask/dotlan.ps1` uses it to download them.
 
+mod dotlan;
 mod map;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,21 +49,63 @@ const GAS_GROUPS: [i64; 2] = [711, 4168];
 /// The SDE category of all ships.
 const CATEGORY_SHIP: i64 = 6;
 
+/// With Dotlan maps, at least this share of all systems must get their spot
+/// from them, or the build fails: a changed Dotlan format must not quietly
+/// bring back the old layout.
+const MIN_DOTLAN_SHARE: f64 = 0.95;
+
+const USAGE: &str = "usage:
+  cargo xtask sde <sde-jsonl.zip> [<out file>] [--dotlan <folder>]
+  cargo xtask regions <sde-jsonl.zip>";
+
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("sde") => {
-            let Some(zip_path) = args.get(1) else {
-                bail!("usage: cargo xtask sde <sde-jsonl.zip> [<out file>]");
-            };
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `--dotlan <folder>` may come anywhere after the command.
+    let mut dotlan_folder = None;
+    if let Some(index) = args.iter().position(|a| a == "--dotlan") {
+        let Some(folder) = args.get(index + 1) else {
+            bail!("--dotlan needs a folder\n{USAGE}");
+        };
+        dotlan_folder = Some(PathBuf::from(folder));
+        args.drain(index..index + 2);
+    }
+    match (args.first().map(String::as_str), args.get(1)) {
+        (Some("sde"), Some(zip_path)) => {
             let out = args
                 .get(2)
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("static.sqlite"));
-            build_static_data(Path::new(zip_path), &out)
+            build_static_data(Path::new(zip_path), &out, dotlan_folder.as_deref())
         }
-        _ => bail!("usage: cargo xtask sde <sde-jsonl.zip> [<out file>]"),
+        (Some("regions"), Some(zip_path)) => print_region_files(Path::new(zip_path)),
+        _ => bail!("{USAGE}"),
     }
+}
+
+/// Prints the Dotlan file name of every region the Intel map shows.
+fn print_region_files(zip_path: &Path) -> Result<()> {
+    let file = File::open(zip_path).with_context(|| format!("opening {}", zip_path.display()))?;
+    let mut archive = zip::ZipArchive::new(file).context("the SDE file is not a zip")?;
+    let regions = read_map_regions(&mut archive)?;
+    for name in regions.values() {
+        println!("{}", dotlan::file_name(name));
+    }
+    Ok(())
+}
+
+/// Every region with stargates (id → English name).
+fn read_map_regions(archive: &mut zip::ZipArchive<File>) -> Result<BTreeMap<i64, String>> {
+    let systems: Vec<map::SdeSolarSystem> = read_jsonl(archive, "mapSolarSystems.jsonl")?;
+    let gates: Vec<map::SdeStargate> = read_jsonl(archive, "mapStargates.jsonl")?;
+    let regions =
+        map::regions_with_gates(read_jsonl(archive, "mapRegions.jsonl")?, &systems, &gates);
+    if regions.len() < 60 {
+        bail!(
+            "only {} regions with gates found; has the SDE format changed?",
+            regions.len()
+        );
+    }
+    Ok(regions)
 }
 
 /// A name in all languages; we only keep English, which is what the logs use.
@@ -170,7 +219,7 @@ fn asteroid_kind(group_name: &str) -> &'static str {
     }
 }
 
-fn build_static_data(zip_path: &Path, out: &Path) -> Result<()> {
+fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) -> Result<()> {
     let file = File::open(zip_path).with_context(|| format!("opening {}", zip_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).context("the SDE file is not a zip")?;
 
@@ -276,12 +325,20 @@ fn build_static_data(zip_path: &Path, out: &Path) -> Result<()> {
     drop(types);
 
     println!("Reading the map...");
+    // The Dotlan maps of the regions the Intel map shows, if we have them.
+    let dotlan_maps = match dotlan_folder {
+        Some(folder) => dotlan::load(folder, &read_map_regions(&mut archive)?)?,
+        None => None,
+    };
+    let no_maps = BTreeMap::new();
     let map = map::build(
         read_jsonl(&mut archive, "mapRegions.jsonl")?,
         read_jsonl(&mut archive, "mapConstellations.jsonl")?,
         read_jsonl(&mut archive, "mapSolarSystems.jsonl")?,
         read_jsonl(&mut archive, "mapStargates.jsonl")?,
+        dotlan_maps.as_ref().unwrap_or(&no_maps),
     )?;
+    dotlan_check(map.from_dotlan, map.in_dotlan_regions, map.systems.len())?;
 
     let compressed: Vec<(i64, i64)> = compressible
         .iter()
@@ -326,7 +383,7 @@ fn build_static_data(zip_path: &Path, out: &Path) -> Result<()> {
     write_database(out, info, &items, &reprocess, &compressed, &ships, &map)?;
     println!(
         "Wrote {}: {} items, {} reprocessing rows, {} compressible types, {} ships, \
-         {} regions, {} systems, {} gates",
+         {} regions, {} systems, {} gates, {} map layout",
         out.display(),
         items.len(),
         reprocess.len(),
@@ -334,15 +391,47 @@ fn build_static_data(zip_path: &Path, out: &Path) -> Result<()> {
         ships.len(),
         map.regions.len(),
         map.systems.len(),
-        map.gates.len()
+        map.gates.len(),
+        map.layout_name()
     );
+    Ok(())
+}
+
+/// Checks that the Dotlan maps we have placed (almost) every system of
+/// their regions. Only regions whose file is there count: a region whose
+/// download failed falls back to position2D with a warning (in
+/// `dotlan::load`), so a Dotlan outage never fails the build. But a file
+/// that is there and places too few systems means Dotlan's format changed,
+/// and that fails it.
+fn dotlan_check(from_dotlan: usize, in_dotlan_regions: usize, all_systems: usize) -> Result<()> {
+    if in_dotlan_regions == 0 {
+        println!(
+            "Map layout: no Dotlan maps, CCP's position2D layout for all {all_systems} systems"
+        );
+        return Ok(());
+    }
+    let share = from_dotlan as f64 / in_dotlan_regions as f64;
+    println!(
+        "Map layout: {from_dotlan} of {all_systems} systems from Dotlan \
+         ({:.1}% of the {in_dotlan_regions} in regions with a Dotlan map)",
+        share * 100.0
+    );
+    if share < MIN_DOTLAN_SHARE {
+        bail!(
+            "only {:.1}% of systems were found on the Dotlan maps (at least {:.0}% needed); \
+             has Dotlan's map format changed?",
+            share * 100.0,
+            MIN_DOTLAN_SHARE * 100.0
+        );
+    }
     Ok(())
 }
 
 fn create_schema(db: &rusqlite::Connection) -> Result<()> {
     db.execute_batch(
         "
-        -- Key/value facts about the file: schema_version, sde_build, sde_release_date.
+        -- Key/value facts about the file: schema_version, sde_build,
+        -- sde_release_date, map_layout (dotlan, position2d or mixed).
         CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
         -- Ore, ice, moon ore and gas (compressed and not), plus the materials
@@ -447,6 +536,7 @@ fn write_database(
             "sde_release_date",
             info.release_date.clone().unwrap_or_default(),
         ))?;
+        meta.execute(("map_layout", map.layout_name()))?;
 
         let mut insert = tx.prepare(
             "INSERT INTO items (type_id, name, volume_m3, portion_size, group_name, kind)
@@ -528,4 +618,21 @@ fn write_database(
 
     std::fs::rename(&tmp, out).with_context(|| format!("writing {}", out.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dotlan_check_only_counts_regions_with_a_file() {
+        // Dotlan down, nothing cached: an empty folder is fine.
+        assert!(dotlan_check(0, 0, 5268).is_ok());
+        // 8 of 68 files failed to download: their regions don't count.
+        assert!(dotlan_check(4650, 4650, 5268).is_ok());
+        // All files there, but a format change leaves systems unplaced.
+        assert!(dotlan_check(4000, 5268, 5268).is_err());
+        // A system or two that Dotlan doesn't have yet is fine.
+        assert!(dotlan_check(5266, 5268, 5268).is_ok());
+    }
 }
