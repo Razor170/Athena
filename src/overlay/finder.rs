@@ -17,9 +17,15 @@
 //! opens a handle to an EVE client. It only reads APM's window titles and
 //! positions, never anything from the EVE client.
 //!
-//! The same scan also finds Athena's own overlay window by its title. The
+//! The same scan also finds Athena's debug outline window by its title. The
 //! thread then moves that window over the cards and puts it back on top
 //! (APM's cards are top-most too), without ever activating it.
+//!
+//! The thread also owns the hold bars' windows (`bar_windows`, one small
+//! window per bar). APM brings its cards to the front when you switch EVE
+//! clients, so the thread puts the bars back on top after every change it
+//! sees, a few more times in the second after it (APM may raise its cards
+//! a moment later), and once a second while bars are shown.
 //!
 //! On other systems (the Linux sandbox) there is no APM, so no thread is
 //! started and no cards are ever found.
@@ -29,6 +35,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
+use super::bars::CardBars;
 use super::cards::Card;
 
 /// What the finder last saw. Shared with the UI thread and the overlay.
@@ -48,37 +55,65 @@ pub struct CardFinder {
     /// Whether anything wants the overlay. While this is false the thread
     /// unhooks everything and sleeps without waking up.
     wanted: Arc<AtomicBool>,
+    /// The hold bars the thread shows, `None` while "Card bars" is off.
+    bars: Arc<Mutex<Option<CardBars>>>,
+    /// Set when `bars` changed, so the thread redraws them.
+    bars_changed: Arc<AtomicBool>,
     #[cfg(windows)]
     thread: win::ThreadHandle,
 }
 
 impl CardFinder {
-    /// Starts the finder. `overlay_title` is the title of Athena's overlay
-    /// window, and `overlay_viewport` its egui viewport, which is asked to
-    /// repaint when the cards change.
+    /// Starts the finder. `overlay_title` is the title of Athena's debug
+    /// outline window, `overlay_viewport` its egui viewport, which is asked
+    /// to repaint when the cards change, and `outlines` whether it is on.
     pub fn start(
         egui_ctx: &egui::Context,
         overlay_title: &'static str,
         overlay_viewport: egui::ViewportId,
+        outlines: Arc<AtomicBool>,
     ) -> CardFinder {
         let view = Arc::new(Mutex::new(CardsView::default()));
         let wanted = Arc::new(AtomicBool::new(false));
+        let bars = Arc::new(Mutex::new(None));
+        let bars_changed = Arc::new(AtomicBool::new(false));
         #[cfg(windows)]
         let thread = win::start(win::ThreadShared {
             view: view.clone(),
             wanted: wanted.clone(),
+            bars: bars.clone(),
+            bars_changed: bars_changed.clone(),
+            outlines,
             egui_ctx: egui_ctx.clone(),
             overlay_title,
             overlay_viewport,
         });
         #[cfg(not(windows))]
-        let _ = (egui_ctx, overlay_title, overlay_viewport);
+        let _ = (egui_ctx, overlay_title, overlay_viewport, outlines);
         CardFinder {
             view,
             wanted,
+            bars,
+            bars_changed,
             #[cfg(windows)]
             thread,
         }
+    }
+
+    /// Hands the thread new hold bars. Only a real change wakes it, so this
+    /// is cheap to call every frame.
+    pub fn set_bars(&self, bars: Option<CardBars>) {
+        let Ok(mut shown) = self.bars.lock() else {
+            return;
+        };
+        if *shown == bars {
+            return;
+        }
+        *shown = bars;
+        drop(shown);
+        self.bars_changed.store(true, Ordering::Release);
+        #[cfg(windows)]
+        self.thread.wake();
     }
 
     /// Whether finding cards works on this system.
@@ -137,6 +172,8 @@ mod win {
         WM_QUIT, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     };
 
+    use super::super::bar_windows::BarWindows;
+    use super::super::bars::CardBars;
     use super::super::cards::{
         Card, PixelRect, covered_area, is_apm_exe, is_card_class, is_card_title,
     };
@@ -151,11 +188,22 @@ mod win {
     /// its window. Look for it this often, for at most `LOOK_FOR_OVERLAY_FOR`.
     const LOOK_FOR_OVERLAY_EVERY: Duration = Duration::from_millis(100);
     const LOOK_FOR_OVERLAY_FOR: Duration = Duration::from_secs(3);
+    /// After a change (say, a client switch), put the bars back on top this
+    /// often, for this long: APM may raise its cards a moment after the
+    /// event that told us.
+    const RAISE_AFTER_EVENT_EVERY: Duration = Duration::from_millis(100);
+    const RAISE_AFTER_EVENT_FOR: Duration = Duration::from_millis(1500);
+    /// And this often while bars are shown, in case nothing told us.
+    const RAISE_EVERY: Duration = Duration::from_secs(1);
 
     /// What the thread gets from the UI side.
     pub struct ThreadShared {
         pub view: Arc<Mutex<CardsView>>,
         pub wanted: Arc<AtomicBool>,
+        pub bars: Arc<Mutex<Option<CardBars>>>,
+        pub bars_changed: Arc<AtomicBool>,
+        /// Whether the debug outline window is on.
+        pub outlines: Arc<AtomicBool>,
         pub egui_ctx: egui::Context,
         pub overlay_title: &'static str,
         pub overlay_viewport: egui::ViewportId,
@@ -330,10 +378,16 @@ mod win {
             placed_at: None,
             layer_set: false,
         };
+        let mut bar_windows = BarWindows::new();
+        // The cards the last scan found, for redrawing the bars between scans.
+        let mut cards: Vec<Card> = Vec::new();
         let mut last_scan: Option<Instant> = None;
         let mut first_event: Option<Instant> = None;
         // Until when to look for the overlay window often.
         let mut look_for_overlay_until: Option<Instant> = None;
+        let mut last_raise: Option<Instant> = None;
+        // Until when to raise the bars often, after a change.
+        let mut raise_often_until: Option<Instant> = None;
 
         loop {
             if !shared.wanted.load(Ordering::Relaxed) {
@@ -341,10 +395,14 @@ mod win {
                 // until the UI thread wakes us.
                 hooks.clear();
                 publish(&shared, CardsView::default());
+                bar_windows.clear();
+                cards.clear();
                 overlay.placed_at = None;
                 last_scan = None;
                 first_event = None;
                 look_for_overlay_until = None;
+                last_raise = None;
+                raise_often_until = None;
                 EVENT_SEEN.with(|seen| seen.set(false));
                 if !wait_and_pump(None) {
                     return;
@@ -353,11 +411,20 @@ mod win {
             }
 
             let now = Instant::now();
-            if EVENT_SEEN.with(|seen| seen.replace(false)) && first_event.is_none() {
-                first_event = Some(now);
+            if EVENT_SEEN.with(|seen| seen.replace(false)) {
+                if first_event.is_none() {
+                    first_event = Some(now);
+                }
+                raise_often_until = Some(now + RAISE_AFTER_EVENT_FOR);
             }
+            if shared.bars_changed.swap(false, Ordering::Acquire) {
+                sync_bars(&shared, &mut bar_windows, &cards);
+            }
+            // The outline window is only looked for while the outlines are on.
+            let outlines_on = shared.outlines.load(Ordering::Relaxed);
             // SAFETY: `IsWindow` accepts any value, including stale handles.
-            let overlay_missing = overlay.hwnd.is_null() || unsafe { IsWindow(overlay.hwnd) } == 0;
+            let overlay_missing =
+                outlines_on && (overlay.hwnd.is_null() || unsafe { IsWindow(overlay.hwnd) } == 0);
             if overlay_missing && look_for_overlay_until.is_none() {
                 look_for_overlay_until = Some(now + LOOK_FOR_OVERLAY_FOR);
             }
@@ -379,9 +446,23 @@ mod win {
                 due = due.min(at + LOOK_FOR_OVERLAY_EVERY);
             }
 
+            // When the bars should be put back on top next.
+            let raise_due = if bar_windows.is_empty() {
+                None
+            } else {
+                let often = raise_often_until.is_some_and(|until| now < until);
+                let every = if often {
+                    RAISE_AFTER_EVENT_EVERY
+                } else {
+                    RAISE_EVERY
+                };
+                Some(last_raise.map_or(now, |at| at + every))
+            };
+
             if now >= due {
                 let found = scan(shared.overlay_title);
                 hooks.follow(found.apm_pid);
+                cards = found.cards.clone();
                 let view = CardsView {
                     apm_running: found.apm_pid.is_some(),
                     cards: found.cards,
@@ -389,15 +470,33 @@ mod win {
                 let area = covered_area(&view.cards);
                 publish(&shared, view);
                 place_overlay(&mut overlay, found.overlay, area);
+                sync_bars(&shared, &mut bar_windows, &cards);
+                bar_windows.raise();
+                last_raise = Some(now);
                 last_scan = Some(now);
                 first_event = None;
                 continue;
             }
+            if let Some(raise_due) = raise_due
+                && now >= raise_due
+            {
+                bar_windows.raise();
+                last_raise = Some(now);
+                continue;
+            }
 
+            let due = raise_due.map_or(due, |raise_due| due.min(raise_due));
             if !wait_and_pump(Some(due - now)) {
                 return;
             }
         }
+    }
+
+    /// Makes the bar windows match the newest bars and cards.
+    fn sync_bars(shared: &ThreadShared, bar_windows: &mut BarWindows, cards: &[Card]) {
+        // Copy the bars out, so the UI thread never waits on window calls.
+        let bars = shared.bars.lock().map(|b| b.clone()).unwrap_or_default();
+        bar_windows.sync(cards, bars.as_ref());
     }
 
     /// Replaces the shared view if it changed and asks for repaints.
