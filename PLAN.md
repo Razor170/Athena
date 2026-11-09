@@ -119,14 +119,13 @@ Two Athena windows drawn on top of the screen. Only visible when EVE runs in *Wi
   - **One window:** a single borderless, transparent, always-on-top, click-through eframe viewport (`show_viewport_deferred` with `with_transparent`, `with_always_on_top`, `with_mouse_passthrough`, `with_taskbar(false)`, never activated) covers the area the cards span and draws all bars. One viewport means one GPU surface, not one per character.
   - **Following the cards without polling:** `SetWinEventHook` (out of context, filtered to APM's process id) reports when a card moves, shows, hides, is created, destroyed or renamed; a 5 s safety check catches anything missed. The overlay hides when APM hides its thumbnails. Because APM's cards are also top-most, Athena re-asserts its z-order (`SetWindowPos` with `HWND_TOPMOST` and `SWP_NOACTIVATE`) after card events; that costs no redraw. Physical pixels are turned into egui points with the monitor's scale (Kevin's four 1080p screens are at 100%).
   - **Repaints:** only when a hold changes or a card moves.
-  - **Toggle:** "Card bars" in the Mining Supervisor header and Settings, an optional hotkey, state saved in `mining.toml`.
+  - **Toggle:** "Card bars" in the Mining Supervisor header and Settings, state saved in `mining.toml`. No hotkey (Kevin's choice).
   - **EULA:** Athena reads only APM's window titles and positions. It never reads from, captures or sends anything to the EVE client.
 - **Intel popup:** a small always-on-top window that does not exist until an intel alert fires, then shows the same alert as the map banner (system, jumps, the pilots it is close to, ships, reporter, time) with the same red (loud) or orange frame. It never takes focus from EVE. It shows even while Intel sounds are muted (Kevin's choice: mute is about sound). Drag it by its grip to move it (`ViewportCommand::StartDrag`); the position is saved in `intel.toml`. It closes after a set time (default 5 s, changeable in Settings, 0 keeps it; Kevin's choice) or on ✕; a newer, closer report replaces it by the banner's rule. Settings: on/off, only for loud alerts, hide-after time, "Show popup to move it", "Reset position".
 - **Cost:** expected about 10 MB RAM for the overlay window and near 0% idle CPU. PR 1 measures it on Kevin's PC and reports the numbers in the PR.
 - **Risk checked first:** whether eframe keeps drawing a deferred viewport while Athena's main window is minimized. PR 1 proves this before the rest is built on it.
 - **New dependency:** none. `windows-sys` gains the `Win32_UI_Accessibility` feature (for `SetWinEventHook`).
 - **Build order (one PR each):** 1) overlay viewport plus the APM card finder, with a debug outline per found card and measured cost; 2) mining card bars and the toggle; 3) intel popup and its settings.
-- **Open questions for Kevin:** hotkey for the card bars (APM already uses F13 to F17).
 
 ### Later
 - **Mini intel panel overlay:** a click-through, always-on-top map or list, if the intel popup turns out to be not enough.
