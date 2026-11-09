@@ -52,7 +52,7 @@ CI (from step 2) runs `cargo fmt --check`, clippy with `-D warnings`, tests and 
 - Several clients write to the same folders. Map each file to a character through its header.
 - The character's current system comes from `Channel changed to Local : <system>` in the Local chat log, with ESI as the fallback.
 - For ESI, use SSO with PKCE (Client ID only), send `X-Compatibility-Date`, respect cache headers/ETags and both rate-limit schemes, and use `reqwest` with `rustls`.
-- Static map data comes from the official SDE through the `xtask`, and the generated SQLite isn't committed.
+- Static map data comes from the official SDE through the `xtask`, plus the Intel map's layout from Dotlan's region SVGs, which CI downloads and which are never committed (see `PLAN.md` Step 6). The generated SQLite isn't committed either.
 - When unsure about an ESI or SSO detail, check https://developers.eveonline.com instead of relying on memory.
 
 ## Pull requests
