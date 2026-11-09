@@ -105,7 +105,8 @@ impl AlertPopup {
         }
         self.window.show(ctx, self.viewport_id);
         ctx.request_repaint_of(self.viewport_id);
-        // So `keep_alive` runs again to hide it in time.
+        // So `keep_alive` runs again to hide it in time (it re-asks for
+        // the time left on every pass, see there).
         if let Some(after) = hide_after {
             ctx.request_repaint_after(after);
         }
@@ -151,25 +152,50 @@ impl AlertPopup {
         }
 
         // Time up, or ✕?
-        let (expired, moved_to) = match self.shared.lock() {
+        let (check, moved_to) = match self.shared.lock() {
             Ok(mut shared) => {
-                let timed_out = match (shared.shown_at, shared.hide_after) {
-                    (Some(at), Some(after)) => at.elapsed() >= after,
-                    _ => false,
-                };
-                let expired = shared.content.is_some() && (timed_out || shared.close_clicked);
+                let check = hide_check(
+                    shared.content.is_some(),
+                    shared.shown_at.map(|at| at.elapsed()),
+                    shared.hide_after,
+                    shared.close_clicked,
+                );
                 shared.close_clicked = false;
-                (expired, shared.position)
+                (check, shared.position)
             }
-            Err(_) => (false, None),
+            Err(_) => (HideCheck::Nothing, None),
         };
-        if expired {
-            self.hide(ctx);
+        match check {
+            HideCheck::Hide => self.hide(ctx),
+            // Ask again for a pass when the time is up. eframe keeps only
+            // the earliest wake-up per window, so the one asked for in
+            // `show` may belong to an older alert that a newer one replaced.
+            HideCheck::WakeIn(left) => ctx.request_repaint_after(left),
+            HideCheck::Nothing => {}
         }
 
-        let opened_at = *self
-            .opened_at
-            .get_or_insert_with(|| saved_position.unwrap_or_else(|| default_position(ctx)));
+        let opened_at = *self.opened_at.get_or_insert_with(|| {
+            // A saved place that is no longer on any screen (say, its
+            // monitor was unplugged) would hide every alert: use the
+            // default place instead.
+            saved_position
+                .filter(|&position| {
+                    let pixels_per_point = ctx.pixels_per_point();
+                    win::monitors().is_none_or(|monitors| {
+                        let monitors: Vec<egui::Rect> = monitors
+                            .iter()
+                            .map(|m| {
+                                egui::Rect::from_min_max(
+                                    m.min / pixels_per_point,
+                                    m.max / pixels_per_point,
+                                )
+                            })
+                            .collect();
+                        is_on_a_monitor(position, &monitors)
+                    })
+                })
+                .unwrap_or_else(|| default_position(ctx))
+        });
         let builder = egui::ViewportBuilder::default()
             .with_title(POPUP_TITLE)
             // Hidden until an alert shows it.
@@ -204,6 +230,45 @@ impl AlertPopup {
             _ => None,
         }
     }
+}
+
+/// What `keep_alive` should do about hiding the popup.
+#[derive(Debug, PartialEq)]
+enum HideCheck {
+    /// Time is up, or ✕ was clicked.
+    Hide,
+    /// Still showing: check again after this long.
+    WakeIn(Duration),
+    /// Hidden, or kept until ✕.
+    Nothing,
+}
+
+/// Decides [`HideCheck`] for a popup that has been `shown_for` (since its
+/// latest alert) and should hide after `hide_after` (`None`: until ✕).
+fn hide_check(
+    showing: bool,
+    shown_for: Option<Duration>,
+    hide_after: Option<Duration>,
+    close_clicked: bool,
+) -> HideCheck {
+    if !showing {
+        return HideCheck::Nothing;
+    }
+    if close_clicked {
+        return HideCheck::Hide;
+    }
+    match (shown_for, hide_after) {
+        (Some(shown_for), Some(after)) if shown_for >= after => HideCheck::Hide,
+        (Some(shown_for), Some(after)) => HideCheck::WakeIn(after - shown_for),
+        _ => HideCheck::Nothing,
+    }
+}
+
+/// Whether a popup at `position` can be grabbed: its grip corner (the top
+/// left 40 × 24 points) must be at least partly on one of `monitors`.
+fn is_on_a_monitor(position: egui::Pos2, monitors: &[egui::Rect]) -> bool {
+    let grip = egui::Rect::from_min_size(position, egui::vec2(40.0, 24.0));
+    monitors.iter().any(|monitor| monitor.intersects(grip))
 }
 
 /// Top centre of the main window's screen.
@@ -333,7 +398,8 @@ fn close_button(ui: &mut egui::Ui, color: Color32) -> egui::Response {
 #[cfg(windows)]
 mod win {
     use eframe::egui;
-    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GWL_EXSTYLE, GetWindowLongPtrW, GetWindowThreadProcessId, HWND_TOPMOST,
         InternalGetWindowText, IsWindow, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
@@ -367,17 +433,23 @@ mod win {
                 return;
             }
             self.hwnd = find_own_window(POPUP_TITLE).map_or(0, |h| h as isize);
+            self.make_no_activate();
+        }
+
+        /// Sets "can't be activated" and "no Alt+Tab entry" on the window,
+        /// if they aren't set. Run again before every show: winit may
+        /// rewrite the window's extended style when its state changes.
+        fn make_no_activate(&self) {
             if self.hwnd == 0 {
                 return;
             }
-            // SAFETY: our own window, just found.
+            let wanted = (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) as isize;
+            // SAFETY: our own window.
             unsafe {
                 let style = GetWindowLongPtrW(self.handle(), GWL_EXSTYLE);
-                SetWindowLongPtrW(
-                    self.handle(),
-                    GWL_EXSTYLE,
-                    style | (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) as isize,
-                );
+                if style & wanted != wanted {
+                    SetWindowLongPtrW(self.handle(), GWL_EXSTYLE, style | wanted);
+                }
             }
         }
 
@@ -386,6 +458,7 @@ mod win {
             if self.hwnd == 0 {
                 return;
             }
+            self.make_no_activate();
             // SAFETY: our own window. "No activate" keeps EVE focused;
             // top-most puts it above APM's cards and EVE.
             unsafe {
@@ -414,6 +487,40 @@ mod win {
         pub fn forget(&mut self) {
             self.hwnd = 0;
         }
+    }
+
+    /// The screens' rectangles in physical pixels.
+    pub fn monitors() -> Option<Vec<egui::Rect>> {
+        unsafe extern "system" fn add(
+            _monitor: HMONITOR,
+            _dc: HDC,
+            rect: *mut RECT,
+            lparam: LPARAM,
+        ) -> i32 {
+            // SAFETY: `lparam` is the Vec passed below, `rect` is valid
+            // for this call.
+            unsafe {
+                let list = &mut *(lparam as *mut Vec<egui::Rect>);
+                let r = &*rect;
+                list.push(egui::Rect::from_min_max(
+                    egui::pos2(r.left as f32, r.top as f32),
+                    egui::pos2(r.right as f32, r.bottom as f32),
+                ));
+            }
+            1
+        }
+        let mut list: Vec<egui::Rect> = Vec::new();
+        // SAFETY: `list` outlives the call.
+        unsafe {
+            EnumDisplayMonitors(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                Some(add),
+                &mut list as *mut Vec<egui::Rect> as LPARAM,
+            );
+        }
+        // An empty list means asking failed: then don't judge the place.
+        (!list.is_empty()).then_some(list)
     }
 
     /// One of Athena's own top-level windows by its exact title.
@@ -480,5 +587,65 @@ mod win {
         }
 
         pub fn forget(&mut self) {}
+    }
+
+    /// Unknown here, so any saved place is used as it is.
+    pub fn monitors() -> Option<Vec<egui::Rect>> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    #[test]
+    fn hides_when_time_is_up_or_on_close() {
+        assert_eq!(
+            hide_check(true, Some(secs(5)), Some(secs(5)), false),
+            HideCheck::Hide
+        );
+        assert_eq!(
+            hide_check(true, Some(secs(1)), Some(secs(5)), true),
+            HideCheck::Hide
+        );
+        // Kept until ✕, or already hidden: nothing to wait for.
+        assert_eq!(
+            hide_check(true, Some(secs(60)), None, false),
+            HideCheck::Nothing
+        );
+        assert_eq!(
+            hide_check(false, Some(secs(9)), Some(secs(5)), false),
+            HideCheck::Nothing
+        );
+    }
+
+    #[test]
+    fn a_newer_alert_gets_its_own_wake_up() {
+        // Alert A at 0 s asked for a wake-up at 5 s. Alert B at 3 s
+        // replaced it, so at the 5 s pass B has shown for 2 s: the check
+        // must ask for another pass in 3 s instead of doing nothing.
+        assert_eq!(
+            hide_check(true, Some(secs(2)), Some(secs(5)), false),
+            HideCheck::WakeIn(secs(3))
+        );
+    }
+
+    #[test]
+    fn a_saved_place_off_every_screen_is_not_used() {
+        let monitors = [
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1920.0, 1080.0)),
+            egui::Rect::from_min_max(egui::pos2(1920.0, 0.0), egui::pos2(3840.0, 1080.0)),
+        ];
+        assert!(is_on_a_monitor(egui::pos2(2500.0, 80.0), &monitors));
+        // Partly off the right edge, but the grip is still on screen.
+        assert!(is_on_a_monitor(egui::pos2(3820.0, 80.0), &monitors));
+        // The second monitor was unplugged.
+        assert!(!is_on_a_monitor(egui::pos2(2500.0, 80.0), &monitors[..1]));
+        assert!(!is_on_a_monitor(egui::pos2(-500.0, 80.0), &monitors));
     }
 }
