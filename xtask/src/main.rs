@@ -338,23 +338,7 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         read_jsonl(&mut archive, "mapStargates.jsonl")?,
         dotlan_maps.as_ref().unwrap_or(&no_maps),
     )?;
-    if dotlan_maps.is_some() {
-        let share = map.from_dotlan as f64 / map.systems.len().max(1) as f64;
-        println!(
-            "Map layout: {} of {} systems from Dotlan ({:.1}%)",
-            map.from_dotlan,
-            map.systems.len(),
-            share * 100.0
-        );
-        if share < MIN_DOTLAN_SHARE {
-            bail!(
-                "only {:.1}% of systems were found on the Dotlan maps (at least {:.0}% needed); \
-                 has Dotlan's map format changed?",
-                share * 100.0,
-                MIN_DOTLAN_SHARE * 100.0
-            );
-        }
-    }
+    dotlan_check(map.from_dotlan, map.in_dotlan_regions, map.systems.len())?;
 
     let compressed: Vec<(i64, i64)> = compressible
         .iter()
@@ -410,6 +394,36 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         map.gates.len(),
         map.layout_name()
     );
+    Ok(())
+}
+
+/// Checks that the Dotlan maps we have placed (almost) every system of
+/// their regions. Only regions whose file is there count: a region whose
+/// download failed falls back to position2D with a warning (in
+/// `dotlan::load`), so a Dotlan outage never fails the build. But a file
+/// that is there and places too few systems means Dotlan's format changed,
+/// and that fails it.
+fn dotlan_check(from_dotlan: usize, in_dotlan_regions: usize, all_systems: usize) -> Result<()> {
+    if in_dotlan_regions == 0 {
+        println!(
+            "Map layout: no Dotlan maps, CCP's position2D layout for all {all_systems} systems"
+        );
+        return Ok(());
+    }
+    let share = from_dotlan as f64 / in_dotlan_regions as f64;
+    println!(
+        "Map layout: {from_dotlan} of {all_systems} systems from Dotlan \
+         ({:.1}% of the {in_dotlan_regions} in regions with a Dotlan map)",
+        share * 100.0
+    );
+    if share < MIN_DOTLAN_SHARE {
+        bail!(
+            "only {:.1}% of systems were found on the Dotlan maps (at least {:.0}% needed); \
+             has Dotlan's map format changed?",
+            share * 100.0,
+            MIN_DOTLAN_SHARE * 100.0
+        );
+    }
     Ok(())
 }
 
@@ -604,4 +618,21 @@ fn write_database(
 
     std::fs::rename(&tmp, out).with_context(|| format!("writing {}", out.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dotlan_check_only_counts_regions_with_a_file() {
+        // Dotlan down, nothing cached: an empty folder is fine.
+        assert!(dotlan_check(0, 0, 5268).is_ok());
+        // 8 of 68 files failed to download: their regions don't count.
+        assert!(dotlan_check(4650, 4650, 5268).is_ok());
+        // All files there, but a format change leaves systems unplaced.
+        assert!(dotlan_check(4000, 5268, 5268).is_err());
+        // A system or two that Dotlan doesn't have yet is fine.
+        assert!(dotlan_check(5266, 5268, 5268).is_ok());
+    }
 }

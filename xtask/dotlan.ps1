@@ -45,19 +45,35 @@ foreach ($file in $files) {
     if ($fetched + $failed -gt 0) { Start-Sleep -Seconds 1 }
 
     # Download next to the old file first, so a failed or half download
-    # never replaces a good cached copy.
+    # never replaces a good cached copy. A file without any system box (an
+    # error page served as a normal answer) is not kept either. One retry
+    # after a short wait covers a passing hiccup.
     $tmp = "$path.download"
-    try {
-        Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -UserAgent $userAgent `
-            -OutFile $tmp "https://evemaps.dotlan.net/svg/$file"
-        Move-Item -Force $tmp $path
+    $ok = $false
+    $reason = ""
+    for ($try = 1; $try -le 2 -and -not $ok; $try++) {
+        if ($try -gt 1) { Start-Sleep -Seconds 5 }
+        try {
+            Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -UserAgent $userAgent `
+                -OutFile $tmp "https://evemaps.dotlan.net/svg/$file"
+            if (Select-String -Path $tmp -SimpleMatch -Quiet '<use id="sys') {
+                Move-Item -Force $tmp $path
+                $ok = $true
+            } else {
+                $reason = "the answer has no system boxes"
+            }
+        } catch {
+            $reason = "$_"
+        }
+    }
+    Remove-Item -Force -ErrorAction SilentlyContinue $tmp
+    if ($ok) {
         $fetched++
-    } catch {
-        Remove-Item -Force -ErrorAction SilentlyContinue $tmp
+    } else {
         if (Test-Path $path) {
-            Write-Warning "Can't download $file, keeping the cached copy: $_"
+            Write-Warning "Can't download $file, keeping the cached copy: $reason"
         } else {
-            Write-Warning "Can't download $file, that region uses position2D: $_"
+            Write-Warning "Can't download $file, that region uses position2D: $reason"
         }
         $failed++
     }

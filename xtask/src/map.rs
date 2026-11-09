@@ -159,6 +159,10 @@ pub struct MapData {
     pub borders: Vec<BorderSystem>,
     /// How many systems got their position from a Dotlan box.
     pub from_dotlan: usize,
+    /// How many systems are in regions that have a Dotlan map, placed from
+    /// it or not. The build checks `from_dotlan` against this, so regions
+    /// whose file couldn't be downloaded don't count against Dotlan.
+    pub in_dotlan_regions: usize,
 }
 
 impl MapData {
@@ -278,7 +282,14 @@ pub fn build(
 
     let mut borders = Vec::new();
     let mut from_dotlan = 0;
+    let mut in_dotlan_regions = 0;
     for &region_id in &used_regions {
+        if dotlan.contains_key(&region_id) {
+            in_dotlan_regions += systems
+                .values()
+                .filter(|s| s.region_id == region_id)
+                .count();
+        }
         let layout = layout_region(
             region_id,
             &mut systems,
@@ -309,6 +320,7 @@ pub fn build(
         gates,
         borders,
         from_dotlan,
+        in_dotlan_regions,
     })
 }
 
@@ -725,6 +737,7 @@ mod tests {
 
         // Region 2 has no Dotlan map, so it falls back to position2D.
         assert_eq!(map.from_dotlan, 3);
+        assert_eq!(map.in_dotlan_regions, 3);
         assert_eq!(map.layout_name(), "mixed");
     }
 
@@ -737,6 +750,7 @@ mod tests {
         // 13 is 5 grid steps right of 12 and 2 down: 180 and 72 points.
         assert_eq!(spot(&map, 13), (300.0 + 180.0, 72.0));
         assert_eq!(map.from_dotlan, 2);
+        assert_eq!(map.in_dotlan_regions, 3);
 
         // 21 has no box either: 64 points out from 13, towards where it
         // really is (straight down).
@@ -750,6 +764,7 @@ mod tests {
         assert_eq!(spot(&map, 12), (180.0, 0.0));
         assert_eq!(spot(&map, 13), (360.0, 72.0));
         assert_eq!(map.from_dotlan, 0);
+        assert_eq!(map.in_dotlan_regions, 0);
         assert_eq!(map.layout_name(), "position2d");
     }
 
