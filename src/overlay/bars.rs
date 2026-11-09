@@ -36,6 +36,10 @@ pub struct CardBar {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CardBars {
     pub bars: Vec<CardBar>,
+    /// Every character name the module knows, including those without a
+    /// bar (hidden ones), so a shorter name never takes a longer name's
+    /// card just because the longer one has no bar.
+    pub all_names: Vec<String>,
     /// The bar's height in pixels (6 unless changed in Settings).
     pub height_px: f32,
     /// The purple for compressed ore.
@@ -48,7 +52,8 @@ pub struct CardBars {
 /// `Noa Askari [Mining]`), so a card belongs to a character when its title
 /// *contains* the name, ignoring upper and lower case. When several of
 /// `all_characters` fit one card (say "Noa" and "Noa Askari"), the longest
-/// name wins the card, so "Noa" doesn't get Noa Askari's card.
+/// name wins the card, so "Noa" doesn't get Noa Askari's card. Of two
+/// names of the same length, the one earlier in the title wins.
 pub fn card_for<'a>(
     cards: &'a [Card],
     character: &str,
@@ -60,19 +65,28 @@ pub fn card_for<'a>(
     }
     cards.iter().find(|card| {
         let title = card.title.to_lowercase();
-        if !title.contains(&wanted) {
+        let Some(at) = title.find(&wanted) else {
             return false;
-        }
-        // A longer name that also fits this card takes it instead.
-        !all_characters
-            .iter()
-            .any(|other| other.len() > character.len() && title.contains(&other.to_lowercase()))
+        };
+        // Another name that also fits this card and beats this one takes it.
+        !all_characters.iter().any(|other| {
+            let other = other.to_lowercase();
+            if other == wanted {
+                return false;
+            }
+            match title.find(&other) {
+                Some(other_at) => {
+                    other.len() > wanted.len() || (other.len() == wanted.len() && other_at < at)
+                }
+                None => false,
+            }
+        })
     })
 }
 
 /// How many of the bars have a card to sit on.
 pub fn matched_count(cards: &[Card], bars: &CardBars) -> usize {
-    let names: Vec<&str> = bars.bars.iter().map(|b| b.character.as_str()).collect();
+    let names: Vec<&str> = bars.all_names.iter().map(String::as_str).collect();
     bars.bars
         .iter()
         .filter(|bar| card_for(cards, &bar.character, &names).is_some())
@@ -179,10 +193,33 @@ mod tests {
     }
 
     #[test]
+    fn a_name_without_a_bar_still_wins_its_card() {
+        // "Noa Askari" is hidden (no bar) but known: "Noa" must not take
+        // the "Noa Askari [Mining]" card.
+        let cards = vec![card("EVE - Noa Askari [Mining]", 0, 0)];
+        let bars = CardBars {
+            bars: vec![bar("Noa")],
+            all_names: vec!["Noa".into(), "Noa Askari".into()],
+            height_px: 6.0,
+            compressed_color: Color32::BLUE,
+        };
+        assert_eq!(matched_count(&cards, &bars), 0);
+    }
+
+    #[test]
+    fn same_length_names_go_by_position() {
+        let cards = vec![card("EVE - Ann Bob", 0, 0)];
+        let all = ["Ann", "Bob"];
+        assert!(card_for(&cards, "Ann", &all).is_some());
+        assert!(card_for(&cards, "Bob", &all).is_none());
+    }
+
+    #[test]
     fn matched_count_skips_characters_without_a_card() {
         let cards = vec![card("EVE - Noa Askari [Mining]", 0, 0)];
         let bars = CardBars {
             bars: vec![bar("Noa Askari"), bar("Ria Tolvo")],
+            all_names: vec!["Noa Askari".into(), "Ria Tolvo".into()],
             height_px: 6.0,
             compressed_color: Color32::BLUE,
         };

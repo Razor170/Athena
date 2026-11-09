@@ -452,16 +452,10 @@ pub(super) fn card_bar(module: &MiningSupervisor, tracker: &CharacterTracker) ->
             0.0
         }
     };
-    let full_without_size = capacity <= 0.0 && percent >= 100.0;
     CardBar {
         character: tracker.character.clone(),
         compressed: share(fill.compressed_m3),
-        // EVE said full but we know no hold size: a full red bar.
-        uncompressed: if full_without_size {
-            1.0
-        } else {
-            share(fill.uncompressed_m3)
-        },
+        uncompressed: share(fill.uncompressed_m3),
         color: fill_color(tracker, percent),
         alert_mark: (capacity > 0.0)
             .then(|| (tracker.settings.fill_alert_percent / 100.0).clamp(0.0, 1.0) as f32),

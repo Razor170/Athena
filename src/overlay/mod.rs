@@ -204,11 +204,7 @@ fn draw_bars(ui: &mut egui::Ui, cards: &[cards::Card], card_bars: &CardBars) {
     };
     let pixels_per_point = ui.ctx().pixels_per_point();
     let painter = ui.painter();
-    let names: Vec<&str> = card_bars
-        .bars
-        .iter()
-        .map(|b| b.character.as_str())
-        .collect();
+    let names: Vec<&str> = card_bars.all_names.iter().map(String::as_str).collect();
     for bar in &card_bars.bars {
         let Some(card) = bars::card_for(cards, &bar.character, &names) else {
             continue;

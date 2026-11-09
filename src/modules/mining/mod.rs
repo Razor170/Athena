@@ -546,9 +546,18 @@ impl Module for MiningSupervisor {
             .filter(|t| self.settings.character(&t.character).show)
             .map(|t| ui::card_bar(self, t))
             .collect();
+        // Every name we know, hidden ones too, for matching names to cards.
+        let mut all_names: Vec<String> = self.trackers.keys().cloned().collect();
+        for name in self.settings.characters.keys() {
+            if !self.trackers.contains_key(name) {
+                all_names.push(name.clone());
+            }
+        }
         Some(CardBars {
             bars,
-            height_px: self.settings.card_bar_height_px as f32,
+            all_names,
+            // Also limits a hand-edited value in mining.toml.
+            height_px: self.settings.card_bar_height_px.clamp(2.0, 20.0) as f32,
             compressed_color: ui::PURPLE,
         })
     }
