@@ -18,6 +18,11 @@ pub struct Settings {
     pub log_folder: PathBuf,
     /// How often the log watchers check their files for new lines.
     pub file_poll_rate: FilePollRate,
+    /// Look for a newer Athena on GitHub when Athena starts.
+    pub update_check_on_start: bool,
+    /// Offer pre-releases (every main build, e.g. 0.1.1-alpha.7), not only
+    /// versions tagged by hand.
+    pub update_include_prereleases: bool,
 }
 
 impl Default for Settings {
@@ -25,6 +30,8 @@ impl Default for Settings {
         Settings {
             log_folder: default_log_folder(),
             file_poll_rate: FilePollRate::default(),
+            update_check_on_start: true,
+            update_include_prereleases: true,
         }
     }
 }
@@ -156,6 +163,8 @@ mod tests {
         let settings = Settings {
             log_folder: PathBuf::from("D:/Games/EVE/logs"),
             file_poll_rate: FilePollRate::S2,
+            update_check_on_start: false,
+            update_include_prereleases: false,
         };
         let text = settings.to_toml().unwrap();
         assert_eq!(Settings::from_toml(&text).unwrap(), settings);

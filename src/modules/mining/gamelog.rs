@@ -68,7 +68,7 @@ impl LogTime {
 
 /// Days since 1970-01-01 for a calendar date (proleptic Gregorian).
 /// This is Howard Hinnant's well-known `days_from_civil` algorithm.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+pub fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);
     let year_of_era = y - era * 400;

@@ -44,6 +44,13 @@ reqwest = { version = "0.13", default-features = false, features = [
 # SQLite, compiled into the exe (`bundled`), so there is no DLL to ship.
 # Reads static.sqlite (game data) and, later, the mining history.
 rusqlite = { version = "0.41", features = ["bundled"] }
+# Auto-updater: stores the GitHub token in Windows Credential Manager
+# (`windows-native`; on Linux test builds it falls back to an in-memory
+# store). Version 3, the last with this simple one-crate API.
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+# Auto-updater: unpacks the downloaded release zip. Only `deflate` (the
+# format GitHub's and `zip -r`'s zips use), no other compression or crypto.
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # Windows-only: reading the clipboard (for belt scans), the alert beep, the
 # Intel voice alerts (PlaySoundW, from Win32_Media_Audio) and the overlay

@@ -62,6 +62,9 @@ jobs:
           }
           if ("${{ github.event_name }}" -eq "pull_request") {
             $version = "$version+pr.${{ github.event.number }}"
+          } elseif ("${{ github.ref_type }}" -ne "tag" -and "${{ github.ref }}" -ne "refs/heads/main") {
+            # A manual run on another branch: mark it like a PR build.
+            $version = "$version+${{ github.ref_name }}" -replace '[^0-9A-Za-z.+-]', '-'
           }
           Write-Output "Version: $version (base $base, height $height)"
           "version=$version" >> $env:GITHUB_OUTPUT
@@ -272,15 +275,18 @@ jobs:
           files: Athena-windows.zip
           generate_release_notes: true
 
-      # Keeps the newest 10 pre-releases (and their tags); older ones are
-      # deleted. Normal releases (v0.2.0 and so on) are never deleted.
+      # Keeps the newest 10 automatic pre-releases (alpha tags, and their
+      # git tags); older ones are deleted. Normal releases (v0.2.0) and
+      # hand-made pre-releases (v0.2.0-beta.1) are never deleted. If several
+      # PRs are merged within minutes, GitHub may skip publishing a middle
+      # one; the next release still contains its changes.
       - name: Delete old pre-releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
               --json tagName,isPrerelease,createdAt \
-              --jq '[.[] | select(.isPrerelease)] | sort_by(.createdAt) | reverse | .[10:] | .[].tagName' |
+              --jq '[.[] | select(.isPrerelease and (.tagName | test("-alpha\\.[0-9]+$")))] | sort_by(.createdAt) | reverse | .[10:] | .[].tagName' |
           while read -r tag; do
             echo "Deleting old pre-release $tag"
             gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
