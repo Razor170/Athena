@@ -46,9 +46,10 @@ reqwest = { version = "0.13", default-features = false, features = [
 rusqlite = { version = "0.41", features = ["bundled"] }
 
 # Windows-only: reading the clipboard (for belt scans), the alert beep, the
-# Intel voice alerts (PlaySoundW, from Win32_Media_Audio) and the overlay's
-# card finder (window events from Win32_UI_Accessibility, the process check
-# from Win32_System_Threading). These are
+# Intel voice alerts (PlaySoundW, from Win32_Media_Audio) and the overlay
+# windows (window calls, GDI for their pictures and text, the overlay
+# thread's id from Win32_System_Threading, the mouse capture while the
+# overlay is dragged from Win32_UI_Input_KeyboardAndMouse). These are
 # thin, official bindings to the Windows API, with no other dependencies.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -60,7 +61,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Threading",
-    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

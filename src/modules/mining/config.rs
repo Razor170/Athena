@@ -55,10 +55,47 @@ pub struct MiningSettings {
     pub order: Vec<String>,
     /// By character name.
     pub characters: BTreeMap<String, CharacterSettings>,
-    /// Draw each character's hold bar on their EVE-APM Preview card.
-    pub card_bars: bool,
-    /// Height of those bars in pixels.
-    pub card_bar_height_px: f64,
+    /// The hold bars overlay. Last, because it is a TOML table.
+    pub overlay: OverlaySettings,
+}
+
+/// Settings of the hold bars overlay (`[overlay]` in `mining.toml`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverlaySettings {
+    /// Show the overlay at all.
+    pub enabled: bool,
+    /// Height of each bar in pixels.
+    pub bar_height_px: f64,
+    /// The overlay's width in pixels, set by pulling its right edge.
+    pub width_px: i32,
+    /// Show each character's name under their bar.
+    pub show_names: bool,
+    /// Show how full the hold is, in percent, under each bar on the right.
+    pub show_percent: bool,
+    /// Opacity of the background, 0 to 100 percent.
+    pub background_opacity: f64,
+    /// Opacity of the bars and their text, 10 to 100 percent.
+    pub bar_opacity: f64,
+    /// The top-left corner on the screen, in pixels. `None` until moved.
+    pub position: Option<[i32; 2]>,
+}
+
+impl Default for OverlaySettings {
+    fn default() -> Self {
+        OverlaySettings {
+            // Off until switched on, so Athena opens no window over EVE for
+            // people who don't want one.
+            enabled: false,
+            bar_height_px: 6.0,
+            width_px: 170,
+            show_names: true,
+            show_percent: true,
+            background_opacity: 55.0,
+            bar_opacity: 100.0,
+            position: None,
+        }
+    }
 }
 
 impl Default for MiningSettings {
@@ -73,10 +110,7 @@ impl Default for MiningSettings {
             price_side: PriceSide::Buy,
             order: Vec::new(),
             characters: BTreeMap::new(),
-            // Off until switched on, so Athena opens no overlay window for
-            // people who don't use EVE-APM Preview.
-            card_bars: false,
-            card_bar_height_px: 6.0,
+            overlay: OverlaySettings::default(),
         }
     }
 }
@@ -237,11 +271,22 @@ mod tests {
             .characters
             .insert("Pilot Echo".to_string(), CharacterSettings::default());
         settings.order = vec!["Pilot Echo".to_string()];
+        settings.overlay.enabled = true;
+        settings.overlay.position = Some([-1500, 40]);
         let text = settings.to_toml().unwrap();
         let back: MiningSettings = toml::from_str(&text).unwrap();
         assert_eq!(back, settings);
         let empty: MiningSettings = toml::from_str("").unwrap();
         assert_eq!(empty, MiningSettings::default());
         assert!((empty.yields().ore - 0.9063).abs() < 1e-12);
+    }
+
+    #[test]
+    fn old_card_bar_settings_still_load() {
+        // Files from before the own overlay have these two keys; they are
+        // ignored and the overlay starts off.
+        let old = "card_bars = true\ncard_bar_height_px = 8.0\n";
+        let settings: MiningSettings = toml::from_str(old).unwrap();
+        assert_eq!(settings.overlay, OverlaySettings::default());
     }
 }

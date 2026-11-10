@@ -8,13 +8,14 @@
 
 use eframe::egui::{self, Align, Color32, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
 
+use super::config::OverlaySettings;
 use super::gamelog::LogTime;
 use super::prices::{self, PriceSide};
 use super::scan::{self, BeltScan};
 use super::session::{CharacterTracker, GuardState};
 use super::store::{PeriodTotal, SessionKind, StoredSession, Totals};
 use super::{AlertLevel, HistoryMode, MiningSupervisor, View};
-use crate::overlay::bars::CardBar;
+use crate::overlay::mining_bars::HoldBar;
 
 /// The panel is designed for a quarter of a 1080p screen.
 const MAX_WIDTH: f32 = 480.0;
@@ -66,14 +67,17 @@ fn view_tabs(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
         ui.selectable_value(&mut module.view, View::History, "History");
         ui.selectable_value(&mut module.view, View::Settings, "Settings");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if module.overlay_status.supported {
-                let mut on = module.settings.card_bars;
+            if crate::overlay::is_supported() {
+                let mut on = module.settings.overlay.enabled;
                 if ui
-                    .toggle_value(&mut on, small("Card bars"))
-                    .on_hover_text("Draw each character's hold bar on their EVE-APM Preview card.")
+                    .toggle_value(&mut on, small("Overlay"))
+                    .on_hover_text("Show the hold bars overlay on top of the screen.")
                     .changed()
                 {
-                    module.settings.card_bars = on;
+                    module.settings.overlay.enabled = on;
+                    if !on {
+                        module.overlay_move_mode = false;
+                    }
                     module.settings_edited();
                 }
             }
@@ -454,9 +458,9 @@ fn bar_capacity(capacity: f64, percent: f64, total_m3: f64) -> f64 {
     }
 }
 
-/// A character's hold bar for the card overlay: the same parts and colours
+/// A character's bar for the hold bars overlay: the same parts and colours
 /// as the bar on the Live view.
-pub(super) fn card_bar(module: &MiningSupervisor, tracker: &CharacterTracker) -> CardBar {
+pub(super) fn overlay_bar(module: &MiningSupervisor, tracker: &CharacterTracker) -> HoldBar {
     let fill = tracker.hold_fill(&module.volumes);
     let percent = tracker.fill_percent(&module.volumes).unwrap_or(0.0);
     let capacity = bar_capacity(
@@ -471,13 +475,16 @@ pub(super) fn card_bar(module: &MiningSupervisor, tracker: &CharacterTracker) ->
             0.0
         }
     };
-    CardBar {
+    HoldBar {
         character: tracker.character.clone(),
         compressed: share(fill.compressed_m3),
         uncompressed: share(fill.uncompressed_m3),
         color: fill_color(tracker, percent),
         alert_mark: (capacity > 0.0)
             .then(|| (tracker.settings.fill_alert_percent / 100.0).clamp(0.0, 1.0) as f32),
+        percent: tracker
+            .fill_percent(&module.volumes)
+            .map(|p| p.clamp(0.0, 999.0).round() as u32),
     }
 }
 
@@ -1264,46 +1271,17 @@ fn settings_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
         );
     });
 
-    if module.overlay_status.supported {
-        let status = module.overlay_status;
+    if crate::overlay::is_supported() {
         section_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new("Mining overlay").color(BRIGHT).strong());
-            if ui
-                .checkbox(
-                    &mut settings.card_bars,
-                    "Show hold bars on EVE-APM Preview cards",
-                )
-                .changed()
-            {
+            if overlay_settings(
+                &mut settings.overlay,
+                &mut module.overlay_move_mode,
+                ui,
+                buffers,
+            ) {
                 changed = true;
             }
-            ui.horizontal(|ui| {
-                ui.label("Bar height (px)");
-                if let Some(Some(value)) = number_field(
-                    ui,
-                    buffers,
-                    "bar_height",
-                    Some(settings.card_bar_height_px),
-                    "6",
-                    60.0,
-                ) {
-                    settings.card_bar_height_px = value.round().clamp(2.0, 20.0);
-                    changed = true;
-                }
-                ui.label(small("width is always half the card").color(DIM));
-            });
-            let found = if !status.active {
-                "Looks for cards while the bars are on.".to_string()
-            } else if !status.apm_running {
-                "EVE-APM Preview isn't running, or shows no cards.".to_string()
-            } else {
-                format!(
-                    "Found {} cards · {} matched to miners",
-                    status.cards_found, status.bars_matched
-                )
-            };
-            ui.label(small(found).color(DIM));
         });
     }
 
@@ -1529,6 +1507,104 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     };
     let year = year_of_era + era * 400 + if month <= 2 { 1 } else { 0 };
     (year, month, day)
+}
+
+/// The "Mining overlay" box in Settings. Returns true when a setting changed.
+fn overlay_settings(
+    overlay: &mut OverlaySettings,
+    move_mode: &mut bool,
+    ui: &mut egui::Ui,
+    buffers: &mut std::collections::BTreeMap<String, String>,
+) -> bool {
+    let mut changed = false;
+    ui.label(RichText::new("Mining overlay").color(BRIGHT).strong());
+    if ui
+        .checkbox(&mut overlay.enabled, "Show hold bars overlay")
+        .changed()
+    {
+        if !overlay.enabled {
+            *move_mode = false;
+        }
+        changed = true;
+    }
+    ui.horizontal(|ui| {
+        ui.label("Bar height (px)");
+        if let Some(Some(value)) = number_field(
+            ui,
+            buffers,
+            "bar_height",
+            Some(overlay.bar_height_px),
+            "6",
+            60.0,
+        ) {
+            overlay.bar_height_px = value.round().clamp(2.0, 20.0);
+            changed = true;
+        }
+    });
+    changed |= ui
+        .checkbox(
+            &mut overlay.show_names,
+            "Show character name under each bar",
+        )
+        .changed();
+    changed |= ui
+        .checkbox(
+            &mut overlay.show_percent,
+            "Show hold % under each bar (right side)",
+        )
+        .changed();
+    egui::Grid::new("overlay_opacity")
+        .num_columns(2)
+        .spacing([8.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Background opacity");
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut overlay.background_opacity, 0.0..=100.0)
+                        .suffix("%")
+                        .fixed_decimals(0),
+                )
+                .changed();
+            ui.end_row();
+            ui.label("Bar opacity");
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut overlay.bar_opacity, 10.0..=100.0)
+                        .suffix("%")
+                        .fixed_decimals(0),
+                )
+                .changed();
+            ui.end_row();
+        });
+    let enabled = overlay.enabled;
+    ui.horizontal(|ui| {
+        let moving = *move_mode;
+        let label = if moving {
+            "Done"
+        } else {
+            "Move / resize overlay"
+        };
+        if ui
+            .add_enabled(enabled, egui::Button::new(label).selected(moving))
+            .clicked()
+        {
+            *move_mode = !moving;
+        }
+        let hint = if *move_mode {
+            "Drag the overlay to move it, its right edge to change the width."
+        } else {
+            "Clicks go through the overlay."
+        };
+        ui.label(small(hint).color(DIM));
+    });
+    ui.label(
+        small(
+            "Bars follow the character order above; hidden characters get no bar. \
+             Position and width are saved and come back after a restart.",
+        )
+        .color(DIM),
+    );
+    changed
 }
 
 #[cfg(test)]
