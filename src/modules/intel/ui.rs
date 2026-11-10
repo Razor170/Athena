@@ -247,7 +247,13 @@ fn map_and_list(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
     let pilots = module.pilots_by_system();
     let now = now();
     let reports: Vec<&Report> = module.reports.iter().collect();
-    let marks = alerts::system_marks(&reports, now, module.fade_seconds(), &module.distances);
+    let marks = alerts::system_marks(
+        &reports,
+        now,
+        module.fade_seconds(),
+        &module.distances,
+        &module.characters,
+    );
     let shown_tags = tags::by_system(&module.tags, &module.settings.hidden_tag_groups);
     let mut map_ui = ui.new_child(egui::UiBuilder::new().max_rect(map_rect));
     let action = module.map.show(
@@ -297,7 +303,7 @@ fn map_and_list(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
 }
 
 /// The red banner across the top of the map while an alert is showing.
-fn alert_banner(module: &mut IntelSupervisor, ui: &mut egui::Ui, map_rect: egui::Rect) {
+fn alert_banner(module: &IntelSupervisor, ui: &mut egui::Ui, map_rect: egui::Rect) {
     let Some(alert) = &module.alert else {
         return;
     };
@@ -307,7 +313,6 @@ fn alert_banner(module: &mut IntelSupervisor, ui: &mut egui::Ui, map_rect: egui:
         map_rect.min + Vec2::splat(12.0),
         Vec2::new((map_rect.width() - 24.0).max(0.0), 34.0),
     );
-    let mut dismissed = false;
     let mut banner_ui = ui.new_child(egui::UiBuilder::new().max_rect(area));
     banner_ui.set_clip_rect(area.expand(2.0));
     egui::Frame::new()
@@ -317,22 +322,14 @@ fn alert_banner(module: &mut IntelSupervisor, ui: &mut egui::Ui, map_rect: egui:
         .inner_margin(egui::Margin::symmetric(10, 5))
         .show(&mut banner_ui, |ui| {
             ui.set_width(ui.available_width());
-            // Dismiss first, on the right, so long text is cut short
-            // instead of pushing it out of the map.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                dismissed = ui.button(small("Dismiss")).clicked();
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.add(
-                        egui::Label::new(RichText::new(title).color(BANNER_TITLE).strong())
-                            .truncate(),
-                    );
-                    ui.add(egui::Label::new(RichText::new(details).color(BANNER_TEXT)).truncate());
-                });
+            // Long text is cut short instead of pushing out of the map.
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(title).color(BANNER_TITLE).strong()).truncate(),
+                );
+                ui.add(egui::Label::new(RichText::new(details).color(BANNER_TEXT)).truncate());
             });
         });
-    if dismissed {
-        module.alert = None;
-    }
 }
 
 /// An alert's two lines, as the banner and the popup show them: "E-312G ·

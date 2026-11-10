@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use eframe::egui::Color32;
 
 use super::Report;
+use super::lookup::{self, Character};
 use crate::modules::mining::gamelog::LogTime;
 
 // Colours from the mockup.
@@ -94,18 +95,46 @@ pub fn fade_fraction(report: &Report, now: LogTime, fade_seconds: i64) -> f32 {
 /// first, and only the newest report about a system counts, so "clr" after
 /// a sighting turns the system green and a new sighting after "clr" turns
 /// it red again.
+///
+/// A pilot is only where they were last reported: a sighting whose pilots
+/// (the names ESI confirmed, see [`lookup::pilots_to_show`]) were all
+/// reported again later in another system doesn't light its system any
+/// more. A sighting without confirmed pilots always counts.
 pub fn system_marks(
     reports: &[&Report],
     now: LogTime,
     fade_seconds: i64,
     distances: &HashMap<i64, u32>,
+    known: &HashMap<String, Option<Character>>,
 ) -> HashMap<i64, SystemMark> {
     let mut marks = HashMap::new();
+    // Each pilot's systems in the newest sighting naming them (by
+    // character id).
+    let mut last_seen: HashMap<i64, &[i64]> = HashMap::new();
     for report in reports {
         let fraction = fade_fraction(report, now, fade_seconds);
         if fraction >= 1.0 {
             // Older ones are older still.
             break;
+        }
+        if !report.message.clear {
+            let pilots = lookup::pilots_to_show(&report.message.pilot_candidates, known);
+            let systems = report.message.systems.as_slice();
+            let moved_on = |id: &i64| {
+                last_seen
+                    .get(id)
+                    .is_some_and(|newer| !newer.iter().any(|s| systems.contains(s)))
+            };
+            let all_moved_on = !pilots.is_empty() && pilots.iter().all(|(_, id)| moved_on(id));
+            for (_, id) in &pilots {
+                // Only sightings that name a system say where a pilot is.
+                if !systems.is_empty() {
+                    last_seen.entry(*id).or_insert(systems);
+                }
+            }
+            if all_moved_on {
+                continue;
+            }
         }
         for &system in &report.message.systems {
             if marks.contains_key(&system) {
@@ -205,7 +234,7 @@ mod tests {
             report(-3600, &[3], false),
         ];
         let refs: Vec<&Report> = reports.iter().collect();
-        let marks = system_marks(&refs, at(0), 600, &distances);
+        let marks = system_marks(&refs, at(0), 600, &distances, &HashMap::new());
         assert_eq!(marks[&1].color, GREEN);
         assert_eq!(marks[&1].badge, "clr");
         assert!(!marks[&1].hot);
@@ -215,11 +244,52 @@ mod tests {
         assert!(!marks.contains_key(&3));
     }
 
+    /// A sighting naming pilots, as typed.
+    fn sighting(seconds: i64, systems: &[i64], pilots: &[&str]) -> Report {
+        let mut report = report(seconds, systems, false);
+        report.message.pilot_candidates = pilots.iter().map(|p| p.to_string()).collect();
+        report
+    }
+
+    #[test]
+    fn a_pilot_reported_elsewhere_leaves_the_old_system() {
+        let known: HashMap<String, Option<Character>> =
+            [("evil pilot", 11, "Evil Pilot"), ("bad guy", 12, "Bad Guy")]
+                .into_iter()
+                .map(|(key, id, name)| {
+                    let character = Character {
+                        id,
+                        name: name.to_string(),
+                    };
+                    (key.to_string(), Some(character))
+                })
+                .collect();
+        // Newest first.
+        let reports = [
+            // Evil Pilot moved from 1 to 2.
+            sighting(-10, &[2], &["Evil Pilot"]),
+            // Both were in 1: Bad Guy wasn't seen anywhere else, so 1 stays.
+            sighting(-60, &[1], &["Evil Pilot", "Bad Guy"]),
+            // Only Evil Pilot was in 3: it goes dark.
+            sighting(-120, &[3], &["Evil Pilot"]),
+            // Seen again in 2 earlier: still 2, stays lit.
+            sighting(-150, &[2], &["Evil Pilot"]),
+            // No confirmed pilot ("gate" isn't one): always lit.
+            sighting(-200, &[4], &["gate"]),
+        ];
+        let refs: Vec<&Report> = reports.iter().collect();
+        let marks = system_marks(&refs, at(0), 600, &HashMap::new(), &known);
+        assert!(marks.contains_key(&1));
+        assert!(marks[&2].badge.starts_with("now"));
+        assert!(!marks.contains_key(&3));
+        assert!(marks.contains_key(&4));
+    }
+
     #[test]
     fn new_report_is_red_with_now() {
         let reports = [report(-5, &[7], false)];
         let refs: Vec<&Report> = reports.iter().collect();
-        let marks = system_marks(&refs, at(0), 600, &HashMap::new());
+        let marks = system_marks(&refs, at(0), 600, &HashMap::new(), &HashMap::new());
         assert_eq!(marks[&7].badge, "now");
         assert_eq!(marks[&7].color, fade_color(5.0 / 600.0));
     }
