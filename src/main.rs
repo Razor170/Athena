@@ -12,6 +12,7 @@ mod shell;
 mod static_data;
 mod storage;
 mod universe;
+mod version;
 
 use std::path::PathBuf;
 

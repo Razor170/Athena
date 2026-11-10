@@ -7,7 +7,9 @@ See [PLAN.md](PLAN.md) for the project plan.
 ## Download and run
 
 1. Download `Athena-windows.zip` from the latest [release](https://github.com/Razor170/Athena/releases)
-   (or from the artifacts of a CI run on the Actions tab).
+   (or from the artifacts of a CI run on the Actions tab). Every merge to main is published as a
+   pre-release such as `v0.1.1-alpha.6`; versions tagged by hand, such as `v0.2.0`, are normal
+   releases. Settings shows which version you have.
 2. Unpack it anywhere, for example `D:\Tools\Athena`.
 3. Run `Athena.exe`.
 

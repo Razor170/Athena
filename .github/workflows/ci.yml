@@ -1,5 +1,7 @@
 # Checks every push and pull request, and builds the portable Windows zip.
-# Pushing a version tag such as v0.1.0 also publishes the zip as a GitHub Release.
+# Every push to main is tagged and published as a pre-release such as
+# v0.1.1-alpha.6 (see "Work out the version" below). Pushing a version tag
+# such as v0.2.0 by hand publishes a normal release.
 name: CI
 
 on:
@@ -20,8 +22,50 @@ jobs:
   build:
     name: Check and build (Windows)
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The whole history and all tags, so the version step can count
+          # commits since the last release tag.
+          fetch-depth: 0
+
+      # MinVer-style version from git:
+      # - on a release tag (v0.1.0) the version is the tag itself;
+      # - otherwise it is the last release tag with the patch number raised
+      #   by one, plus "-alpha.<height>", where height counts the commits on
+      #   main's first-parent line since that tag (each merged PR adds one).
+      #   So v0.1.0 + 6 merges = 0.1.1-alpha.6.
+      # Pre-release tags (anything with a "-") are never used as the base.
+      # PR builds add "+pr.<number>" so their zip can't be mistaken for a
+      # main build. The exe reads the result from ATHENA_VERSION at compile time.
+      - name: Work out the version
+        id: version
+        shell: pwsh
+        run: |
+          $base = git describe --tags --abbrev=0 --match "v[0-9]*" --exclude "*-*" HEAD 2>$null
+          if ($LASTEXITCODE -ne 0 -or -not $base) {
+            Write-Error "No release tag (v<major>.<minor>.<patch>) found in the history."
+            exit 1
+          }
+          if ($base -notmatch '^v(\d+)\.(\d+)\.(\d+)$') {
+            Write-Error "Release tag $base isn't v<major>.<minor>.<patch>."
+            exit 1
+          }
+          $major = [int]$Matches[1]; $minor = [int]$Matches[2]; $patch = [int]$Matches[3]
+          $height = [int](git rev-list --count --first-parent "$base..HEAD")
+          if ($height -eq 0) {
+            $version = "$major.$minor.$patch"
+          } else {
+            $version = "$major.$minor.$($patch + 1)-alpha.$height"
+          }
+          if ("${{ github.event_name }}" -eq "pull_request") {
+            $version = "$version+pr.${{ github.event.number }}"
+          }
+          Write-Output "Version: $version (base $base, height $height)"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "ATHENA_VERSION=$version" >> $env:GITHUB_ENV
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -190,13 +234,22 @@ jobs:
           path: dist
           if-no-files-found: error
 
+  # Publishes every push to main as a pre-release (creating its tag, such as
+  # v0.1.1-alpha.6) and every hand-pushed v* tag as a normal release.
   release:
     name: Publish release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Two quick merges publish one after the other, so the clean-up below
+    # never races with a release that is still being made.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
     steps:
       # download-artifact unpacks the folder again; zip it for the release.
       - uses: actions/download-artifact@v4
@@ -207,8 +260,28 @@ jobs:
       - name: Zip the Athena folder
         run: cd dist && zip -r ../Athena-windows.zip Athena
 
+      # The tag is made here, on the commit that was built. A tag pushed by
+      # this workflow's own token doesn't start another CI run.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          name: Athena v${{ env.VERSION }}
+          prerelease: ${{ contains(env.VERSION, '-') }}
           files: Athena-windows.zip
           generate_release_notes: true
+
+      # Keeps the newest 10 pre-releases (and their tags); older ones are
+      # deleted. Normal releases (v0.2.0 and so on) are never deleted.
+      - name: Delete old pre-releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
+              --json tagName,isPrerelease,createdAt \
+              --jq '[.[] | select(.isPrerelease)] | sort_by(.createdAt) | reverse | .[10:] | .[].tagName' |
+          while read -r tag; do
+            echo "Deleting old pre-release $tag"
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done
