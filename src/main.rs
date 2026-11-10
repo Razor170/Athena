@@ -12,6 +12,7 @@ mod shell;
 mod static_data;
 mod storage;
 mod universe;
+mod updater;
 mod version;
 
 use std::path::PathBuf;
@@ -52,6 +53,31 @@ fn run() -> Result<()> {
     // Startup code: if we can't find a writable data folder there is no point
     // in running, so errors here end the app.
     let data_dir = storage::DataDir::resolve().context("no writable data folder found")?;
+
+    // Auto-updater: "Restart now" starts us with `--wait-for-exit <pid>`;
+    // wait until the old Athena has closed all its files. Then install a
+    // downloaded update (or roll back a broken one) before anything else
+    // opens a file. See src/updater/install.rs.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pid) = args
+        .iter()
+        .position(|arg| arg == "--wait-for-exit")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|pid| pid.parse().ok())
+    {
+        updater::install::wait_for_exit(pid);
+    }
+    let exe = std::env::current_exe().context("can't find the exe's location")?;
+    let exe_dir = exe.parent().context("the exe has no parent folder")?;
+    let update_info =
+        match updater::install::on_startup(&data_dir.path, exe_dir, version::BUILT_VERSION) {
+            updater::Startup::LaunchAndExit => {
+                updater::install::launch(exe_dir)?;
+                return Ok(());
+            }
+            updater::Startup::Continue(info) => info,
+        };
+
     let saver = storage::Saver::start();
     let (settings, settings_warning) = settings::Settings::load(&data_dir.path);
 
@@ -79,6 +105,7 @@ fn run() -> Result<()> {
                 settings,
                 settings_warning,
                 saver,
+                update_info,
             )))
         }),
     )

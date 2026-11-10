@@ -8,6 +8,7 @@ use crate::modules::{self, Module, ModuleContext};
 use crate::overlay::MiningOverlay;
 use crate::settings::{FilePollRate, Settings};
 use crate::storage::{DataDir, Saver};
+use crate::updater::{StartupInfo, StripAction, Updater};
 
 pub struct AthenaApp {
     modules: Vec<Box<dyn Module>>,
@@ -20,6 +21,10 @@ pub struct AthenaApp {
     mining_overlay: MiningOverlay,
     /// The layout text we last handed to the saver, so we only save when it changed.
     last_saved_layout: String,
+    /// The auto-updater: its strip under the menu bar and its Settings section.
+    updater: Updater,
+    /// Set by "Restart now": start Athena again once this one has closed.
+    restart_to_install: bool,
 }
 
 /// State of the settings tab that isn't a setting itself.
@@ -42,6 +47,7 @@ impl AthenaApp {
         settings: Settings,
         settings_warning: Option<String>,
         saver: Saver,
+        update_info: StartupInfo,
     ) -> AthenaApp {
         // Set before the modules start their log watchers.
         crate::settings::set_file_poll_rate(settings.file_poll_rate);
@@ -60,7 +66,10 @@ impl AthenaApp {
             frames_drawn: 0,
             last_frame_cpu: None,
         };
+        let updater = Updater::start(egui_ctx, &settings, &data_dir, update_info);
         AthenaApp {
+            updater,
+            restart_to_install: false,
             mining_overlay: MiningOverlay::new(egui_ctx),
             modules,
             layout,
@@ -127,6 +136,7 @@ impl eframe::App for AthenaApp {
         for module in &mut self.modules {
             module.update(&module_ctx);
         }
+        self.updater.update();
         // Here rather than in `ui`, because `logic` also runs while the main
         // window is minimized, and the overlay must keep up then.
         if let Some(place) = self.mining_overlay.take_moved() {
@@ -154,12 +164,24 @@ impl eframe::App for AthenaApp {
             .rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
 
         egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
+        if self.updater.strip_visible() {
+            match self.updater.strip_ui(ui) {
+                StripAction::None => {}
+                StripAction::OpenSettings => self.layout.open(Tab::Settings),
+                StripAction::Restart => {
+                    self.restart_to_install = true;
+                    // Closes the window the normal way, so `on_exit` saves everything first.
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
 
         let mut settings_changed = false;
         let mut viewer = TabViewer {
             modules: &mut self.modules,
             settings: &mut self.settings,
             data_dir: &self.data_dir,
+            updater: &mut self.updater,
             panel: &mut self.settings_panel,
             settings_changed: &mut settings_changed,
         };
@@ -184,6 +206,7 @@ impl eframe::App for AthenaApp {
         if !ui.input(|i| i.pointer.any_down()) {
             self.save_layout_if_changed();
         }
+        self.updater.frame_drawn();
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -194,6 +217,13 @@ impl eframe::App for AthenaApp {
         }
         // Wait for the writes to finish before the process ends.
         self.saver.finish();
+        if self.restart_to_install
+            && let Err(error) = crate::updater::install::restart_to_install()
+        {
+            // Nothing is on screen any more; the update stays staged and
+            // is installed on the next start instead.
+            eprintln!("{error:#}");
+        }
     }
 }
 
@@ -202,6 +232,7 @@ struct TabViewer<'a> {
     modules: &'a mut [Box<dyn Module>],
     settings: &'a mut Settings,
     data_dir: &'a DataDir,
+    updater: &'a mut Updater,
     panel: &'a mut SettingsPanel,
     settings_changed: &'a mut bool,
 }
@@ -291,8 +322,9 @@ fn settings_ui(ui: &mut egui::Ui, viewer: &mut TabViewer) {
         );
 
         ui.add_space(12.0);
-        ui.heading("Updates");
-        ui.label(format!("This version: {}", crate::version::display_text()));
+        if viewer.updater.settings_ui(ui, viewer.settings) {
+            *viewer.settings_changed = true;
+        }
 
         ui.add_space(12.0);
         ui.heading("Data folder");

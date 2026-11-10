@@ -19,6 +19,14 @@ There is no installer. Athena keeps its settings and layout in a `data` folder n
 in the Settings tab. Login tokens (later) are stored in Windows Credential Manager, not
 in the folder.
 
+**Updates:** Athena can update itself from this repo's releases. Because the repo is private,
+it needs a GitHub token once: on GitHub go to Settings → Developer settings → Personal access
+tokens → Fine-grained tokens → Generate new token, choose "Only select repositories" → Athena,
+and under Permissions set **Contents** to **Read-only** (nothing else). Paste the token into
+Athena's Settings → Updates and press "Save token". It is kept in Windows Credential Manager,
+not in the folder. Athena then checks for a newer version when it starts (you can turn that
+off) and when you press "Check for updates".
+
 **Windows SmartScreen:** the exe isn't code-signed, so Windows warns the first time you
 run it. Click **More info**, then **Run anyway**.
 
