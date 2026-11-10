@@ -152,7 +152,7 @@ fn live_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
     legend(ui);
 }
 
-/// Session ISK, ISK/h, m³/h, duration and the End session button.
+/// Session ISK, ISK/h, m³/h, m³/s and the End session button.
 fn summary_bar(module: &mut MiningSupervisor, ui: &mut egui::Ui, now: LogTime) {
     let mut isk = 0.0;
     let mut m3 = 0.0;
@@ -162,11 +162,7 @@ fn summary_bar(module: &mut MiningSupervisor, ui: &mut egui::Ui, now: LogTime) {
             continue;
         };
         isk += session_isk(module, &session.mined_units);
-        m3 += session
-            .mined_units
-            .iter()
-            .map(|(ore, &units)| module.volumes.get(ore).unwrap_or(0.0) * units as f64)
-            .sum::<f64>();
+        m3 += session_m3(module, &session.mined_units);
         started = Some(started.map_or(session.started, |s| s.min(session.started)));
     }
     let seconds = started.map_or(0, |s| now.seconds_since(s).max(0));
@@ -188,6 +184,8 @@ fn summary_bar(module: &mut MiningSupervisor, ui: &mut egui::Ui, now: LogTime) {
                 ui.label(RichText::new("m³/h").color(DIM));
                 let m3_hour = if hours > 0.01 { m3 / hours } else { 0.0 };
                 ui.label(RichText::new(thousands(m3_hour)).color(BRIGHT).strong());
+                // Small, so the row still fits in 480 px next to both buttons.
+                ui.label(small(format!("{} m³/s", per_second_text(m3_hour / 3600.0))).color(SOFT));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let button = egui::Button::new(
                         small("End session").color(Color32::from_rgb(0xf0, 0xd0, 0xa0)),
@@ -235,6 +233,14 @@ fn summary_bar(module: &mut MiningSupervisor, ui: &mut egui::Ui, now: LogTime) {
     }
 }
 
+/// The volume of a session's ore, in m³ (unknown ores count as 0).
+fn session_m3(module: &MiningSupervisor, units: &std::collections::BTreeMap<String, u64>) -> f64 {
+    units
+        .iter()
+        .map(|(ore, &count)| module.volumes.get(ore).unwrap_or(0.0) * count as f64)
+        .sum()
+}
+
 /// The session's value with the current prices, 0 until prices load.
 fn session_isk(module: &MiningSupervisor, units: &std::collections::BTreeMap<String, u64>) -> f64 {
     match (&module.static_data, &module.prices) {
@@ -277,7 +283,20 @@ fn character_card(
     let mined_secs = tracker
         .session()
         .map_or(0, |s| s.last_cycle.seconds_since(s.started));
-    let mut stats = format!("{} · {}", duration_text(mined_secs), isk_text(session_isk));
+    let session_m3 = tracker
+        .session()
+        .map_or(0.0, |s| session_m3(module, &s.mined_units));
+    // The character's own rate over the time it was mining (first to last
+    // cycle), so it doesn't sink while the pilot is idle or docked.
+    let rate = match m3_per_second(session_m3, mined_secs) {
+        Some(rate) => format!(" · {} m³/s", per_second_text(rate)),
+        None => String::new(),
+    };
+    let mut stats = format!(
+        "{}{rate} · {}",
+        duration_text(mined_secs),
+        isk_text(session_isk)
+    );
     let (status, status_color, border) = if percent >= tracker.settings.full_percent {
         let border = if guard == GuardState::Stopped {
             Border::Dashed(RED)
@@ -603,22 +622,26 @@ fn belt_scan(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
             tile(ui, tile_width, "Value left", &value, "reprocessed, Jita");
         });
         ui.horizontal(|ui| {
-            let (rate, cleared, at) = match (progress.m3_per_hour, progress.seconds_to_clear) {
-                (Some(rate), Some(seconds)) => (
-                    format!("{} m³/h", short_m3(rate)),
-                    format!("about {}", duration_text(seconds)),
-                    format!(
-                        "around {} EVE time at this rate",
-                        clock_text(latest.taken.unix_seconds + seconds)
+            let (rate, rate_note, cleared, at) =
+                match (progress.m3_per_hour, progress.seconds_to_clear) {
+                    (Some(rate), Some(seconds)) => (
+                        format!("{} m³/h", short_m3(rate)),
+                        // m³/s goes on the small line: the tile is too narrow for both.
+                        format!("{} m³/s · whole belt", per_second_text(rate / 3600.0)),
+                        format!("about {}", duration_text(seconds)),
+                        format!(
+                            "around {} EVE time at this rate",
+                            clock_text(latest.taken.unix_seconds + seconds)
+                        ),
                     ),
-                ),
-                _ => (
-                    "–".to_string(),
-                    "–".to_string(),
-                    "copy another scan in a few minutes".to_string(),
-                ),
-            };
-            tile(ui, tile_width, "Belt rate", &rate, "everyone on the belt");
+                    _ => (
+                        "–".to_string(),
+                        "everyone on the belt".to_string(),
+                        "–".to_string(),
+                        "copy another scan in a few minutes".to_string(),
+                    ),
+                };
+            tile(ui, tile_width, "Belt rate", &rate, &rate_note);
             tile(ui, tile_width * 2.0 + gap, "Belt cleared in", &cleared, &at);
         });
 
@@ -1421,6 +1444,26 @@ fn isk_text(isk: f64) -> String {
     }
 }
 
+/// m³ per second over `seconds` of mining. None for less than a minute,
+/// where a cycle or two would give a wildly high number.
+fn m3_per_second(m3: f64, seconds: i64) -> Option<f64> {
+    if seconds < 60 {
+        None
+    } else {
+        Some(m3 / seconds as f64)
+    }
+}
+
+/// A rate per second with one decimal: "12.4", or "1,284.0" for whole belts.
+fn per_second_text(per_second: f64) -> String {
+    let tenths = (per_second * 10.0).round();
+    format!(
+        "{}.{}",
+        thousands((tenths / 10.0).trunc()),
+        (tenths % 10.0).abs() as i64
+    )
+}
+
 /// m³ in belts: "24.28 M", "540,000".
 fn short_m3(m3: f64) -> String {
     if m3 >= 1e6 {
@@ -1503,6 +1546,20 @@ mod tests {
         assert_eq!(compact(149_000.0), "149k");
         assert_eq!(plain_number(11_500.0), "11,500");
         assert_eq!(plain_number(90.63), "90.63");
+    }
+
+    #[test]
+    fn per_second_rates() {
+        // 771,064 m³/h on a belt is about 214.2 m³/s.
+        assert_eq!(per_second_text(771_064.0 / 3600.0), "214.2");
+        assert_eq!(per_second_text(12.44), "12.4");
+        assert_eq!(per_second_text(12.96), "13.0");
+        assert_eq!(per_second_text(0.0), "0.0");
+        assert_eq!(per_second_text(4_621.25), "4,621.3");
+        // 45,000 m³ over an hour of mining is 12.5 m³/s.
+        assert_eq!(m3_per_second(45_000.0, 3600), Some(12.5));
+        // Under a minute there isn't enough to go on.
+        assert_eq!(m3_per_second(3_000.0, 59), None);
     }
 
     #[test]
