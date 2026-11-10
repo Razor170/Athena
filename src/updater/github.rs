@@ -26,8 +26,6 @@ const ASSET_NAME: &str = "Athena-windows.zip";
 pub struct ApiRelease {
     tag_name: String,
     #[serde(default)]
-    prerelease: bool,
-    #[serde(default)]
     draft: bool,
     #[serde(default)]
     body: Option<String>,
@@ -134,11 +132,11 @@ pub fn newest_release(releases: Vec<ApiRelease>, include_prereleases: bool) -> O
     releases
         .into_iter()
         .filter(|release| !release.draft)
-        .filter(|release| include_prereleases || !release.prerelease)
         .filter_map(|release| {
             let version = Version::parse(&release.tag_name)?;
-            // A release marked as normal but with an alpha version is still
-            // an alpha, so the checkbox decides by the version too.
+            // The version decides what counts as a pre-release, not GitHub's
+            // "pre-release" flag: v0.1.0 was published with that flag set
+            // but is a normal version.
             if version.is_prerelease() && !include_prereleases {
                 return None;
             }
@@ -248,10 +246,9 @@ pub fn download(
 mod tests {
     use super::*;
 
-    fn release(tag: &str, prerelease: bool, with_zip: bool) -> ApiRelease {
+    fn release(tag: &str, with_zip: bool) -> ApiRelease {
         ApiRelease {
             tag_name: tag.to_string(),
-            prerelease,
             draft: false,
             body: None,
             published_at: Some("2026-11-10T19:00:00Z".to_string()),
@@ -270,9 +267,9 @@ mod tests {
     #[test]
     fn picks_the_newest_by_version_not_by_list_order() {
         let list = vec![
-            release("v0.1.1-alpha.9", true, true),
-            release("v0.1.1-alpha.10", true, true),
-            release("v0.1.0", false, true),
+            release("v0.1.1-alpha.9", true),
+            release("v0.1.1-alpha.10", true),
+            release("v0.1.0", true),
         ];
         let newest = newest_release(list, true).unwrap();
         assert_eq!(newest.version_text, "0.1.1-alpha.10");
@@ -280,23 +277,27 @@ mod tests {
     }
 
     #[test]
+    fn the_version_decides_what_is_a_prerelease() {
+        // v0.1.0 is flagged as a pre-release on GitHub; the flag isn't read.
+        let list = vec![release("v0.1.1-alpha.10", true), release("v0.1.0", true)];
+        assert_eq!(newest_release(list, false).unwrap().version_text, "0.1.0");
+    }
+
+    #[test]
     fn prereleases_only_when_wanted() {
-        let list = vec![
-            release("v0.1.1-alpha.10", true, true),
-            release("v0.1.0", false, true),
-        ];
+        let list = vec![release("v0.1.1-alpha.10", true), release("v0.1.0", true)];
         assert_eq!(newest_release(list, false).unwrap().version_text, "0.1.0");
     }
 
     #[test]
     fn skips_drafts_odd_tags_and_releases_without_the_zip() {
-        let mut draft = release("v0.3.0", false, true);
+        let mut draft = release("v0.3.0", true);
         draft.draft = true;
         let list = vec![
             draft,
-            release("nightly", true, true),
-            release("v0.2.0", false, false),
-            release("v0.1.0", false, true),
+            release("nightly", true),
+            release("v0.2.0", false),
+            release("v0.1.0", true),
         ];
         assert_eq!(newest_release(list, true).unwrap().version_text, "0.1.0");
         assert_eq!(newest_release(Vec::new(), true), None);
