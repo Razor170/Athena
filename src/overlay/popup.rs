@@ -112,6 +112,13 @@ impl AlertPopup {
         }
     }
 
+    /// True while an alert (or the example) is showing.
+    pub fn is_showing(&self) -> bool {
+        self.shared
+            .lock()
+            .is_ok_and(|shared| shared.content.is_some())
+    }
+
     pub fn hide(&mut self, ctx: &egui::Context) {
         if let Ok(mut shared) = self.shared.lock() {
             shared.content = None;

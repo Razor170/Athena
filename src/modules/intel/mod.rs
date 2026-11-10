@@ -38,7 +38,7 @@ pub mod watcher;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use eframe::egui;
 
@@ -119,6 +119,12 @@ pub struct Alert {
     /// The own pilots that close to it.
     pub pilots: Vec<String>,
     pub loud: bool,
+    /// The popup over EVE was shown for this alert: the banner goes when
+    /// the popup does.
+    pub popup_shown: bool,
+    /// When the banner appeared. Without a popup, the banner stays as long
+    /// as the popup would have.
+    pub shown_at: Instant,
 }
 
 pub struct IntelSupervisor {
@@ -153,7 +159,8 @@ pub struct IntelSupervisor {
     distances: HashMap<i64, u32>,
 
     sound: SoundPlayer,
-    /// The banner over the map, until dismissed or faded.
+    /// The banner over the map, while the alert popup shows (or would
+    /// show, see [`banner_is_over`]).
     alert: Option<Alert>,
     /// The alert popup over EVE (shown even while muted).
     popup: AlertPopup,
@@ -195,6 +202,27 @@ pub struct IntelSupervisor {
     /// The active pilot's region at the last check, to notice when they
     /// jump into another one.
     followed_region: Option<i64>,
+}
+
+/// Whether the banner over the map should go. It lives as long as the
+/// alert popup: when the popup was shown for this alert, until the popup
+/// hides (time up, ✕, or popups turned off). Without a popup (turned off,
+/// or "only loud" and this one isn't), as long as the popup would have
+/// shown. Kept "until ✕" without a popup, it goes once its report has
+/// faded. A faded report always ends it.
+fn banner_is_over(
+    alert: &Alert,
+    popup_showing: bool,
+    popup_hide_after: Option<std::time::Duration>,
+    faded: bool,
+) -> bool {
+    if faded {
+        return true;
+    }
+    if alert.popup_shown {
+        return !popup_showing;
+    }
+    popup_hide_after.is_some_and(|after| alert.shown_at.elapsed() >= after)
 }
 
 /// The current time as EVE time (UTC).
@@ -549,24 +577,30 @@ impl IntelSupervisor {
             .as_ref()
             .is_some_and(|shown| shown.jumps < level.jumps && shown.report.time >= report.time);
         if !keep_banner {
+            let popup_shown = self.settings.popup && (level.loud || !self.settings.popup_only_loud);
             let alert = Alert {
                 report: report.clone(),
                 system_id,
                 jumps: level.jumps,
                 pilots,
                 loud: level.loud,
+                popup_shown,
+                shown_at: Instant::now(),
             };
+            let hide_after = self.popup_hide_after();
             // Same rule as the banner: what replaces the banner replaces
             // the popup. Muting doesn't stop it (mute is about sound).
-            if self.settings.popup && (level.loud || !self.settings.popup_only_loud) {
+            if popup_shown {
                 let (title, details) = ui::alert_texts(self, &alert);
                 let content = PopupContent {
                     title,
                     details,
                     loud: alert.loud,
                 };
-                let hide_after = self.popup_hide_after();
                 self.popup.show(&self.egui_ctx, content, hide_after);
+            } else if let Some(after) = hide_after {
+                // Wakes `update` up in time to take the banner away.
+                self.egui_ctx.request_repaint_after(after);
             }
             self.alert = Some(alert);
         }
@@ -1015,9 +1049,14 @@ impl Module for IntelSupervisor {
         }
         // Cheap when nothing changed: a few comparisons.
         self.choose_region();
-        // The banner goes once its report has faded.
+        // The banner goes with the popup (or once its report has faded).
         if let Some(alert) = &self.alert
-            && now().seconds_since(alert.report.time) >= self.fade_seconds()
+            && banner_is_over(
+                alert,
+                self.popup.is_showing(),
+                self.popup_hide_after(),
+                now().seconds_since(alert.report.time) >= self.fade_seconds(),
+            )
         {
             self.alert = None;
         }
@@ -1324,6 +1363,32 @@ mod tests {
     }
 
     #[test]
+    fn the_banner_goes_with_the_popup() {
+        let mut m = module();
+        jump(&mut m, "Pilot Alpha", 60, "A1-XYZ");
+        m.handle_lines(
+            "Branch Intel",
+            "Pilot Alpha",
+            vec![line(5, "Scout", "A2-XYZ")],
+            false,
+        );
+        let mut alert = m.alert.clone().unwrap();
+        let five = Some(std::time::Duration::from_secs(5));
+        // Shown with a popup: lasts exactly as long as the popup.
+        alert.popup_shown = true;
+        assert!(!banner_is_over(&alert, true, five, false));
+        assert!(banner_is_over(&alert, false, five, false));
+        // No popup: as long as the popup would have shown.
+        alert.popup_shown = false;
+        assert!(!banner_is_over(&alert, false, five, false));
+        alert.shown_at = Instant::now() - std::time::Duration::from_secs(6);
+        assert!(banner_is_over(&alert, false, five, false));
+        // No popup and "until ✕": until the report fades.
+        assert!(!banner_is_over(&alert, false, None, false));
+        assert!(banner_is_over(&alert, false, None, true));
+    }
+
+    #[test]
     fn an_older_further_report_keeps_the_closer_banner() {
         let mut m = module();
         jump(&mut m, "Pilot Alpha", 60, "A1-XYZ");
@@ -1411,7 +1476,7 @@ mod tests {
         );
         m.mark_clear(102);
         let refs: Vec<&Report> = m.reports.iter().collect();
-        let marks = alerts::system_marks(&refs, now(), 600, &HashMap::new());
+        let marks = alerts::system_marks(&refs, now(), 600, &HashMap::new(), &HashMap::new());
         assert_eq!(marks[&102].color, alerts::GREEN);
     }
 
