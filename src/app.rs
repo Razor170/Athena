@@ -291,6 +291,10 @@ fn settings_ui(ui: &mut egui::Ui, viewer: &mut TabViewer) {
         );
 
         ui.add_space(12.0);
+        ui.heading("Updates");
+        ui.label(format!("This version: {}", crate::version::display_text()));
+
+        ui.add_space(12.0);
         ui.heading("Data folder");
         ui.label(viewer.data_dir.path.display().to_string());
         if viewer.data_dir.is_fallback {
