@@ -15,8 +15,13 @@
 //!    has drawn ([`confirm_started`]), the old files are deleted. If it
 //!    never gets that far, its next start puts the old files back.
 //!
-//! Only files that are in the zip are touched, so settings, layout and
-//! history in the data folder are never changed.
+//! Only files that are in the zip are touched, and a zip with a `data`
+//! folder is refused, so settings, layout and history are never changed.
+//!
+//! Keep this compatible: the install is done by the *old* exe, so the zip
+//! layout (`Athena\...`), `staged.toml`, `installed.toml` and the
+//! `--wait-for-exit <pid>` argument must keep working for every older
+//! version that might install a newer one.
 
 use std::fs::{self, File};
 use std::io;
@@ -38,6 +43,12 @@ const FAILED_DIR: &str = "failed";
 const INSTALLED_INFO: &str = "installed.toml";
 /// A message for the user that survives a restart, shown once in Settings.
 const NOTE_FILE: &str = "last-update.txt";
+/// The version that was rolled back, so the startup check doesn't offer it again.
+const SKIP_FILE: &str = "skip-version.txt";
+/// The folder next to the exe that holds the user's data; never part of an update.
+const DATA_FOLDER: &str = "data";
+/// Where the zip is downloaded to.
+pub const DOWNLOAD_FILE: &str = "download.zip";
 
 /// The updater's folder inside the data folder.
 pub fn update_dir(data_dir: &Path) -> PathBuf {
@@ -80,6 +91,15 @@ pub fn stage(zip_path: &Path, data_dir: &Path, version: &str) -> Result<()> {
         let Some(relative) = strip_top_folder(&path) else {
             continue;
         };
+        // An update must never write into the user's data folder.
+        // Windows paths ignore case, so `Data` counts too.
+        if relative
+            .components()
+            .next()
+            .is_some_and(|first| first.as_os_str().eq_ignore_ascii_case(DATA_FOLDER))
+        {
+            bail!("the zip contains a data folder, which an update must never replace");
+        }
         let target = staged.join(&relative);
         if entry.is_dir() {
             fs::create_dir_all(&target)?;
@@ -138,6 +158,8 @@ pub struct StartupInfo {
     /// True on the first start of a freshly installed version; the app then
     /// calls [`confirm_started`] after its first frame.
     pub just_installed: bool,
+    /// A version that was rolled back, which the startup check skips.
+    pub skipped_version: Option<String>,
 }
 
 /// Runs first thing at startup: installs a staged update or rolls back a
@@ -149,6 +171,9 @@ pub fn on_startup(data_dir: &Path, exe_dir: &Path, current: Option<&str>) -> Sta
         return Startup::Continue(StartupInfo::default());
     }
     let mut note = take_note(&update_dir);
+    let skipped_version = fs::read_to_string(update_dir.join(SKIP_FILE))
+        .ok()
+        .map(|text| text.trim().to_string());
 
     // 1. Is this the first start of a version we just installed?
     let installed_path = update_dir.join(INSTALLED_INFO);
@@ -160,6 +185,7 @@ pub fn on_startup(data_dir: &Path, exe_dir: &Path, current: Option<&str>) -> Sta
                 return Startup::Continue(StartupInfo {
                     note: note.or(Some(format!("Updated to {}.", info.version))),
                     just_installed: true,
+                    skipped_version,
                 });
             }
             // The last start of this version never drew its window: go back.
@@ -169,6 +195,7 @@ pub fn on_startup(data_dir: &Path, exe_dir: &Path, current: Option<&str>) -> Sta
             let _ = fs::remove_dir_all(&failed);
             return match swap_in(&previous, exe_dir, &failed) {
                 Ok(()) => {
+                    let _ = fs::write(update_dir.join(SKIP_FILE), &info.version);
                     write_note(
                         &update_dir,
                         &format!(
@@ -184,6 +211,7 @@ pub fn on_startup(data_dir: &Path, exe_dir: &Path, current: Option<&str>) -> Sta
                         info.version, info.previous_version
                     )),
                     just_installed: false,
+                    skipped_version,
                 }),
             };
         }
@@ -228,11 +256,17 @@ pub fn on_startup(data_dir: &Path, exe_dir: &Path, current: Option<&str>) -> Sta
         }
     }
 
-    // 3. Leftovers of a roll-back, which couldn't be deleted while running.
+    // 3. Leftovers: a roll-back's files, which couldn't be deleted while
+    // running, and a download or unpack that Athena was closed during.
     let _ = fs::remove_dir_all(update_dir.join(FAILED_DIR));
+    if !staged_info_path.exists() {
+        let _ = fs::remove_dir_all(update_dir.join(STAGED_DIR));
+        let _ = fs::remove_file(update_dir.join(DOWNLOAD_FILE));
+    }
     Startup::Continue(StartupInfo {
         note,
         just_installed: false,
+        skipped_version,
     })
 }
 
@@ -327,16 +361,19 @@ fn take_note(update_dir: &Path) -> Option<String> {
 pub fn confirm_started(data_dir: &Path) {
     let update_dir = update_dir(data_dir);
     std::thread::spawn(move || {
-        let _ = fs::remove_file(update_dir.join(INSTALLED_INFO));
+        let gone = |result: io::Result<()>| match result {
+            Ok(()) => true,
+            Err(error) => error.kind() == io::ErrorKind::NotFound,
+        };
         for _ in 0..20 {
-            let previous = fs::remove_dir_all(update_dir.join(PREVIOUS_DIR));
-            let failed = fs::remove_dir_all(update_dir.join(FAILED_DIR));
-            let gone = |result: io::Result<()>| match result {
-                Ok(()) => true,
-                Err(error) => error.kind() == io::ErrorKind::NotFound,
-            };
-            if gone(previous) && gone(failed) {
-                return;
+            // The marker must go first: if it stayed while the backup was
+            // deleted, the next start would try to roll back without one.
+            if gone(fs::remove_file(update_dir.join(INSTALLED_INFO))) {
+                let previous = fs::remove_dir_all(update_dir.join(PREVIOUS_DIR));
+                let failed = fs::remove_dir_all(update_dir.join(FAILED_DIR));
+                if gone(previous) && gone(failed) {
+                    return;
+                }
             }
             std::thread::sleep(Duration::from_millis(500));
         }
@@ -474,7 +511,8 @@ mod tests {
             step,
             Startup::Continue(StartupInfo {
                 note: Some("Updated to 0.1.1-alpha.7.".into()),
-                just_installed: true
+                just_installed: true,
+                skipped_version: None,
             })
         );
     }
@@ -497,6 +535,35 @@ mod tests {
             panic!("expected Continue");
         };
         assert!(info.note.unwrap().contains("went back to 0.1.1-alpha.6"));
+        assert_eq!(info.skipped_version.as_deref(), Some("0.1.1-alpha.7"));
+    }
+
+    #[test]
+    fn refuses_a_zip_with_a_data_folder() {
+        let (_exe_dir, data_dir) = setup("datazip");
+        let zip_path = data_dir.join("download.zip");
+        make_zip(
+            &zip_path,
+            &[
+                ("Athena/Athena.exe", "new exe"),
+                ("Athena/Data/settings.toml", "overwritten"),
+            ],
+        );
+        assert!(stage(&zip_path, &data_dir, "0.1.1-alpha.7").is_err());
+        assert!(!is_staged(&data_dir));
+        assert_eq!(read(&data_dir.join("settings.toml")), "mine");
+    }
+
+    #[test]
+    fn cleans_up_an_unfinished_download() {
+        let (exe_dir, data_dir) = setup("leftover");
+        let update = update_dir(&data_dir);
+        fs::create_dir_all(update.join(STAGED_DIR)).unwrap();
+        fs::write(update.join(STAGED_DIR).join("half"), "x").unwrap();
+        fs::write(update.join(DOWNLOAD_FILE), "x").unwrap();
+        on_startup(&data_dir, &exe_dir, Some("0.1.1-alpha.6"));
+        assert!(!update.join(STAGED_DIR).exists());
+        assert!(!update.join(DOWNLOAD_FILE).exists());
     }
 
     #[test]

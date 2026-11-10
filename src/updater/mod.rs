@@ -127,6 +127,8 @@ pub struct Updater {
     checking: bool,
     /// True on the first start after an update, until the first frame.
     confirm_pending: bool,
+    /// A version that was rolled back; the startup check doesn't offer it.
+    skipped_version: Option<String>,
     data_dir: PathBuf,
 }
 
@@ -172,6 +174,7 @@ impl Updater {
             checked_at: None,
             checking: check,
             confirm_pending: startup.just_installed,
+            skipped_version: startup.skipped_version,
             data_dir: data_dir.path.clone(),
         }
     }
@@ -201,7 +204,7 @@ impl Updater {
                 match result {
                     Ok(result) => {
                         self.token_expires = result.token_expires;
-                        self.found(result.newest);
+                        self.found(result.newest, manual);
                     }
                     Err(error) => {
                         if manual {
@@ -235,7 +238,7 @@ impl Updater {
     }
 
     /// A check finished: offer the release if it is newer than us.
-    fn found(&mut self, newest: Option<Release>) {
+    fn found(&mut self, newest: Option<Release>, manual: bool) {
         let current = current_version();
         let newer = newest.filter(|release| current.as_ref().is_none_or(|c| release.version > *c));
         match newer {
@@ -244,6 +247,19 @@ impl Updater {
                 if matches!(self.strip, Strip::Error(_)) {
                     self.strip = Strip::Hidden;
                 }
+            }
+            Some(release)
+                if !manual && self.skipped_version.as_deref() == Some(&release.version_text) =>
+            {
+                // It was installed before and didn't start, so don't offer
+                // it on its own again. "Check for updates" still offers it.
+                self.status = Some((
+                    Tone::Normal,
+                    format!(
+                        "{} is available, but it didn't start last time, so it isn't offered on startup.",
+                        release.version_text
+                    ),
+                ));
             }
             Some(release) => {
                 self.status = Some((
@@ -684,7 +700,7 @@ fn download_and_stage(
     let update_dir = install::update_dir(data_dir);
     std::fs::create_dir_all(&update_dir)
         .map_err(|error| format!("can't create {}: {error}", update_dir.display()))?;
-    let zip_path = update_dir.join("download.zip");
+    let zip_path = update_dir.join(install::DOWNLOAD_FILE);
     let result = github::download(client, token, release, &zip_path, cancel, |done, total| {
         send(Event::Progress { done, total })
     })
