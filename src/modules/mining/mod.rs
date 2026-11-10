@@ -51,8 +51,7 @@ use self::state::{SavedCharacter, SavedState};
 use self::store::{HistorySnapshot, HistoryStore, HistoryUpdate};
 use self::watcher::{FileOffset, GameLogWatcher, WatchEvent};
 use super::{Module, ModuleContext, SharedStaticData};
-use crate::overlay::OverlayStatus;
-use crate::overlay::bars::CardBars;
+use crate::overlay::mining_bars::{BarsOverlay, OverlayPlace};
 use crate::settings::Settings;
 use crate::static_data::StaticData;
 use crate::storage::Saver;
@@ -148,8 +147,10 @@ pub struct MiningSupervisor {
     last_tick: Instant,
     /// The EVE day the history snapshot was made on, to refresh it at midnight.
     history_day: i64,
-    /// What the card overlay saw on the last frame, for Settings.
-    overlay_status: OverlayStatus,
+    /// True while the bars overlay can be dragged and resized ("Move /
+    /// resize overlay" in Settings). Not saved: Athena always starts with
+    /// clicks going through the overlay.
+    overlay_move_mode: bool,
 }
 
 /// The current time as EVE time (UTC).
@@ -248,7 +249,7 @@ impl MiningSupervisor {
             last_state_save: Instant::now(),
             last_tick: Instant::now(),
             history_day: store::day_start(now().unix_seconds),
-            overlay_status: OverlayStatus::default(),
+            overlay_move_mode: false,
         }
     }
 
@@ -438,8 +439,7 @@ impl Module for MiningSupervisor {
         "Mining Supervisor"
     }
 
-    fn update(&mut self, ctx: &ModuleContext) {
-        self.overlay_status = ctx.overlay;
+    fn update(&mut self, _ctx: &ModuleContext) {
         // Drain every channel. `try_recv` returns at once when it's empty.
         while let Ok(event) = self.watcher.events.try_recv() {
             match event {
@@ -535,31 +535,43 @@ impl Module for MiningSupervisor {
         ui::show(self, ui);
     }
 
-    fn card_bars(&self) -> Option<CardBars> {
-        if !self.settings.card_bars {
+    fn bars_overlay(&self) -> Option<BarsOverlay> {
+        let settings = &self.settings.overlay;
+        if !settings.enabled {
             return None;
         }
+        // In the same order as the Live view; characters hidden there get
+        // no bar either.
         let bars = self
-            .trackers
-            .values()
-            // Characters hidden from the Live view get no bar either.
-            .filter(|t| self.settings.character(&t.character).show)
-            .map(|t| ui::card_bar(self, t))
+            .settings
+            .ordered(self.trackers.keys())
+            .iter()
+            .filter(|name| self.settings.character(name).show)
+            .filter_map(|name| self.trackers.get(name))
+            .map(|tracker| ui::overlay_bar(self, tracker))
             .collect();
-        // Every name we know, hidden ones too, for matching names to cards.
-        let mut all_names: Vec<String> = self.trackers.keys().cloned().collect();
-        for name in self.settings.characters.keys() {
-            if !self.trackers.contains_key(name) {
-                all_names.push(name.clone());
-            }
-        }
-        Some(CardBars {
+        // Percent (0-100) to 0-255.
+        let alpha = |percent: f64| (percent.clamp(0.0, 100.0) * 2.55).round() as u8;
+        Some(BarsOverlay {
             bars,
-            all_names,
+            position: settings.position,
+            width_px: settings.width_px,
             // Also limits a hand-edited value in mining.toml.
-            height_px: self.settings.card_bar_height_px.clamp(2.0, 20.0) as f32,
+            bar_height_px: settings.bar_height_px.clamp(2.0, 20.0).round() as i32,
+            show_names: settings.show_names,
+            show_percent: settings.show_percent,
+            background_alpha: alpha(settings.background_opacity),
+            bar_alpha: alpha(settings.bar_opacity.max(10.0)),
             compressed_color: ui::PURPLE,
+            move_mode: self.overlay_move_mode,
         })
+    }
+
+    fn bars_overlay_moved(&mut self, place: OverlayPlace) {
+        let overlay = &mut self.settings.overlay;
+        overlay.position = Some([place.x, place.y]);
+        overlay.width_px = place.width;
+        self.settings_edited();
     }
 
     fn settings_changed(&mut self, settings: &Settings) {

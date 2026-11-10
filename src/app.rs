@@ -5,7 +5,7 @@ use egui_dock::{DockArea, Style};
 
 use crate::layout::{Layout, Tab};
 use crate::modules::{self, Module, ModuleContext};
-use crate::overlay::{CardOverlay, OverlayStatus};
+use crate::overlay::MiningOverlay;
 use crate::settings::{FilePollRate, Settings};
 use crate::storage::{DataDir, Saver};
 
@@ -16,10 +16,8 @@ pub struct AthenaApp {
     data_dir: DataDir,
     saver: Saver,
     settings_panel: SettingsPanel,
-    /// The window drawn over EVE-APM Preview's cards.
-    card_overlay: CardOverlay,
-    /// What the overlay saw on the last frame, shown in the modules' settings.
-    overlay_status: OverlayStatus,
+    /// The Mining Supervisor's hold bars overlay.
+    mining_overlay: MiningOverlay,
     /// The layout text we last handed to the saver, so we only save when it changed.
     last_saved_layout: String,
 }
@@ -63,8 +61,7 @@ impl AthenaApp {
             last_frame_cpu: None,
         };
         AthenaApp {
-            card_overlay: CardOverlay::new(egui_ctx),
-            overlay_status: OverlayStatus::default(),
+            mining_overlay: MiningOverlay::new(egui_ctx),
             modules,
             layout,
             settings,
@@ -123,23 +120,27 @@ fn toggle_tab(ui: &mut egui::Ui, layout: &mut Layout, tab: Tab, title: &str) {
 impl eframe::App for AthenaApp {
     // Runs before every frame, and also while the window is minimized when a
     // background thread called `request_repaint`. Modules drain their channels here.
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let module_ctx = ModuleContext {
             settings: &self.settings,
-            overlay: self.overlay_status,
         };
         for module in &mut self.modules {
             module.update(&module_ctx);
         }
         // Here rather than in `ui`, because `logic` also runs while the main
-        // window is minimized, and the overlay must stay open then.
-        let bars = self.modules.iter().find_map(|m| m.card_bars());
-        self.overlay_status = self.card_overlay.keep_alive(ctx, bars);
+        // window is minimized, and the overlay must keep up then.
+        if let Some(place) = self.mining_overlay.take_moved() {
+            for module in &mut self.modules {
+                module.bars_overlay_moved(place);
+            }
+        }
+        let bars = self.modules.iter().find_map(|m| m.bars_overlay());
+        self.mining_overlay.show(bars);
     }
 
     /// The colour every window is cleared to before drawing. eframe uses one
-    /// colour for all windows, and the overlay must be see-through, so it is
-    /// fully transparent; the main window paints its own background in `ui`.
+    /// colour for all windows. It is fully transparent and every window
+    /// paints its own background (the main window does it in `ui`).
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0; 4]
     }
@@ -160,8 +161,6 @@ impl eframe::App for AthenaApp {
             settings: &mut self.settings,
             data_dir: &self.data_dir,
             panel: &mut self.settings_panel,
-            card_overlay: &mut self.card_overlay,
-            overlay_status: self.overlay_status,
             settings_changed: &mut settings_changed,
         };
         DockArea::new(&mut self.layout.dock)
@@ -204,8 +203,6 @@ struct TabViewer<'a> {
     settings: &'a mut Settings,
     data_dir: &'a DataDir,
     panel: &'a mut SettingsPanel,
-    card_overlay: &'a mut CardOverlay,
-    overlay_status: OverlayStatus,
     settings_changed: &'a mut bool,
 }
 
@@ -231,7 +228,6 @@ impl egui_dock::TabViewer for TabViewer<'_> {
             Tab::Module(id) => {
                 let ctx = ModuleContext {
                     settings: self.settings,
-                    overlay: self.overlay_status,
                 };
                 match self.modules.iter_mut().find(|m| m.id() == id) {
                     Some(module) => module.ui(ui, &ctx),
@@ -316,54 +312,7 @@ fn settings_ui(ui: &mut egui::Ui, viewer: &mut TabViewer) {
             ui.label(format!("Last frame CPU time: {:.2} ms", cpu * 1000.0));
         }
 
-        ui.add_space(12.0);
-        overlay_diagnostics_ui(ui, viewer.card_overlay);
     });
-}
-
-/// The overlay part of Diagnostics: a switch for the debug outlines and what
-/// the card finder sees, to check the overlay and measure its cost.
-fn overlay_diagnostics_ui(ui: &mut egui::Ui, overlay: &mut CardOverlay) {
-    ui.label(egui::RichText::new("Overlay").strong());
-    if !CardOverlay::is_supported() {
-        ui.label("The overlay works on Windows only.");
-        return;
-    }
-    let mut outlines = overlay.debug_outlines();
-    if ui
-        .checkbox(
-            &mut outlines,
-            "Outline the EVE-APM Preview cards Athena finds",
-        )
-        .changed()
-    {
-        overlay.set_debug_outlines(outlines);
-    }
-    if !outlines {
-        return;
-    }
-    let view = overlay.cards();
-    if !view.apm_running {
-        ui.label("No EVE-APM Preview cards found.");
-    } else {
-        ui.label(format!("Cards found: {}", view.cards.len()));
-        for card in &view.cards {
-            ui.label(format!(
-                "  {} ({} × {} px at {}, {})",
-                card.title,
-                card.rect.width(),
-                card.rect.height(),
-                card.rect.left,
-                card.rect.top
-            ));
-        }
-    }
-    let stats = overlay.stats();
-    ui.label(format!("Overlay frames drawn: {}", stats.frames_drawn));
-    ui.label(format!(
-        "Last overlay frame: {:.2} ms",
-        stats.last_draw.as_secs_f64() * 1000.0
-    ));
 }
 
 fn renderer_name() -> &'static str {
