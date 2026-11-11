@@ -55,6 +55,9 @@ pub struct MiningSettings {
     pub order: Vec<String>,
     /// By character name.
     pub characters: BTreeMap<String, CharacterSettings>,
+    /// How many columns of character cards the Live view shows, 1 to 4.
+    /// Each column is 480 px wide, so more columns need a wider tab.
+    pub columns: u8,
     /// The hold bars overlay. Last, because it is a TOML table.
     pub overlay: OverlaySettings,
 }
@@ -110,6 +113,7 @@ impl Default for MiningSettings {
             price_side: PriceSide::Buy,
             order: Vec::new(),
             characters: BTreeMap::new(),
+            columns: 1,
             overlay: OverlaySettings::default(),
         }
     }
@@ -141,6 +145,12 @@ impl MiningSettings {
 
     pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
         toml::to_string_pretty(self)
+    }
+
+    /// The column count, kept between 1 and 4 even if the file was edited
+    /// by hand.
+    pub fn columns(&self) -> usize {
+        usize::from(self.columns.clamp(1, 4))
     }
 
     pub fn character(&self, name: &str) -> CharacterSettings {
@@ -279,6 +289,22 @@ mod tests {
         let empty: MiningSettings = toml::from_str("").unwrap();
         assert_eq!(empty, MiningSettings::default());
         assert!((empty.yields().ore - 0.9063).abs() < 1e-12);
+        // Files from before the column setting get one column.
+        assert_eq!(empty.columns(), 1);
+    }
+
+    #[test]
+    fn columns_stay_between_one_and_four() {
+        let columns = |n: u8| {
+            MiningSettings {
+                columns: n,
+                ..MiningSettings::default()
+            }
+            .columns()
+        };
+        assert_eq!(columns(0), 1);
+        assert_eq!(columns(3), 3);
+        assert_eq!(columns(9), 4);
     }
 
     #[test]
