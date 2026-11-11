@@ -55,6 +55,12 @@ pub struct MiningSettings {
     pub alert_threshold: bool,
     pub alert_full: bool,
     pub alert_idle: bool,
+    /// Which alerts play a sound (only when the alert itself is on).
+    pub sound_crystal: bool,
+    pub sound_stopped: bool,
+    pub sound_threshold: bool,
+    pub sound_full: bool,
+    pub sound_idle: bool,
     /// Reprocessing yield in percent for ore, ice and moon ore.
     pub ore_yield_percent: f64,
     /// Decompression yield in percent for compressed gas.
@@ -125,6 +131,11 @@ impl Default for MiningSettings {
             alert_threshold: true,
             alert_full: true,
             alert_idle: true,
+            sound_crystal: true,
+            sound_stopped: true,
+            sound_threshold: true,
+            sound_full: true,
+            sound_idle: true,
             ore_yield_percent: 90.63,
             gas_yield_percent: 95.0,
             price_side: PriceSide::Buy,
@@ -169,6 +180,19 @@ impl MiningSettings {
             Alert::HoldFull => self.alert_full,
             Alert::Idle { .. } => self.alert_idle,
         }
+    }
+
+    /// True if this kind of alert should play a sound: the alert is on, its
+    /// own sound is on, and the "Play a sound on alerts" switch is on.
+    pub fn alert_sound(&self, alert: &Alert) -> bool {
+        let own = match alert {
+            Alert::CrystalDestroyed { .. } => self.sound_crystal,
+            Alert::MinerStopped { .. } => self.sound_stopped,
+            Alert::HoldAboveThreshold { .. } => self.sound_threshold,
+            Alert::HoldFull => self.sound_full,
+            Alert::Idle { .. } => self.sound_idle,
+        };
+        self.sound && own && self.alert_enabled(alert)
     }
 
     /// How long alert sounds stay quiet after one has played. Kept between
@@ -285,6 +309,24 @@ mod tests {
         assert!(!settings.alert_enabled(&Alert::HoldFull));
         assert!(settings.alert_enabled(&stopped));
         assert!(settings.alert_enabled(&Alert::Idle { minutes: 5 }));
+    }
+
+    #[test]
+    fn sound_needs_alert_own_switch_and_main_switch() {
+        let mut settings = MiningSettings::default();
+        assert!(settings.alert_sound(&Alert::HoldFull));
+
+        settings.sound_full = false;
+        assert!(!settings.alert_sound(&Alert::HoldFull));
+        assert!(settings.alert_enabled(&Alert::HoldFull));
+        assert!(settings.alert_sound(&Alert::Idle { minutes: 5 }));
+
+        // A switched-off alert never beeps, even with its sound on.
+        settings.alert_idle = false;
+        assert!(!settings.alert_sound(&Alert::Idle { minutes: 5 }));
+
+        settings.sound = false;
+        assert!(!settings.alert_sound(&Alert::HoldAboveThreshold { percent: 75.0 }));
     }
 
     #[test]

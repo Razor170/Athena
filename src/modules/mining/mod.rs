@@ -287,13 +287,14 @@ impl MiningSupervisor {
         self.state_dirty = true;
     }
 
-    /// Adds an alert to the list and beeps if that is switched on. Alerts
+    /// Adds an alert to the list and beeps if its sound is switched on. Alerts
     /// switched off in Settings are dropped here; the tracker still keeps
     /// its state, so the cards show it either way.
     fn raise(&mut self, time: LogTime, character: &str, alert: Alert) {
         if !self.settings.alert_enabled(&alert) {
             return;
         }
+        let play_sound = self.settings.alert_sound(&alert);
         let (text, level) = match alert {
             Alert::HoldAboveThreshold { percent } => {
                 (format!("Ore hold at {percent:.0}%"), AlertLevel::Warning)
@@ -315,7 +316,7 @@ impl MiningSupervisor {
             level,
         });
         self.alerts.truncate(ALERTS_KEPT);
-        if self.settings.sound {
+        if play_sound {
             let now = Instant::now();
             if sound_allowed(self.last_sound, now, self.settings.quiet_time()) {
                 sound::alert();
