@@ -183,7 +183,7 @@ impl MiningSettings {
     }
 
     /// True if this kind of alert should play a sound: the alert is on, its
-    /// own sound is on, and the "Play a sound on alerts" switch is on.
+    /// own sound is on, and the "Play alert sounds" switch is on.
     pub fn alert_sound(&self, alert: &Alert) -> bool {
         let own = match alert {
             Alert::CrystalDestroyed { .. } => self.sound_crystal,
