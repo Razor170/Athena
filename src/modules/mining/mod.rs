@@ -119,6 +119,8 @@ pub struct MiningSupervisor {
     /// False until the watcher has read what was already in the logs.
     caught_up: bool,
     alerts: VecDeque<AlertEntry>,
+    /// When the last alert sound played, for the quiet time after it.
+    last_sound: Option<Instant>,
 
     /// The last two belt scans; the belt rate compares them.
     belt_scans: BeltScans,
@@ -234,6 +236,7 @@ impl MiningSupervisor {
             offsets,
             caught_up: false,
             alerts: VecDeque::new(),
+            last_sound: None,
             belt_scans: BeltScans::default(),
             history: HistorySnapshot::default(),
             watcher,
@@ -284,8 +287,13 @@ impl MiningSupervisor {
         self.state_dirty = true;
     }
 
-    /// Adds an alert to the list and beeps if that is switched on.
+    /// Adds an alert to the list and beeps if that is switched on. Alerts
+    /// switched off in Settings are dropped here; the tracker still keeps
+    /// its state, so the cards show it either way.
     fn raise(&mut self, time: LogTime, character: &str, alert: Alert) {
+        if !self.settings.alert_enabled(&alert) {
+            return;
+        }
         let (text, level) = match alert {
             Alert::HoldAboveThreshold { percent } => {
                 (format!("Ore hold at {percent:.0}%"), AlertLevel::Warning)
@@ -308,7 +316,11 @@ impl MiningSupervisor {
         });
         self.alerts.truncate(ALERTS_KEPT);
         if self.settings.sound {
-            sound::alert();
+            let now = Instant::now();
+            if sound_allowed(self.last_sound, now, self.settings.quiet_time()) {
+                sound::alert();
+                self.last_sound = Some(now);
+            }
         }
     }
 
@@ -597,6 +609,18 @@ impl Module for MiningSupervisor {
     }
 }
 
+/// True if an alert sound may play now: no sound yet, or the last one was
+/// at least `quiet` ago. Silent alerts don't restart the quiet time, so a
+/// long run of alerts still beeps about once per quiet time.
+fn sound_allowed(last_sound: Option<Instant>, now: Instant, quiet: Duration) -> bool {
+    match last_sound {
+        None => true,
+        // `saturating_duration_since` gives 0 instead of panicking if the
+        // clock values are out of order.
+        Some(last) => now.saturating_duration_since(last) >= quiet,
+    }
+}
+
 /// The alert sound.
 mod sound {
     /// Plays the Windows "exclamation" sound. It returns at once; Windows
@@ -614,4 +638,37 @@ mod sound {
 
     #[cfg(not(windows))]
     pub fn alert() {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sounds_stay_quiet_for_the_quiet_time() {
+        let quiet = Duration::from_secs(10);
+        let start = Instant::now();
+        assert!(sound_allowed(None, start, quiet));
+        assert!(!sound_allowed(
+            Some(start),
+            start + Duration::from_secs(3),
+            quiet
+        ));
+        assert!(!sound_allowed(
+            Some(start),
+            start + Duration::from_millis(9_999),
+            quiet
+        ));
+        assert!(sound_allowed(
+            Some(start),
+            start + Duration::from_secs(10),
+            quiet
+        ));
+    }
+
+    #[test]
+    fn zero_quiet_time_always_allows_sound() {
+        let start = Instant::now();
+        assert!(sound_allowed(Some(start), start, Duration::ZERO));
+    }
 }

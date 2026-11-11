@@ -1295,12 +1295,63 @@ fn settings_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
                 }
                 ui.end_row();
             });
+
+        // One switch per alert kind, each with the colour it has in the log.
+        ui.label(small("Which alerts to raise").color(DIM));
+        egui::Frame::new()
+            .fill(TILE_FILL)
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let switches = [
+                    (&mut settings.alert_crystal, PURPLE, "Crystal broke"),
+                    (&mut settings.alert_stopped, RED, "Miner stopped"),
+                    (&mut settings.alert_threshold, YELLOW, "Hold over alert level"),
+                    (&mut settings.alert_full, RED, "Hold full"),
+                    (&mut settings.alert_idle, DIM, "Idle"),
+                ];
+                for (on, color, text) in switches {
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(on, "").changed() {
+                            changed = true;
+                        }
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 4.5, color);
+                        ui.label(text);
+                    });
+                }
+            });
+
         if ui
             .checkbox(&mut settings.sound, "Play a sound on alerts")
             .changed()
         {
             changed = true;
         }
+        egui::Grid::new("alert_quiet")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Quiet time after a sound (s)");
+                if let Some(Some(value)) = number_field(
+                    ui,
+                    buffers,
+                    "quiet",
+                    Some(settings.quiet_seconds),
+                    "10",
+                    110.0,
+                ) {
+                    settings.quiet_seconds = value.min(600.0);
+                    changed = true;
+                }
+                ui.end_row();
+            });
+        ui.label(
+            small("After an alert sound, other alerts make no sound for this long. They still show in the alert log.")
+                .color(DIM),
+        );
         ui.label(
             small("\"Miner stopped\" is detected automatically from each character's cycle times.")
                 .color(DIM),

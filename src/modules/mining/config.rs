@@ -3,11 +3,12 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use super::prices::{PriceSide, Yields};
-use super::session::TrackerSettings;
+use super::session::{Alert, TrackerSettings};
 
 const FILE_NAME: &str = "mining.toml";
 
@@ -44,6 +45,16 @@ pub struct MiningSettings {
     pub idle_minutes: f64,
     /// Beep on alerts.
     pub sound: bool,
+    /// After an alert sound, other alerts stay silent for this many seconds.
+    /// They still show in the alert log.
+    pub quiet_seconds: f64,
+    /// Which alerts are raised at all. A switched-off alert makes no sound
+    /// and adds no line to the alert log; the cards still show the state.
+    pub alert_crystal: bool,
+    pub alert_stopped: bool,
+    pub alert_threshold: bool,
+    pub alert_full: bool,
+    pub alert_idle: bool,
     /// Reprocessing yield in percent for ore, ice and moon ore.
     pub ore_yield_percent: f64,
     /// Decompression yield in percent for compressed gas.
@@ -108,6 +119,12 @@ impl Default for MiningSettings {
             alert_percent: 70.0,
             idle_minutes: 5.0,
             sound: true,
+            quiet_seconds: 10.0,
+            alert_crystal: true,
+            alert_stopped: true,
+            alert_threshold: true,
+            alert_full: true,
+            alert_idle: true,
             ore_yield_percent: 90.63,
             gas_yield_percent: 95.0,
             price_side: PriceSide::Buy,
@@ -141,6 +158,28 @@ impl MiningSettings {
                 )),
             ),
         }
+    }
+
+    /// True if this kind of alert is switched on in Settings.
+    pub fn alert_enabled(&self, alert: &Alert) -> bool {
+        match alert {
+            Alert::CrystalDestroyed { .. } => self.alert_crystal,
+            Alert::MinerStopped { .. } => self.alert_stopped,
+            Alert::HoldAboveThreshold { .. } => self.alert_threshold,
+            Alert::HoldFull => self.alert_full,
+            Alert::Idle { .. } => self.alert_idle,
+        }
+    }
+
+    /// How long alert sounds stay quiet after one has played. Kept between
+    /// 0 s and 10 minutes even if the file was edited by hand.
+    pub fn quiet_time(&self) -> Duration {
+        let seconds = if self.quiet_seconds.is_finite() {
+            self.quiet_seconds.clamp(0.0, 600.0)
+        } else {
+            0.0
+        };
+        Duration::from_secs_f64(seconds)
     }
 
     pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
@@ -221,6 +260,52 @@ impl MiningSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alert_switches_pick_the_right_kind() {
+        let mut settings = MiningSettings::default();
+        let crystal = Alert::CrystalDestroyed {
+            module: "Modulated Strip Miner II".to_string(),
+        };
+        let stopped = Alert::MinerStopped {
+            reason: "deactivates".to_string(),
+        };
+        let all = [
+            crystal.clone(),
+            stopped.clone(),
+            Alert::HoldAboveThreshold { percent: 71.0 },
+            Alert::HoldFull,
+            Alert::Idle { minutes: 5 },
+        ];
+        assert!(all.iter().all(|a| settings.alert_enabled(a)));
+
+        settings.alert_crystal = false;
+        settings.alert_full = false;
+        assert!(!settings.alert_enabled(&crystal));
+        assert!(!settings.alert_enabled(&Alert::HoldFull));
+        assert!(settings.alert_enabled(&stopped));
+        assert!(settings.alert_enabled(&Alert::Idle { minutes: 5 }));
+    }
+
+    #[test]
+    fn old_settings_files_get_the_new_alert_defaults() {
+        let settings: MiningSettings = toml::from_str("hold_m3 = 20000.0").unwrap();
+        assert!(settings.alert_crystal && settings.alert_stopped && settings.alert_idle);
+        assert_eq!(settings.quiet_time(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn quiet_time_is_clamped() {
+        let mut settings = MiningSettings {
+            quiet_seconds: -5.0,
+            ..MiningSettings::default()
+        };
+        assert_eq!(settings.quiet_time(), Duration::ZERO);
+        settings.quiet_seconds = f64::NAN;
+        assert_eq!(settings.quiet_time(), Duration::ZERO);
+        settings.quiet_seconds = 1e9;
+        assert_eq!(settings.quiet_time(), Duration::from_secs(600));
+    }
 
     #[test]
     fn character_overrides_fall_back_to_defaults() {
