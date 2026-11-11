@@ -1,0 +1,37 @@
+Gneiss IV-Grade	18,490	92,450 m3	28,000,000.00 ISK	35 km
+Gneiss II-Grade	10,511	52,555 m3	17,100,000.00 ISK	30 km
+Kylixium IV-Grade	134,697	161,636 m3	24,800,000.00 ISK	19 km
+Kylixium IV-Grade	89,627	107,552 m3	16,500,000.00 ISK	39 km
+Kylixium III-Grade	446,875	536,250 m3	-	30 km
+Kylixium III-Grade	433,333	519,999 m3	-	39 km
+Kylixium II-Grade	402,783	483,339 m3	83,300,000.00 ISK	16 km
+Kylixium II-Grade	342,413	410,895 m3	70,800,000.00 ISK	22 km
+Kylixium II-Grade	487,286	584,743 m3	101,000,000.00 ISK	28 km
+Kylixium II-Grade	487,500	585,000 m3	101,000,000.00 ISK	31 km
+Kylixium II-Grade	616,244	739,492 m3	127,000,000.00 ISK	32 km
+Kylixium	426,692	512,030 m3	65,000,000.00 ISK	3,801 m
+Kylixium	371,826	446,191 m3	56,600,000.00 ISK	11 km
+Kylixium	369,665	443,598 m3	56,300,000.00 ISK	18 km
+Kylixium	470,713	564,855 m3	71,700,000.00 ISK	28 km
+Kylixium	402,160	482,592 m3	61,300,000.00 ISK	35 km
+Kylixium	587,524	705,028 m3	89,500,000.00 ISK	35 km
+Kylixium	91,906	110,287 m3	14,000,000.00 ISK	40 km
+Kylixium	438,646	526,375 m3	66,800,000.00 ISK	48 km
+Jaspet IV-Grade
+Jaspet IV-Grade	32,500	65,000 m3	-	38 km
+Jaspet III-Grade
+Jaspet III-Grade	64,800	129,600 m3	18,900,000.00 ISK	44 km
+Jaspet II-Grade
+Jaspet II-Grade	65,000	130,000 m3	18,600,000.00 ISK	40 km
+Jaspet
+Jaspet	33,800	67,600 m3	13,200,000.00 ISK	19 km
+Jaspet	31,200	62,400 m3	12,200,000.00 ISK	19 km
+Plagioclase IV-Grade
+Plagioclase IV-Grade	757,960	265,286 m3	22,500,000.00 ISK	38 km
+Plagioclase III-Grade
+Plagioclase III-Grade	547,826	191,739 m3	15,900,000.00 ISK	8,692 m
+Plagioclase II-Grade
+Plagioclase II-Grade	445,714	155,999 m3	12,600,000.00 ISK	53 km
+Plagioclase
+Plagioclase	522,700	182,945 m3	14,300,000.00 ISK	19 km
+Plagioclase	200,585	70,204 m3	5,490,000.00 ISK	51 km

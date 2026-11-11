@@ -11,7 +11,7 @@
 //!
 //! Lines with only an ore name are group headers and are skipped. The ISK
 //! column is ignored: it is the raw ore price, while Athena values ore by
-//! what it reprocesses into.
+//! what it reprocesses into. It is "-" for ore without a market price.
 //!
 //! Two scans of the same belt taken some time apart give the rate at which
 //! the belt is being mined by everyone on it, and from that an estimate of
@@ -195,8 +195,9 @@ fn parse_rock(line: &str) -> Option<Rock> {
     let units = parse_whole_number(columns[1])?;
     // "499,992 m3"
     let volume_m3 = parse_number(columns[2].trim_end_matches("m3").trim_end_matches("m³"))?;
-    // Column 3 is ISK, ignored. Column 4 is the distance.
-    if !columns[3].ends_with("ISK") {
+    // Column 3 is ISK, ignored. EVE shows "-" when the ore has no market
+    // price. Column 4 is the distance.
+    if !columns[3].ends_with("ISK") && columns[3] != "-" {
         return None;
     }
     let distance_m = parse_distance(columns[4])?;
@@ -292,6 +293,40 @@ Mordunium\t2,855,327\t285,532 m3\t44,300,000.00 ISK\t38 km
         );
         assert_eq!(scan.rocks[3].distance_m, 1_507.0);
         assert_eq!(scan.total_m3(), 2_295_481.0);
+    }
+
+    /// Kevin's real scan (2026-11-11), copied in EVE. It has no character
+    /// or corp names. Some rocks show "-" instead of an ISK value, and the
+    /// first ores have no group header lines.
+    const KEVIN_SCAN: &str = include_str!("testdata/belt_scan_kylixium.txt");
+
+    #[test]
+    fn parses_a_real_scan_with_missing_isk() {
+        let scan = BeltScan::parse(KEVIN_SCAN, at(0)).unwrap();
+        assert_eq!(scan.rock_count(), 29);
+        assert_eq!(scan.total_m3(), 9_385_640.0);
+        // "-" in the ISK column.
+        assert_eq!(
+            scan.rocks[4],
+            Rock {
+                ore: "Kylixium III-Grade".to_string(),
+                units: 446_875,
+                volume_m3: 536_250.0,
+                distance_m: 30_000.0,
+            }
+        );
+        // Distances in metres.
+        assert_eq!(scan.rocks[11].distance_m, 3_801.0);
+        let families = scan.by_family();
+        assert_eq!(families[0].family, "Kylixium");
+        assert_eq!(families[0].rocks, 17);
+        assert_eq!(families.len(), 4);
+    }
+
+    #[test]
+    fn rejects_other_isk_placeholders() {
+        let line = "Omber\t900,000\t540,000 m3\tn/a\t64 km\n";
+        assert!(BeltScan::parse(line, at(0)).is_none());
     }
 
     #[test]
