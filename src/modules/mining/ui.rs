@@ -17,8 +17,15 @@ use super::store::{PeriodTotal, SessionKind, StoredSession, Totals};
 use super::{AlertLevel, HistoryMode, MiningSupervisor, View};
 use crate::overlay::mining_bars::HoldBar;
 
-/// The panel is designed for a quarter of a 1080p screen.
+/// The panel is designed for a quarter of a 1080p screen. With more than one
+/// column of cards on the Live view, each column is at most this wide.
 const MAX_WIDTH: f32 = 480.0;
+/// Card columns may shrink to this so that four fit on a 1080p screen
+/// (4 x 480 px plus gaps is a bit more than 1920). Below it a column is
+/// dropped instead.
+const MIN_COLUMN_WIDTH: f32 = 400.0;
+/// Space between card columns.
+const COLUMN_GAP: f32 = 6.0;
 /// Width of the name column on the cards and in the alert list.
 const NAME_WIDTH: f32 = 92.0;
 
@@ -47,14 +54,21 @@ pub fn show(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.set_max_width(MAX_WIDTH);
+            // Only the Live view grows with the column setting; History and
+            // Settings stay one column wide.
+            let columns = live_columns(module.settings.columns(), ui.available_width());
+            if module.view == View::Live {
+                ui.set_max_width(columns.total_width());
+            } else {
+                ui.set_max_width(MAX_WIDTH);
+            }
             ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
             view_tabs(module, ui);
             for problem in module.problems.values() {
                 ui.colored_label(YELLOW, small(problem));
             }
             match module.view {
-                View::Live => live_view(module, ui),
+                View::Live => live_view(module, ui, columns),
                 View::History => history_view(module, ui),
                 View::Settings => settings_view(module, ui),
             }
@@ -95,6 +109,40 @@ fn view_tabs(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
     });
 }
 
+/// How the Live view's character cards are laid out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Columns {
+    count: usize,
+    /// Width of one column in pixels.
+    width: f32,
+}
+
+impl Columns {
+    /// All columns plus the gaps between them.
+    fn total_width(self) -> f32 {
+        let n = self.count as f32;
+        n * self.width + (n - 1.0) * COLUMN_GAP
+    }
+}
+
+/// The column setting fitted into the tab: columns are up to 480 px wide and
+/// shrink to 400 px; when even that doesn't fit, a column is dropped. Always
+/// at least one column.
+fn live_columns(setting: usize, available: f32) -> Columns {
+    let mut count = setting.max(1);
+    loop {
+        let n = count as f32;
+        let width = ((available - (n - 1.0) * COLUMN_GAP) / n).min(MAX_WIDTH);
+        if count == 1 || width >= MIN_COLUMN_WIDTH {
+            return Columns {
+                count,
+                width: width.max(0.0),
+            };
+        }
+        count -= 1;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Live view
 
@@ -107,7 +155,7 @@ fn section_frame() -> egui::Frame {
         .inner_margin(egui::Margin::same(8))
 }
 
-fn live_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
+fn live_view(module: &mut MiningSupervisor, ui: &mut egui::Ui, columns: Columns) {
     let now = LogTime {
         unix_seconds: now_unix(),
     };
@@ -137,26 +185,61 @@ fn live_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
             .color(DIM),
         );
     }
+    let column_width = columns.width;
     let mut emptied = None;
-    ui.spacing_mut().item_spacing.y = 4.0;
-    for name in &names {
-        if let Some(tracker) = module.trackers.get(name)
-            && character_card(module, tracker, ui, now)
-        {
-            emptied = Some(name.clone());
-        }
+    ui.spacing_mut().item_spacing = Vec2::new(COLUMN_GAP, 4.0);
+    // Cards fill a row left to right, then the next row, in Settings order.
+    for row in names.chunks(columns.count) {
+        ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+            for name in row {
+                let Some(tracker) = module.trackers.get(name) else {
+                    continue;
+                };
+                // A fixed-width box for each card, so the columns line up.
+                ui.allocate_ui_with_layout(
+                    Vec2::new(column_width, 0.0),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        ui.set_width(column_width);
+                        if character_card(module, tracker, ui, now) {
+                            emptied = Some(name.clone());
+                        }
+                    },
+                );
+            }
+        });
     }
-    ui.spacing_mut().item_spacing.y = 6.0;
+    ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
     if let Some(name) = emptied {
         module.mark_emptied(&name);
     }
 
-    alert_list(module, ui);
-    belt_scan(module, ui);
+    if columns.count == 1 {
+        alert_list(module, ui);
+        belt_scan(module, ui);
+    } else {
+        // Belt scan on the left (one column wide), alert log next to it.
+        ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+            ui.allocate_ui_with_layout(
+                Vec2::new(column_width, 0.0),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.set_width(column_width);
+                    belt_scan(module, ui);
+                },
+            );
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), 0.0),
+                Layout::top_down(Align::Min),
+                |ui| alert_list(module, ui),
+            );
+        });
+    }
     legend(ui);
 }
 
-/// Session ISK, ISK/h, m³/h, m³/s and the End session button.
+/// Two lines. Top: session ISK, m³ mined, session time and End session.
+/// Bottom: ISK/h, m³/h, m³/s and Empty all. Buttons on the right.
 fn summary_bar(module: &mut MiningSupervisor, ui: &mut egui::Ui, now: LogTime) {
     let mut isk = 0.0;
     let mut m3 = 0.0;
@@ -177,19 +260,18 @@ fn summary_bar(module: &mut MiningSupervisor, ui: &mut egui::Ui, now: LogTime) {
     section_frame()
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            let per_hour = |amount: f64| if hours > 0.01 { amount / hours } else { 0.0 };
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Session").color(DIM));
                 ui.label(RichText::new(isk_text(isk)).color(BRIGHT).strong());
                 ui.add_space(6.0);
-                ui.label(RichText::new("ISK/h").color(DIM));
-                let per_hour = if hours > 0.01 { isk / hours } else { 0.0 };
-                ui.label(RichText::new(isk_text(per_hour)).color(BRIGHT).strong());
-                ui.add_space(6.0);
-                ui.label(RichText::new("m³/h").color(DIM));
-                let m3_hour = if hours > 0.01 { m3 / hours } else { 0.0 };
-                ui.label(RichText::new(thousands(m3_hour)).color(BRIGHT).strong());
-                // Small, so the row still fits in 480 px next to both buttons.
-                ui.label(small(format!("{} m³/s", per_second_text(m3_hour / 3600.0))).color(SOFT));
+                ui.label(RichText::new("Mined").color(DIM));
+                ui.label(
+                    RichText::new(format!("{} m³", short_volume(m3)))
+                        .color(BRIGHT)
+                        .strong(),
+                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let button = egui::Button::new(
                         small("End session").color(Color32::from_rgb(0xf0, 0xd0, 0xa0)),
@@ -208,6 +290,20 @@ fn summary_bar(module: &mut MiningSupervisor, ui: &mut egui::Ui, now: LogTime) {
                     {
                         end_clicked = true;
                     }
+                    if started.is_some() {
+                        ui.label(RichText::new(duration_text(seconds)).color(DIM));
+                    }
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("ISK/h").color(DIM));
+                ui.label(RichText::new(isk_text(per_hour(isk))).color(BRIGHT).strong());
+                ui.add_space(6.0);
+                ui.label(RichText::new("m³/h").color(DIM));
+                let m3_hour = per_hour(m3);
+                ui.label(RichText::new(short_volume(m3_hour)).color(BRIGHT).strong());
+                ui.label(small(format!("{} m³/s", per_second_text(m3_hour / 3600.0))).color(SOFT));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     // A hold EVE called full counts too, even if Athena saw
                     // none of its ore (e.g. loaded before Athena ran).
                     let anything_in_holds = module
@@ -222,9 +318,6 @@ fn summary_bar(module: &mut MiningSupervisor, ui: &mut egui::Ui, now: LogTime) {
                         .clicked()
                     {
                         empty_all_clicked = true;
-                    }
-                    if started.is_some() {
-                        ui.label(RichText::new(duration_text(seconds)).color(DIM));
                     }
                 });
             });
@@ -548,6 +641,7 @@ fn alert_list(module: &MiningSupervisor, ui: &mut egui::Ui) {
         return;
     }
     ui.spacing_mut().item_spacing.y = 2.0;
+    let now = now_unix();
     for alert in &module.alerts {
         let color = match alert.level {
             AlertLevel::Error => RED,
@@ -562,6 +656,7 @@ fn alert_list(module: &MiningSupervisor, ui: &mut egui::Ui) {
             );
             name_label(ui, &alert.character, TEXT, false);
             ui.label(small(&alert.text).color(color));
+            ui.label(small(ago_text(now - alert.time.unix_seconds)).color(DIM));
         });
     }
     ui.spacing_mut().item_spacing.y = 6.0;
@@ -573,6 +668,10 @@ fn belt_scan(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             ui.label(RichText::new("Belt scan").color(BRIGHT).strong());
+            if let Some(latest) = module.belt_scans.latest() {
+                let age = now_unix() - latest.taken.unix_seconds;
+                ui.label(small(format!("Last scan {}", ago_text(age))).color(SOFT));
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("New belt").clicked() {
                     new_belt = true;
@@ -1271,6 +1370,26 @@ fn settings_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
         );
     });
 
+    section_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new("Live layout").color(BRIGHT).strong());
+        ui.horizontal(|ui| {
+            ui.label("Columns");
+            for n in 1..=4u8 {
+                if ui
+                    .radio_value(&mut settings.columns, n, n.to_string())
+                    .changed()
+                {
+                    changed = true;
+                }
+            }
+        });
+        ui.label(
+            small("Each column of character cards is up to 480 px wide (at least 400 px). Make the Mining tab wider to fit them; if the tab is narrower, Athena shows as many columns as fit.")
+                .color(DIM),
+        );
+    });
+
     if crate::overlay::is_supported() {
         section_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -1451,6 +1570,31 @@ fn short_m3(m3: f64) -> String {
     }
 }
 
+/// m³ in the summary bar, short from 10,000 up: "9,874", "10.1k", "245k",
+/// "5.29m", "14.2m". Three digits stay, so the text barely changes width.
+fn short_volume(m3: f64) -> String {
+    // The limits sit just below the round numbers, so 99,960 shows as
+    // "100k" and not "100.0k".
+    if m3 >= 99_950_000.0 {
+        format!("{:.0}m", m3 / 1e6)
+    } else if m3 >= 9_995_000.0 {
+        format!("{:.1}m", m3 / 1e6)
+    } else if m3 >= 999_500.0 {
+        format!("{:.2}m", m3 / 1e6)
+    } else if m3 >= 99_950.0 {
+        format!("{:.0}k", m3 / 1e3)
+    } else if m3 >= 10_000.0 {
+        format!("{:.1}k", m3 / 1e3)
+    } else {
+        thousands(m3)
+    }
+}
+
+/// How long ago something happened: "45 s ago", "12 min ago", "1h 05m ago".
+fn ago_text(seconds: i64) -> String {
+    format!("{} ago", duration_text(seconds.max(0)))
+}
+
 /// "149k", "1.18M".
 fn compact(value: f64) -> String {
     if value >= 1e6 {
@@ -1612,6 +1756,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn column_count_fits_the_tab() {
+        let fit = |setting, available| {
+            let c = live_columns(setting, available);
+            (c.count, c.width)
+        };
+        // Room to spare: full 480 px columns.
+        assert_eq!(fit(2, 2000.0), (2, 480.0));
+        assert_eq!(live_columns(2, 2000.0).total_width(), 966.0);
+        // Four on a 1080p screen: the columns shrink a little.
+        assert_eq!(fit(4, 1900.0), (4, 470.5));
+        // Four wanted, but the tab only has room for two.
+        assert_eq!(fit(4, 1000.0), (2, 480.0));
+        assert_eq!(fit(4, 900.0), (2, 447.0));
+        // Always at least one, even in a narrow tab.
+        assert_eq!(fit(3, 300.0), (1, 300.0));
+        assert_eq!(fit(1, 2000.0), (1, 480.0));
+    }
+
+    #[test]
     fn number_formats() {
         assert_eq!(thousands(112_400.4), "112,400");
         assert_eq!(thousands(999.0), "999");
@@ -1620,6 +1783,16 @@ mod tests {
         assert_eq!(isk_text(498_000_000.0), "498 M");
         assert_eq!(short_m3(24_280_000.0), "24.28 M");
         assert_eq!(compact(149_000.0), "149k");
+        // Kevin's examples, plus the edges.
+        assert_eq!(short_volume(10_124.0), "10.1k");
+        assert_eq!(short_volume(10_124_124.0), "10.1m");
+        assert_eq!(short_volume(9_874.0), "9,874");
+        assert_eq!(short_volume(99_960.0), "100k");
+        assert_eq!(short_volume(245_400.0), "245k");
+        assert_eq!(short_volume(999_700.0), "1.00m");
+        assert_eq!(short_volume(5_290_000.0), "5.29m");
+        assert_eq!(short_volume(9_996_000.0), "10.0m");
+        assert_eq!(short_volume(124_000_000.0), "124m");
         assert_eq!(plain_number(11_500.0), "11,500");
         assert_eq!(plain_number(90.63), "90.63");
     }
@@ -1642,6 +1815,11 @@ mod tests {
     fn time_formats() {
         assert_eq!(duration_text(2 * 3600 + 14 * 60), "2h 14m");
         assert_eq!(duration_text(38 * 60), "38 min");
+        assert_eq!(ago_text(45), "45 s ago");
+        assert_eq!(ago_text(12 * 60 + 5), "12 min ago");
+        assert_eq!(ago_text(3600 + 5 * 60), "1h 05m ago");
+        // A clock a little off never shows a negative time.
+        assert_eq!(ago_text(-3), "0 s ago");
         // 2026-11-08 14:44 UTC.
         let t = 1_794_096_000 + 14 * 3600 + 44 * 60;
         assert_eq!(clock_text(t), "14:44");
