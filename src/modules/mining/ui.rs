@@ -1295,12 +1295,114 @@ fn settings_view(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
                 }
                 ui.end_row();
             });
+
+        // One row per alert kind, with the colour it has in the log: is the
+        // alert raised at all, and does it play a sound.
+        egui::Frame::new()
+            .fill(TILE_FILL)
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let rows = [
+                    (
+                        &mut settings.alert_crystal,
+                        &mut settings.sound_crystal,
+                        PURPLE,
+                        "Crystal broke",
+                    ),
+                    (
+                        &mut settings.alert_stopped,
+                        &mut settings.sound_stopped,
+                        RED,
+                        "Miner stopped",
+                    ),
+                    (
+                        &mut settings.alert_threshold,
+                        &mut settings.sound_threshold,
+                        YELLOW,
+                        "Hold over alert level",
+                    ),
+                    (
+                        &mut settings.alert_full,
+                        &mut settings.sound_full,
+                        RED,
+                        "Hold full",
+                    ),
+                    (
+                        &mut settings.alert_idle,
+                        &mut settings.sound_idle,
+                        DIM,
+                        "Idle",
+                    ),
+                ];
+                let sounds_on = settings.sound;
+                egui::Grid::new("alert_kinds")
+                    .num_columns(3)
+                    .spacing([14.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(small("Alert type").color(DIM));
+                        ui.label(small("Alert").color(DIM));
+                        ui.label(small("Sound").color(DIM));
+                        ui.end_row();
+                        for (alert_on, sound_on, color, text) in rows {
+                            ui.horizontal(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(9.0, 9.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(rect.center(), 4.5, color);
+                                ui.label(text);
+                            });
+                            if ui.checkbox(alert_on, "").changed() {
+                                changed = true;
+                            }
+                            // The sound box is greyed out while the alert
+                            // itself or all sounds are off.
+                            let can_sound = *alert_on && sounds_on;
+                            if ui
+                                .add_enabled(can_sound, egui::Checkbox::without_text(sound_on))
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                            ui.end_row();
+                        }
+                    });
+                ui.label(
+                    small("Alert off: no line in the alert log and no sound. The cards still show the state.")
+                        .color(DIM),
+                );
+            });
+
         if ui
-            .checkbox(&mut settings.sound, "Play a sound on alerts")
+            .checkbox(&mut settings.sound, "Play alert sounds")
             .changed()
         {
             changed = true;
         }
+        egui::Grid::new("alert_quiet")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Quiet time after a sound (s)");
+                if let Some(Some(value)) = number_field(
+                    ui,
+                    buffers,
+                    "quiet",
+                    Some(settings.quiet_seconds),
+                    "10",
+                    110.0,
+                ) {
+                    settings.quiet_seconds = value.min(600.0);
+                    changed = true;
+                }
+                ui.end_row();
+            });
+        ui.label(
+            small("After an alert sound, other alerts make no sound for this long. They still show in the alert log.")
+                .color(DIM),
+        );
         ui.label(
             small("\"Miner stopped\" is detected automatically from each character's cycle times.")
                 .color(DIM),
