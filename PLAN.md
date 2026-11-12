@@ -169,6 +169,13 @@ Athena updates itself from GitHub Releases. Mockup approved by Kevin on 2026-11-
 - The View menu is replaced by a row of toggle buttons on top, one per module from `modules::create_all` plus Settings on the right edge. A button is bright while its tab is open and dark while it's closed; clicking toggles the tab. Mockup: https://claude.ai/artifact/JM7q42WKY3NLwDhcBZ7y19.
 - The tabs are now called "Mining" and "Intel" (was Mining Supervisor and Intel Supervisor). Module ids are unchanged, so saved layouts keep working.
 
+### Step 9: Characters (ESI login)
+A module (id `characters`) that logs characters in with EVE's SSO and sorts them into accounts. Mockup approved by Kevin on 2026-11-12: https://claude.ai/artifact/CV7E765hJwHYpyTYHNNn9s
+- **Every scope up front:** Athena asks for all ESI scopes (72 on 2026-11-12, listed in `src/auth/scopes.rs` from ESI's OpenAPI description), so new features never need a new login. The ESI application (Client ID in `src/auth/mod.rs`, callback `http://localhost:51547/callback`) must have every scope ticked. When CCP adds scopes, add them to the list; older logins then show "New scopes" until they log in again.
+- **Login:** PKCE, no client secret. "+ Add character" starts a local server on port 51547 and opens `http://127.0.0.1:51547/login`, which redirects to EVE's login page (the full URL with all scopes is about 2,600 characters, too long to hand to Windows directly). The callback checks `state`, trades the code for tokens and closes the port. It gives up after 5 minutes or on Cancel.
+- **Tokens:** only the refresh token is stored, in Windows Credential Manager (`esi-refresh-<character id>.Athena`); the access token (too big for a Credential Manager entry) stays in memory. EVE hands out a new refresh token with each renewal, and it's saved every time. `auth::TokenStore` hands out access tokens to background threads and renews them one at a time. At startup each login is renewed once to show its state (OK, New scopes, Login expired). Removing a character revokes its token at EVE and deletes it.
+- **Panel:** an "Unassigned" box for new logins, then one card per account with three slots (EVE's limit), 1 to 4 columns. Characters are dragged between them (or moved with the row menu). Each row shows the name, corporation and alliance (public ESI, looked up at startup), tags and the login state. Tags: any number per character, edited with "Tags…", one fixed colour per tag name, and a "Show tag" filter. Saved in `characters.toml` (no tokens in it).
+
 ### Later
 - **Mini intel panel overlay:** a click-through, always-on-top map or list, if the intel popup turns out to be not enough.
 - **Intel: Set as destination** from the map's right-click menu, once SSO exists (needs `esi-ui.write_waypoint`).
@@ -182,5 +189,5 @@ Athena updates itself from GitHub Releases. Mockup approved by Kevin on 2026-11-
 
 ## Open questions
 
-- Which ESI scopes are needed (depends on the modules). Known so far: `esi-ui.write_waypoint` for the Intel map's "Set as destination".
+- ~~Which ESI scopes are needed~~ Answered 2026-11-12: all of them (Kevin), see Step 9.
 - `glow` vs `wgpu`: needs idle CPU/RAM and startup numbers from Kevin's Windows PC (the sandbox only has a software renderer). Build both from the step 2 PR and compare with Task Manager; the Settings tab shows the renderer and a frame counter.
