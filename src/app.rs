@@ -9,6 +9,12 @@ use crate::overlay::MiningOverlay;
 use crate::settings::{FilePollRate, Settings};
 use crate::storage::{DataDir, Saver};
 use crate::updater::{StartupInfo, StripAction, Updater};
+use crate::window_place::MainWindow;
+
+/// How long the main window must stay put after a move or resize before its
+/// new placement is saved, so dragging it around doesn't write the file over
+/// and over.
+const WINDOW_SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub struct AthenaApp {
     modules: Vec<Box<dyn Module>>,
@@ -25,7 +31,24 @@ pub struct AthenaApp {
     updater: Updater,
     /// Set by "Restart now": start Athena again once this one has closed.
     restart_to_install: bool,
+    /// The main window, to read where it is on screen.
+    main_window: MainWindow,
+    /// egui's context. A cheap handle (it is reference counted inside);
+    /// kept for `on_exit`, which doesn't get one.
+    egui_ctx: egui::Context,
+    /// What the main window's position, size and maximized state were the
+    /// last frame, to notice when the user moves or resizes it.
+    window_seen: WindowSeen,
+    /// When the window last moved or changed size, while that isn't saved yet.
+    window_changed_at: Option<std::time::Instant>,
+    /// Tabs the user closed with the tab's own close button this frame.
+    /// Closed after the dock is drawn, through `Layout::close`, so their
+    /// spot is remembered.
+    tabs_to_close: Vec<Tab>,
 }
+
+/// The main window as egui last reported it: outer rectangle, maximized, minimized.
+type WindowSeen = (Option<egui::Rect>, Option<bool>, Option<bool>);
 
 /// State of the settings tab that isn't a setting itself.
 struct SettingsPanel {
@@ -43,6 +66,7 @@ struct SettingsPanel {
 impl AthenaApp {
     pub fn new(
         egui_ctx: &egui::Context,
+        main_window: MainWindow,
         data_dir: DataDir,
         settings: Settings,
         settings_warning: Option<String>,
@@ -78,6 +102,46 @@ impl AthenaApp {
             saver,
             settings_panel,
             last_saved_layout: String::new(),
+            main_window,
+            egui_ctx: egui_ctx.clone(),
+            window_seen: (None, None, None),
+            window_changed_at: None,
+            tabs_to_close: Vec::new(),
+        }
+    }
+
+    /// Notices when the main window moved or changed size, and once it has
+    /// been still for `WINDOW_SAVE_DELAY`, stores where it is in the layout
+    /// (which then gets saved like any other layout change). Moving the
+    /// window makes egui draw a frame, so this costs nothing while idle.
+    fn track_window(&mut self, ctx: &egui::Context) {
+        let seen = ctx.input(|i| {
+            let viewport = i.viewport();
+            (viewport.outer_rect, viewport.maximized, viewport.minimized)
+        });
+        if seen != self.window_seen {
+            self.window_seen = seen;
+            self.window_changed_at = Some(std::time::Instant::now());
+            // One extra frame once the delay has passed, to save then.
+            ctx.request_repaint_after(WINDOW_SAVE_DELAY);
+            return;
+        }
+        if let Some(changed_at) = self.window_changed_at {
+            let waited = changed_at.elapsed();
+            if waited >= WINDOW_SAVE_DELAY {
+                self.window_changed_at = None;
+                self.remember_window_placement();
+            } else {
+                // egui forgets a delayed repaint once another frame is drawn,
+                // so ask again for the time that is left.
+                ctx.request_repaint_after(WINDOW_SAVE_DELAY - waited);
+            }
+        }
+    }
+
+    fn remember_window_placement(&mut self) {
+        if let Some(placement) = self.main_window.read() {
+            self.layout.window = Some(placement);
         }
     }
 
@@ -139,7 +203,7 @@ fn toggle_button(ui: &mut egui::Ui, layout: &mut Layout, tab: Tab, title: &str) 
         .stroke(egui::Stroke::new(1.0, edge));
     if ui.add(button).clicked() {
         if open {
-            layout.close(&tab);
+            layout.close(&tab, ui.ctx());
         } else {
             layout.open(tab);
         }
@@ -204,6 +268,7 @@ impl eframe::App for AthenaApp {
             updater: &mut self.updater,
             panel: &mut self.settings_panel,
             settings_changed: &mut settings_changed,
+            tabs_to_close: &mut self.tabs_to_close,
         };
         DockArea::new(&mut self.layout.dock)
             .style(Style::from_egui(ui.style()))
@@ -211,6 +276,10 @@ impl eframe::App for AthenaApp {
             // there is too easy to hit by accident.
             .show_leaf_close_all_buttons(false)
             .show_inside(ui, &mut viewer);
+        for tab in std::mem::take(&mut self.tabs_to_close) {
+            self.layout.close(&tab, ui.ctx());
+        }
+        self.track_window(ui.ctx());
 
         if settings_changed {
             self.save_settings();
@@ -231,6 +300,8 @@ impl eframe::App for AthenaApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_settings();
+        self.remember_window_placement();
+        self.layout.remember_floating_windows(&self.egui_ctx);
         self.save_layout_if_changed();
         for module in &mut self.modules {
             module.on_exit();
@@ -255,6 +326,7 @@ struct TabViewer<'a> {
     updater: &'a mut Updater,
     panel: &'a mut SettingsPanel,
     settings_changed: &'a mut bool,
+    tabs_to_close: &'a mut Vec<Tab>,
 }
 
 impl egui_dock::TabViewer for TabViewer<'_> {
@@ -262,6 +334,16 @@ impl egui_dock::TabViewer for TabViewer<'_> {
 
     fn id(&mut self, tab: &mut Tab) -> egui::Id {
         egui::Id::new(&*tab)
+    }
+
+    /// The tab's own close button (or a middle click on the tab). egui_dock
+    /// would remove the tab right away; instead we close it ourselves after
+    /// the dock is drawn, so `Layout::close` can remember where it was.
+    fn on_close(&mut self, tab: &mut Tab) -> egui_dock::tab_viewer::OnCloseResponse {
+        if !self.tabs_to_close.contains(tab) {
+            self.tabs_to_close.push(tab.clone());
+        }
+        egui_dock::tab_viewer::OnCloseResponse::Ignore
     }
 
     fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
