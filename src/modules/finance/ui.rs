@@ -17,6 +17,8 @@ use eframe::egui::{
 
 use super::Finance;
 use super::categories::{Category, type_label};
+use super::chart::{self, ChartData, Zoom};
+use super::config::ChartMode;
 use super::data::{Direction, JournalEntry, Slice, SliceKey, Totals, full_isk, short_isk, slices};
 use crate::auth::now_unix;
 use crate::localtime;
@@ -133,6 +135,10 @@ pub struct ViewState {
     lp_total: bool,
     lp_search: String,
     tx_list: Option<TxList>,
+    /// The Overview chart's data, built once per data or filter change.
+    chart: Option<ChartData>,
+    /// The part of the time range the chart is zoomed to.
+    chart_zoom: Zoom,
     /// Start system -> jumps to every system, for the nearest LP store.
     jumps: HashMap<i64, HashMap<i64, u32>>,
 }
@@ -151,6 +157,8 @@ impl Default for ViewState {
             lp_total: false,
             lp_search: String::new(),
             tx_list: None,
+            chart: None,
+            chart_zoom: None,
             jumps: HashMap::new(),
         }
     }
@@ -545,15 +553,106 @@ fn overview_tab(module: &mut Finance, ui: &mut egui::Ui) {
             if let Some(SliceKey::Category(cat)) = clicked {
                 new_drill = Some(cat);
             }
+            ui.add_space(10.0);
+            chart_section(module, ui, &picked, range, inside);
         });
 
     let view = &mut module.view;
+    if new_range != range {
+        view.chart_zoom = None;
+    }
     view.overview_range = new_range;
     if new_direction != direction {
         view.overview_direction = new_direction;
         view.drill = None;
     } else {
         view.drill = new_drill;
+    }
+}
+
+/// The candle chart under the ring: the Balance | Net switch, the candle
+/// size, and the chart itself.
+fn chart_section(
+    module: &mut Finance,
+    ui: &mut egui::Ui,
+    picked: &BTreeSet<u64>,
+    range: Range,
+    inside: Option<Category>,
+) {
+    let mode = module.settings.chart;
+    // The range end moves with the clock; counting it in whole minutes
+    // keeps the cached data valid for a minute instead of one frame.
+    let now = (now_unix() / 60 + 1) * 60;
+    let (from, to) = range.bounds(now);
+    let to = to.min(now);
+    let key = format!(
+        "{}|{picked:?}|{from}|{to}|{inside:?}|{mode:?}",
+        module.data_version
+    );
+    if module.view.chart.as_ref().is_none_or(|c| c.key != key) {
+        let entries = module
+            .journal
+            .iter()
+            .filter(|e| picked.contains(&e.character_id) && e.when >= from && e.when < to)
+            .filter(|e| !e.is_between(picked));
+        module.view.chart = Some(ChartData::build(
+            key,
+            mode,
+            inside,
+            entries,
+            &module.journal,
+            picked,
+            &module.balances,
+            from,
+            to,
+        ));
+    }
+
+    let mut new_mode = mode;
+    let mut reset = false;
+    // The header comes first on screen, but its numbers come from
+    // drawing the chart, so it is drawn into space kept for it here.
+    let header_rect = ui
+        .allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover())
+        .0;
+    let colors = chart::Colors {
+        up: GREEN,
+        down: RED,
+        text: TEXT,
+        dim: DIM,
+        grid: ROW_LINE,
+        axis: CARD_BORDER,
+    };
+    let view = &mut module.view;
+    let Some(data) = view.chart.as_mut() else {
+        return;
+    };
+    let header = chart::draw(ui, data, &mut view.chart_zoom, &colors);
+
+    ui.scope_builder(egui::UiBuilder::new().max_rect(header_rect), |ui| {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut new_mode, ChartMode::Balance, "Balance");
+            ui.selectable_value(&mut new_mode, ChartMode::Net, "Net");
+            ui.label(small(format!("Candle: {}", header.step.label)).color(TEXT));
+            ui.label(small(format!("{} candles", header.candles)).color(DIM));
+            if header.zoomed && ui.small_button("Reset zoom").clicked() {
+                reset = true;
+            }
+            let what = match new_mode {
+                ChartMode::Balance => "Combined wallet balance of the picked characters",
+                ChartMode::Net => "Income minus expenses since the start of the range",
+            };
+            ui.label(small(what).color(DIM));
+            ui.label(small("Wheel: zoom · drag: move · double-click: reset").color(DIM));
+        });
+    });
+
+    if reset {
+        module.view.chart_zoom = None;
+    }
+    if new_mode != mode {
+        module.settings.chart = new_mode;
+        module.save_settings();
     }
 }
 
