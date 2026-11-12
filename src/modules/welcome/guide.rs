@@ -102,7 +102,8 @@ pub const SECTIONS: &[Section] = &[
         title: "Finance",
         subtitle: "wallets, income and LP",
         paragraphs: &[
-            "**Wallets**: click cards to pick which characters count. **All** picks every one.",
+            "**Wallets**: click cards to pick which characters count. **All characters** picks \
+             every one.",
             "**Overview**: income and expenses by category. Click a slice to see what's in \
              it. The chart below switches between Balance and Net. Scroll to zoom, drag to \
              move, double-click to reset.",
