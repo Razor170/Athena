@@ -61,14 +61,16 @@ pub struct Planetary {
     character_problems: HashMap<u64, String>,
     /// Problems to show on top of the panel.
     problems: Vec<String>,
-    /// Planet id -> its status, worked out by `assess_all`.
-    assessed: HashMap<i64, Assessment>,
+    /// (character id, planet id) -> its status, worked out by
+    /// `assess_all`. Keyed by both, because several of one player's
+    /// characters often have colonies on the same planet.
+    assessed: HashMap<(u64, i64), Assessment>,
     /// The (data version, minute) `assessed` was worked out for.
     assessed_for: Option<(u64, i64)>,
     /// Goes up whenever the data or a threshold changes.
     data_version: u64,
-    /// Planets whose details are open.
-    open: HashSet<i64>,
+    /// Colonies whose details are open, as (character id, planet id).
+    open: HashSet<(u64, i64)>,
     view: ui::View,
     last_refresh: Option<i64>,
 }
@@ -165,7 +167,7 @@ impl Planetary {
         };
         for colony in self.colonies.values().flatten() {
             self.assessed.insert(
-                colony.planet_id,
+                colony.key(),
                 status::assess(colony, data, &self.settings.thresholds, now),
             );
         }
@@ -259,5 +261,59 @@ impl Module for Planetary {
 
     fn on_exit(&mut self) {
         self.saver.finish();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::planetary::data::{Layout, Pin};
+
+    #[test]
+    fn alts_on_the_same_planet_keep_their_own_status() {
+        let dir = std::env::temp_dir().join(format!("athena-pi-alts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shared = SharedStaticData {
+            data: Some(Arc::new(crate::static_data::tests::sample())),
+            problem: None,
+        };
+        let mut module = Planetary::new(
+            &egui::Context::default(),
+            &dir,
+            Arc::new(TokenStore::new()),
+            SharedRoster::default(),
+            &shared,
+        );
+        let colony = |character_id: u64, pins: Vec<Pin>| Colony {
+            character_id,
+            planet_id: 40_000_002,
+            system_id: 30_000_001,
+            planet_type: "temperate".into(),
+            upgrade_level: 4,
+            num_pins: pins.len() as i64,
+            last_update: 1_794_500_000,
+            layout: Some(Layout {
+                pins,
+                routes: Vec::new(),
+            }),
+        };
+        // One alt has a full launchpad, the other an empty one.
+        let pad = |amount: i64| Pin {
+            pin_id: 1,
+            type_id: 2256,
+            contents: vec![(3645, amount)],
+            ..Pin::default()
+        };
+        module
+            .colonies
+            .insert(1, vec![colony(1, vec![pad(52_000)])]);
+        module.colonies.insert(2, vec![colony(2, vec![pad(0)])]);
+        module.assess_all(1_794_500_000);
+        let first = &module.assessed[&(1, 40_000_002)];
+        let second = &module.assessed[&(2, 40_000_002)];
+        assert_eq!(first.headline, "Launchpad full");
+        assert_eq!(second.launchpads[0].used_m3, 0.0);
+        drop(module);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

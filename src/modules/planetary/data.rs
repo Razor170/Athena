@@ -110,6 +110,13 @@ impl Colony {
         })
     }
 
+    /// Identifies this colony: (character id, planet id). Several
+    /// characters of one player often have colonies on the same planet,
+    /// so the planet id alone isn't enough.
+    pub fn key(&self) -> (u64, i64) {
+        (self.character_id, self.planet_id)
+    }
+
     /// "Barren", "Lava", ...
     pub fn type_label(&self) -> String {
         let mut chars = self.planet_type.chars();

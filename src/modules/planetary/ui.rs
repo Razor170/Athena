@@ -152,7 +152,7 @@ fn cards(module: &Planetary) -> Vec<CharacterCard> {
         let mut planets: Vec<(Colony, Assessment)> = colonies
             .into_iter()
             .filter_map(|colony| {
-                let a = module.assessed.get(&colony.planet_id)?.clone();
+                let a = module.assessed.get(&colony.key())?.clone();
                 Some((colony, a))
             })
             .collect();
@@ -288,21 +288,21 @@ fn planets_view(module: &mut Planetary, ui: &mut egui::Ui, now: i64) {
                 }
             });
         });
-    if let Some(planet_id) = toggled
-        && !module.open.remove(&planet_id)
+    if let Some(key) = toggled
+        && !module.open.remove(&key)
     {
-        module.open.insert(planet_id);
+        module.open.insert(key);
     }
 }
 
-/// Draws one card. Returns the planet whose row was clicked.
+/// Draws one card. Returns the colony whose row was clicked.
 fn character_card(
     module: &Planetary,
     ui: &mut egui::Ui,
     card: &CharacterCard,
     thresholds: &super::config::Thresholds,
     now: i64,
-) -> Option<i64> {
+) -> Option<(u64, i64)> {
     let mut clicked = None;
     egui::Frame::new()
         .fill(CARD_FILL)
@@ -347,9 +347,9 @@ fn character_card(
             }
             for (colony, assessment) in &card.planets {
                 if planet_row(module, ui, colony, assessment, thresholds, now) {
-                    clicked = Some(colony.planet_id);
+                    clicked = Some(colony.key());
                 }
-                if module.open.contains(&colony.planet_id) {
+                if module.open.contains(&colony.key()) {
                     planet_details(module, ui, colony, assessment, now);
                 }
             }
