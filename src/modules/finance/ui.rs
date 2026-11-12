@@ -420,7 +420,8 @@ fn short_problem(problem: &str) -> &'static str {
 
 // --------------------------------------------------------------- Overview
 
-/// The journal entries of picked wallets inside `range`.
+/// The journal entries of picked wallets inside `range`, without the
+/// transfers between picked characters.
 fn picked_entries<'a>(
     module: &'a Finance,
     picked: &'a BTreeSet<u64>,
@@ -431,6 +432,7 @@ fn picked_entries<'a>(
         .journal
         .iter()
         .filter(move |e| picked.contains(&e.character_id) && e.when >= from && e.when < to)
+        .filter(move |e| !e.is_between(picked))
 }
 
 fn range_picker(ui: &mut egui::Ui, id: &str, range: &mut Range) -> bool {
@@ -502,7 +504,7 @@ fn overview_tab(module: &mut Finance, ui: &mut egui::Ui) {
     });
     ui.label(
         small(format!(
-            "Based on {} journal entries from {} wallets",
+            "Based on {} journal entries from {} wallets · transfers between them left out",
             totals.entries,
             wallets.len()
         ))
