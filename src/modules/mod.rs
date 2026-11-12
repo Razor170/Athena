@@ -19,6 +19,7 @@ use crate::overlay::mining_bars::{BarsOverlay, OverlayPlace};
 use crate::settings::Settings;
 use crate::static_data::StaticData;
 
+pub mod characters;
 pub mod intel;
 pub mod mining;
 pub mod welcome;
@@ -87,6 +88,9 @@ pub fn create_all(
     data_dir: &Path,
 ) -> Vec<Box<dyn Module>> {
     let static_data = SharedStaticData::load();
+    // ESI access tokens of the logged-in characters, shared by every module
+    // that calls ESI for a character (see `crate::auth`).
+    let tokens = Arc::new(crate::auth::TokenStore::new());
     vec![
         Box::new(mining::MiningSupervisor::new(
             egui_ctx,
@@ -100,6 +104,7 @@ pub fn create_all(
             data_dir,
             &static_data,
         )),
+        Box::new(characters::Characters::new(egui_ctx, data_dir, tokens)),
         Box::new(welcome::Welcome),
         // Add new modules here, one line each.
     ]

@@ -19,6 +19,16 @@ pub fn open_url(url: &str) -> Result<(), String> {
     open(std::ffi::OsStr::new(url)).map_err(|e| format!("Can't open {url}: {e}"))
 }
 
+/// Opens an address on Athena's own local login server
+/// (`http://127.0.0.1:<port>/...`) in the default browser.
+pub fn open_local_url(url: &str) -> Result<(), String> {
+    // Only our own local server, never anything else over plain http.
+    if !url.starts_with("http://127.0.0.1:") {
+        return Err(format!("Not a local Athena link: {url}"));
+    }
+    open(std::ffi::OsStr::new(url)).map_err(|e| format!("Can't open {url}: {e}"))
+}
+
 #[cfg(windows)]
 fn open(target: &std::ffi::OsStr) -> Result<(), String> {
     std::process::Command::new("explorer")
@@ -41,5 +51,6 @@ mod tests {
     fn only_web_links_open() {
         assert!(open_url("file:///C:/Windows").is_err());
         assert!(open_url("C:\\Windows\\notepad.exe").is_err());
+        assert!(open_local_url("http://example.com/").is_err());
     }
 }
