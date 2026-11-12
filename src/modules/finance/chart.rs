@@ -390,7 +390,7 @@ pub fn draw(ui: &mut egui::Ui, data: &mut ChartData, zoom: &mut Zoom, colors: &C
     if response.double_clicked() {
         (from, to) = (data.from, data.to);
     } else if response.dragged() {
-        let shift = (-response.drag_delta().x / plot_width * (to - from) as f32) as i64;
+        let shift = (f64::from(-response.drag_delta().x / plot_width) * (to - from) as f64) as i64;
         let (mut a, mut b) = (from + shift, to + shift);
         clamp_view(&mut a, &mut b, data.from, data.to);
         (from, to) = (a, b);
@@ -404,15 +404,9 @@ pub fn draw(ui: &mut egui::Ui, data: &mut ChartData, zoom: &mut Zoom, colors: &C
             delta
         });
         if scroll != 0.0 {
-            let span = (to - from) as f32;
-            let new_span = (span * (-scroll / 300.0).exp())
-                .clamp(MIN_SPAN as f32, (data.to - data.from) as f32);
-            let f = ((pointer.x - plot_left) / plot_width).clamp(0.0, 1.0);
-            let at = from as f32 + f * span;
-            let a = (at - f * new_span) as i64;
-            let (mut a, mut b) = (a, a + new_span as i64);
-            clamp_view(&mut a, &mut b, data.from, data.to);
-            (from, to) = (a, b);
+            let f = f64::from(((pointer.x - plot_left) / plot_width).clamp(0.0, 1.0));
+            let factor = f64::from(-scroll / 300.0).exp();
+            (from, to) = zoom_view(from, to, f, factor, data.from, data.to);
         }
     }
     let zoomed = from > data.from || to < data.to;
@@ -426,6 +420,19 @@ pub fn draw(ui: &mut egui::Ui, data: &mut ChartData, zoom: &mut Zoom, colors: &C
         candles: candles.len(),
         zoomed,
     }
+}
+
+/// Zooms `from..to` by `factor` (below 1: in) around the point `f` of the
+/// way across, kept inside `min..max`. In f64 and relative to `from`: an
+/// f32 holds today's Unix seconds only to about two minutes, which made
+/// zoomed views jump.
+fn zoom_view(from: i64, to: i64, f: f64, factor: f64, min: i64, max: i64) -> (i64, i64) {
+    let span = (to - from) as f64;
+    let new_span = (span * factor).clamp(MIN_SPAN as f64, (max - min) as f64);
+    let mut a = from + (f * (span - new_span)).round() as i64;
+    let mut b = a + new_span.round() as i64;
+    clamp_view(&mut a, &mut b, min, max);
+    (a, b)
 }
 
 /// Keeps `from..to` inside `min..max`, moving it rather than shrinking it.
@@ -852,6 +859,21 @@ mod tests {
         let (mut a, mut b) = (DAY - 100, DAY + 100);
         clamp_view(&mut a, &mut b, 0, DAY);
         assert_eq!((a, b), (DAY - MIN_SPAN, DAY));
+    }
+
+    #[test]
+    fn zoom_keeps_the_pointer_time_exact() {
+        // A 3 h view today, zoomed in by 0.8 around its middle: the time
+        // under the pointer stays put to the second.
+        let (from, to) = (MONDAY + 3 * DAY, MONDAY + 3 * DAY + 3 * 3600);
+        let (a, b) = zoom_view(from, to, 0.5, 0.8, MONDAY, MONDAY + 30 * DAY);
+        assert_eq!(b - a, 8640);
+        assert_eq!((a + b) / 2, (from + to) / 2);
+        // Never closer than MIN_SPAN, never past the range.
+        let (a, b) = zoom_view(from, to, 0.0, 0.01, MONDAY, MONDAY + 30 * DAY);
+        assert_eq!((a, b - a), (from, MIN_SPAN));
+        let (a, b) = zoom_view(from, to, 0.5, 1000.0, MONDAY, MONDAY + 30 * DAY);
+        assert_eq!((a, b), (MONDAY, MONDAY + 30 * DAY));
     }
 
     #[test]

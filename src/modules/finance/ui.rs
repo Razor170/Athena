@@ -629,23 +629,29 @@ fn chart_section(
     };
     let header = chart::draw(ui, data, &mut view.chart_zoom, &colors);
 
-    ui.scope_builder(egui::UiBuilder::new().max_rect(header_rect), |ui| {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut new_mode, ChartMode::Balance, "Balance");
-            ui.selectable_value(&mut new_mode, ChartMode::Net, "Net");
-            ui.label(small(format!("Candle: {}", header.step.label)).color(TEXT));
-            ui.label(small(format!("{} candles", header.candles)).color(DIM));
-            if header.zoomed && ui.small_button("Reset zoom").clicked() {
-                reset = true;
-            }
-            let what = match new_mode {
-                ChartMode::Balance => "Combined wallet balance of the picked characters",
-                ChartMode::Net => "Income minus expenses since the start of the range",
-            };
-            ui.label(small(what).color(DIM));
-            ui.label(small("Wheel: zoom · drag: move · double-click: reset").color(DIM));
-        });
+    // A child Ui draws into the kept space without moving the cursor.
+    let mut header_ui = ui.new_child(egui::UiBuilder::new().max_rect(header_rect));
+    header_ui.horizontal(|ui| {
+        ui.selectable_value(&mut new_mode, ChartMode::Balance, "Balance");
+        ui.selectable_value(&mut new_mode, ChartMode::Net, "Net");
+        ui.label(small(format!("Candle: {}", header.step.label)).color(TEXT));
+        ui.label(small(format!("{} candles", header.candles)).color(DIM));
+        if header.zoomed && ui.small_button("Reset zoom").clicked() {
+            reset = true;
+        }
     });
+    // The longer text goes under the chart, where it can wrap in a
+    // narrow tab.
+    let what = match new_mode {
+        ChartMode::Balance => "Combined wallet balance of the picked characters.",
+        ChartMode::Net => "Income minus expenses since the start of the range.",
+    };
+    ui.label(
+        small(format!(
+            "{what} Wheel: zoom · drag: move · double-click: reset"
+        ))
+        .color(DIM),
+    );
 
     if reset {
         module.view.chart_zoom = None;
