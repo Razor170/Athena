@@ -30,7 +30,7 @@ const BASE_URL: &str = "https://esi.evetech.net";
 /// <https://esi.evetech.net/meta/compatibility-dates> for the list.
 const COMPATIBILITY_DATE: &str = "2026-08-18";
 
-const USER_AGENT: &str = concat!(
+pub const USER_AGENT: &str = concat!(
     "Athena/",
     env!("CARGO_PKG_VERSION"),
     " (EVE desktop companion; +https://github.com/Razor170/Athena)"

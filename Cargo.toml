@@ -40,6 +40,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
     "json",
     "gzip",
+    "form",
 ] }
 # SQLite, compiled into the exe (`bundled`), so there is no DLL to ship.
 # Reads static.sqlite (game data) and, later, the mining history.
@@ -48,6 +49,14 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 # (`windows-native`; on Linux test builds it falls back to an in-memory
 # store). Version 3, the last with this simple one-crate API.
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
+# EVE login (PKCE): random numbers and SHA-256. Already built as part of
+# rustls (reqwest's TLS), so using it directly adds no new code to the exe.
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
+# EVE login: base64url for PKCE and for reading the access token. Already
+# pulled in by reqwest.
+base64 = "0.23"
+# EVE login: reading the access token's JSON. Already pulled in by reqwest.
+serde_json = "1"
 # Auto-updater: unpacks the downloaded release zip. Only `deflate` (the
 # format GitHub's and `zip -r`'s zips use), no other compression or crypto.
 zip = { version = "9", default-features = false, features = ["deflate"] }
