@@ -122,17 +122,21 @@ const OPEN_FILL: egui::Color32 = egui::Color32::from_rgb(0x5b, 0x6f, 0x86);
 const OPEN_TEXT: egui::Color32 = egui::Color32::WHITE;
 const CLOSED_FILL: egui::Color32 = egui::Color32::from_rgb(0x2a, 0x2a, 0x2a);
 const CLOSED_TEXT: egui::Color32 = egui::Color32::from_gray(0x8c);
+const OPEN_EDGE: egui::Color32 = egui::Color32::from_rgb(0x8a, 0xa3, 0xbf);
+const CLOSED_EDGE: egui::Color32 = egui::Color32::from_gray(0x3a);
 
 /// A button in the top bar that opens or closes one tab. Bright when the tab
 /// is open, dark when it's closed.
 fn toggle_button(ui: &mut egui::Ui, layout: &mut Layout, tab: Tab, title: &str) {
     let open = layout.is_open(&tab);
-    let (fill, text) = if open {
-        (OPEN_FILL, OPEN_TEXT)
+    let (fill, text, edge) = if open {
+        (OPEN_FILL, OPEN_TEXT, OPEN_EDGE)
     } else {
-        (CLOSED_FILL, CLOSED_TEXT)
+        (CLOSED_FILL, CLOSED_TEXT, CLOSED_EDGE)
     };
-    let button = egui::Button::new(egui::RichText::new(title).color(text)).fill(fill);
+    let button = egui::Button::new(egui::RichText::new(title).color(text))
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, edge));
     if ui.add(button).clicked() {
         if open {
             layout.close(&tab);
