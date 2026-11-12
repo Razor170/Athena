@@ -984,7 +984,7 @@ impl Module for IntelSupervisor {
     }
 
     fn title(&self) -> &'static str {
-        "Intel Supervisor"
+        "Intel"
     }
 
     fn update(&mut self, _ctx: &ModuleContext) {

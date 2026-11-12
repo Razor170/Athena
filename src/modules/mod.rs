@@ -7,8 +7,8 @@
 //! 2. Add `pub mod <name>;` below.
 //! 3. Add one line for it in [`create_all`].
 //!
-//! The app then shows it as a tab, lists it in the View menu, and saves where
-//! the user docked it.
+//! The app then shows it as a tab, gives it a toggle button in the top bar,
+//! and saves where the user docked it.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -41,7 +41,7 @@ pub trait Module {
     /// or users lose where they docked the module.
     fn id(&self) -> &'static str;
 
-    /// The name shown on the tab and in the View menu.
+    /// The name shown on the tab and on its toggle button.
     fn title(&self) -> &'static str;
 
     /// Called once per frame for every module, even when its tab is hidden or
@@ -72,7 +72,7 @@ pub trait Module {
     fn on_exit(&mut self) {}
 }
 
-/// Creates every module, in the order they appear in the View menu.
+/// Creates every module, in the order their toggle buttons appear.
 ///
 /// `egui_ctx` can be cloned and handed to background threads so they can call
 /// `request_repaint()` when they have new data. `settings` are the settings at

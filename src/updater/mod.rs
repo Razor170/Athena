@@ -74,7 +74,7 @@ enum Event {
     DownloadFailed(String),
 }
 
-/// The strip under the menu bar.
+/// The strip under the toggle bar.
 enum Strip {
     Hidden,
     Available(Release),
@@ -301,7 +301,7 @@ impl Updater {
         !matches!(self.strip, Strip::Hidden)
     }
 
-    /// Draws the strip under the menu bar. Call only when `strip_visible`.
+    /// Draws the strip under the toggle bar. Call only when `strip_visible`.
     pub fn strip_ui(&mut self, ui: &mut egui::Ui) -> StripAction {
         let fill = match self.strip {
             Strip::Ready { .. } => egui::Color32::from_rgb(29, 48, 32),

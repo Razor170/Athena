@@ -20,7 +20,7 @@ impl Module for Welcome {
         ui.heading("Athena");
         ui.label("Modules show up here as tabs.");
         ui.label("Drag a tab by its title to move it, dock it next to another one, or pull it out into its own window.");
-        ui.label("Closed tabs can be opened again from the View menu.");
+        ui.label("Closed tabs can be opened again with the buttons in the top bar.");
         ui.add_space(8.0);
         ui.label(format!(
             "EVE log folder: {}",

@@ -37,7 +37,7 @@ run it. Click **More info**, then **Run anyway**.
 - Closed tabs come back through the **View** menu.
 - The layout is saved when Athena closes.
 
-## Mining Supervisor
+## Mining
 
 One card per character, filled from the game logs (`Documents\EVE\logs\Gamelogs`; set
 another log folder in Athena's settings):
