@@ -23,6 +23,7 @@ pub mod characters;
 pub mod finance;
 pub mod intel;
 pub mod mining;
+pub mod planetary;
 pub mod shared;
 pub mod welcome;
 
@@ -120,10 +121,17 @@ pub fn create_all(
         Box::new(finance::Finance::new(
             egui_ctx,
             data_dir,
+            tokens.clone(),
+            roster.clone(),
+            &static_data,
+            pilot_systems,
+        )),
+        Box::new(planetary::Planetary::new(
+            egui_ctx,
+            data_dir,
             tokens,
             roster,
             &static_data,
-            pilot_systems,
         )),
         Box::new(welcome::Welcome),
         // Add new modules here, one line each.

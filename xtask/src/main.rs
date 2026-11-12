@@ -23,7 +23,10 @@
 //!   their security and map position, stargate connections and the names of
 //!   all ship types (see `map.rs`),
 //! - for the Finance module: NPC corporation names and their stations that
-//!   have a loyalty point store (see `stations.rs`).
+//!   have a loyalty point store (see `stations.rs`),
+//! - for the Planetary module: planetary commodities with their volumes,
+//!   colony structures with their capacity, and factory schematics (see
+//!   `planetary.rs`).
 //!
 //! With `--dotlan <folder>`, the Intel map's layout comes from DOTLAN
 //! EveMaps' region maps in that folder (see `dotlan.rs`). `cargo xtask
@@ -32,6 +35,7 @@
 
 mod dotlan;
 mod map;
+mod planetary;
 mod stations;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,7 +47,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 /// Bump when the tables change, so the app can refuse a file it can't read.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// The SDE category that holds all asteroid ore, ice and moon ore.
 const CATEGORY_ASTEROID: i64 = 25;
@@ -126,6 +130,8 @@ struct SdeType {
     group_id: i64,
     name: Option<Name>,
     volume: Option<f64>,
+    /// How much the type holds, in m³ (launchpads, storage facilities).
+    capacity: Option<f64>,
     #[serde(rename = "portionSize")]
     portion_size: Option<i64>,
     #[serde(default)]
@@ -325,7 +331,25 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
             ships.insert(t.id, (name, group_name.clone()));
         }
     }
+    // Planetary commodities and colony structures.
+    let pi_types: Vec<planetary::PiType> = types
+        .iter()
+        .filter(|t| planetary::wanted_group(t.group_id))
+        .map(|t| planetary::PiType {
+            id: t.id,
+            group_id: t.group_id,
+            name: english(&t.name),
+            volume: t.volume,
+            capacity: t.capacity,
+            published: t.published,
+        })
+        .collect();
     drop(types);
+    println!("Reading planetary schematics...");
+    let pi = planetary::build(
+        &pi_types,
+        read_jsonl(&mut archive, "planetSchematics.jsonl")?,
+    )?;
 
     println!("Reading the map...");
     // The Dotlan maps of the regions the Intel map shows, if we have them.
@@ -404,12 +428,14 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         map: &map,
         corporations: &corporations,
         lp_stations: &lp_stations,
+        pi: &pi,
     };
     write_database(out, info, &tables)?;
     println!(
         "Wrote {}: {} items, {} reprocessing rows, {} compressible types, {} ships, \
          {} regions, {} systems, {} gates, {} map layout, {} NPC corporations, \
-         {} stations with an LP store",
+         {} stations with an LP store, {} planetary commodities, {} colony structures, \
+         {} schematics",
         out.display(),
         items.len(),
         reprocess.len(),
@@ -420,7 +446,10 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         map.gates.len(),
         map.layout_name(),
         corporations.len(),
-        lp_stations.len()
+        lp_stations.len(),
+        pi.commodities.len(),
+        pi.structures.len(),
+        pi.schematics.len()
     );
     Ok(())
 }
@@ -545,6 +574,37 @@ fn create_schema(db: &rusqlite::Connection) -> Result<()> {
             corporation_id INTEGER NOT NULL,
             name           TEXT NOT NULL
         );
+
+        -- Planetary commodities, P0 (tier 0, raw) to P4.
+        CREATE TABLE pi_commodities (
+            type_id   INTEGER PRIMARY KEY,
+            name      TEXT NOT NULL,
+            volume_m3 REAL NOT NULL,
+            tier      INTEGER NOT NULL
+        );
+        -- Colony structures. kind: command_center, extractor (the control
+        -- unit), factory, storage, launchpad. capacity_m3 is 0 for those
+        -- that hold nothing.
+        CREATE TABLE pi_structures (
+            type_id     INTEGER PRIMARY KEY,
+            name        TEXT NOT NULL,
+            kind        TEXT NOT NULL,
+            capacity_m3 REAL NOT NULL
+        );
+        -- Factory schematics: one cycle takes cycle_secs.
+        CREATE TABLE pi_schematics (
+            schematic_id INTEGER PRIMARY KEY,
+            name         TEXT NOT NULL,
+            cycle_secs   INTEGER NOT NULL
+        );
+        -- What one cycle of a schematic takes (is_input = 1) and makes.
+        CREATE TABLE pi_schematic_types (
+            schematic_id INTEGER NOT NULL,
+            type_id      INTEGER NOT NULL,
+            quantity     INTEGER NOT NULL,
+            is_input     INTEGER NOT NULL,
+            PRIMARY KEY (schematic_id, type_id)
+        );
         ",
     )?;
     Ok(())
@@ -559,6 +619,7 @@ struct Tables<'a> {
     map: &'a map::MapData,
     corporations: &'a BTreeMap<i64, String>,
     lp_stations: &'a BTreeMap<i64, stations::Station>,
+    pi: &'a planetary::PiData,
 }
 
 fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
@@ -570,6 +631,7 @@ fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
         map,
         corporations,
         lp_stations,
+        pi,
     } = *tables;
     // Write to a temporary file first, so a failed run never leaves a
     // half-written static.sqlite behind.
@@ -677,6 +739,34 @@ fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
         )?;
         for (id, s) in lp_stations {
             insert.execute((id, s.system_id, s.corporation_id, &s.name))?;
+        }
+
+        let mut insert = tx.prepare(
+            "INSERT INTO pi_commodities (type_id, name, volume_m3, tier) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (id, c) in &pi.commodities {
+            insert.execute((id, &c.name, c.volume_m3, c.tier))?;
+        }
+
+        let mut insert = tx.prepare(
+            "INSERT INTO pi_structures (type_id, name, kind, capacity_m3) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (id, s) in &pi.structures {
+            insert.execute((id, &s.name, s.kind, s.capacity_m3))?;
+        }
+
+        let mut insert = tx.prepare(
+            "INSERT INTO pi_schematics (schematic_id, name, cycle_secs) VALUES (?1, ?2, ?3)",
+        )?;
+        let mut insert_type = tx.prepare(
+            "INSERT INTO pi_schematic_types (schematic_id, type_id, quantity, is_input)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (id, s) in &pi.schematics {
+            insert.execute((id, &s.name, s.cycle_secs))?;
+            for &(type_id, quantity, is_input) in &s.types {
+                insert_type.execute((id, type_id, quantity, is_input))?;
+            }
         }
     }
     tx.commit()?;
