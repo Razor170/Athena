@@ -487,14 +487,14 @@ fn planet_row(
         let bars_left = percent_left - BARS_WIDTH - 6.0;
         draw_bars(
             &painter,
-            stores,
+            &stores,
             Rect::from_min_size(
                 Pos2::new(bars_left, line2 + 2.0),
                 Vec2::new(BARS_WIDTH, 10.0),
             ),
             thresholds,
         );
-        let worst = stores.iter().map(Store::percent).fold(0.0, f64::max);
+        let worst = stores.iter().map(|s| s.percent()).fold(0.0, f64::max);
         // The hatched part of the bars shows what is estimated; the
         // details say it in words.
         let mut text = String::new();
@@ -537,7 +537,7 @@ fn planet_row(
 /// = estimated since then.
 fn draw_bars(
     painter: &egui::Painter,
-    stores: &[Store],
+    stores: &[&Store],
     area: Rect,
     thresholds: &super::config::Thresholds,
 ) {
@@ -714,7 +714,12 @@ fn planet_details(
                     );
                 }
                 let color = fill_color(s.percent(), &module.settings.thresholds);
-                let color = if color == BAR_GREEN { TEXT } else { color };
+                let mut color = if color == BAR_GREEN { TEXT } else { color };
+                if !s.is_output {
+                    // Feeds factories or passes things on: full is fine.
+                    note.push_str(" · input, no warning");
+                    color = DIM;
+                }
                 (label, value, note, color)
             })
             .collect()

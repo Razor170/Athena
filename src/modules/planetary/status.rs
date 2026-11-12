@@ -68,6 +68,10 @@ pub struct Store {
     pub added_m3: f64,
     /// (type id, amount), biggest volume first.
     pub contents: Vec<(i64, i64)>,
+    /// False for an input or transit store: one that only feeds factories,
+    /// or passes on whatever is routed into it. Those are meant to be
+    /// full, so they never warn and get no bar in the row.
+    pub is_output: bool,
 }
 
 impl Store {
@@ -133,11 +137,13 @@ pub struct Assessment {
 impl Assessment {
     /// The stores the row shows as bars: the launchpads, or the storage
     /// facilities on a planet without one.
-    pub fn bar_stores(&self) -> &[Store] {
-        if self.launchpads.is_empty() {
-            &self.storages
+    /// Only output stores count (see [`Store::is_output`]).
+    pub fn bar_stores(&self) -> Vec<&Store> {
+        let pads: Vec<&Store> = self.launchpads.iter().filter(|s| s.is_output).collect();
+        if pads.is_empty() {
+            self.storages.iter().filter(|s| s.is_output).collect()
         } else {
-            &self.launchpads
+            pads
         }
     }
 }
@@ -248,9 +254,29 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
             let vb = b.1 as f64 * volume(b.0);
             vb.total_cmp(&va)
         });
+        // What routes bring into this store, and what they take out. A
+        // commodity that comes in and isn't routed out again stays here:
+        // that makes it an output store. One that only sends things out
+        // (factory inputs), or passes on what it gets (transit), is meant
+        // to be full. A planet without any routes (none fetched, or an
+        // old layout) counts every store as output, as before.
+        let incoming: BTreeSet<i64> = layout
+            .routes
+            .iter()
+            .filter(|r| r.destination == pin.pin_id)
+            .map(|r| r.type_id)
+            .collect();
+        let outgoing: BTreeSet<i64> = layout
+            .routes
+            .iter()
+            .filter(|r| r.source == pin.pin_id)
+            .map(|r| r.type_id)
+            .collect();
+        let is_output = layout.routes.is_empty() || incoming.iter().any(|t| !outgoing.contains(t));
         stores.push((
             pin.pin_id,
             Store {
+                is_output,
                 kind: kind.unwrap_or(PiStructureKind::Storage),
                 capacity_m3: data
                     .pi_structure(pin.type_id)
@@ -396,6 +422,7 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
     let fullest = stores
         .iter()
         .map(|(_, s)| s)
+        .filter(|s| s.is_output)
         .max_by(|a, b| a.percent().total_cmp(&b.percent()));
     if let Some(store) = fullest {
         let name = store_name(&stores, store);
@@ -771,6 +798,59 @@ mod tests {
         );
         assert_eq!(a.level, Level::Attention);
         assert_eq!(a.headline, "Extractors stopped 1 h ago");
+    }
+
+    #[test]
+    fn full_input_pads_do_not_warn() {
+        let data = sample();
+        // Pad 3 feeds the factories (input), pad 4 gets their output.
+        let pins = vec![
+            factory(1, ADVANCED, 65, NOW - 600),
+            factory(2, ADVANCED, 65, NOW - 600),
+            pad(3, vec![(PLASMOIDS, 26_000), (WATER, 26_000)]),
+            pad(4, vec![(9838, 1000)]),
+        ];
+        let route = |source: i64, destination: i64, type_id: i64| Route {
+            source,
+            destination,
+            type_id,
+            quantity: 40.0,
+        };
+        let routes = vec![
+            route(3, 1, PLASMOIDS),
+            route(3, 1, WATER),
+            route(3, 2, PLASMOIDS),
+            route(3, 2, WATER),
+            route(1, 4, 9838),
+            route(2, 4, 9838),
+        ];
+        let a = assess(&colony(pins, routes, NOW), &data, &defaults(), NOW);
+        assert!(!a.launchpads[0].is_output);
+        assert!(a.launchpads[0].percent() > 95.0);
+        assert!(a.launchpads[1].is_output);
+        // Inputs last 26,000 / 80 per hour = 325 h: all fine.
+        assert_eq!(a.level, Level::Active);
+        // Only the output pad gets a bar.
+        assert_eq!(a.bar_stores().len(), 1);
+
+        // A transit pad (Water in, Water out) doesn't warn either; the
+        // output pad filling up does.
+        let pins = vec![
+            factory(1, ADVANCED, 65, NOW - 600),
+            pad(3, vec![(WATER, 26_000), (PLASMOIDS, 26_000)]),
+            pad(4, vec![(9838, 12_800)]),
+        ];
+        let routes = vec![
+            route(9, 3, WATER),
+            route(3, 1, WATER),
+            route(9, 3, PLASMOIDS),
+            route(3, 1, PLASMOIDS),
+            route(1, 4, 9838),
+        ];
+        let a = assess(&colony(pins, routes, NOW), &data, &defaults(), NOW);
+        assert!(!a.launchpads[0].is_output);
+        assert_eq!(a.level, Level::Attention);
+        assert_eq!(a.headline, "Launchpad 2 full");
     }
 
     #[test]
