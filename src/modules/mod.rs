@@ -20,8 +20,10 @@ use crate::settings::Settings;
 use crate::static_data::StaticData;
 
 pub mod characters;
+pub mod finance;
 pub mod intel;
 pub mod mining;
+pub mod shared;
 pub mod welcome;
 
 /// What a module may read from the rest of the app while it runs.
@@ -91,6 +93,10 @@ pub fn create_all(
     // ESI access tokens of the logged-in characters, shared by every module
     // that calls ESI for a character (see `crate::auth`).
     let tokens = Arc::new(crate::auth::TokenStore::new());
+    // The logged-in characters (written by Characters) and where each pilot
+    // is (written by Intel), read by other modules. See `shared`.
+    let roster = shared::SharedRoster::default();
+    let pilot_systems = shared::PilotSystems::default();
     vec![
         Box::new(mining::MiningSupervisor::new(
             egui_ctx,
@@ -103,8 +109,22 @@ pub fn create_all(
             settings,
             data_dir,
             &static_data,
+            pilot_systems.clone(),
         )),
-        Box::new(characters::Characters::new(egui_ctx, data_dir, tokens)),
+        Box::new(characters::Characters::new(
+            egui_ctx,
+            data_dir,
+            tokens.clone(),
+            roster.clone(),
+        )),
+        Box::new(finance::Finance::new(
+            egui_ctx,
+            data_dir,
+            tokens,
+            roster,
+            &static_data,
+            pilot_systems,
+        )),
         Box::new(welcome::Welcome),
         // Add new modules here, one line each.
     ]

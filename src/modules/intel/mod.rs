@@ -51,6 +51,7 @@ use self::parser::{IntelMessage, ParseContext};
 use self::sound::{PlayRequest, SoundPlayer};
 use self::tags::Tag;
 use self::watcher::{ChatLogWatcher, LOCAL, WatchEvent, last_downtime};
+use super::shared::{PilotSystem, PilotSystems};
 use super::{Module, ModuleContext, SharedStaticData};
 use crate::modules::mining::gamelog::LogTime;
 use crate::overlay::popup::{AlertPopup, PopupContent};
@@ -144,6 +145,9 @@ pub struct IntelSupervisor {
     channels_found: Vec<String>,
     /// By character name.
     pilots: BTreeMap<String, Pilot>,
+    /// The same pilot locations, shared with other modules (Finance uses
+    /// them for the nearest LP store).
+    pilot_systems: PilotSystems,
     /// The time of each pilot's newest system change, also when it was
     /// into a wormhole (and the pilot left `pilots`).
     last_jump: BTreeMap<String, LogTime>,
@@ -246,6 +250,7 @@ impl IntelSupervisor {
         app_settings: &Settings,
         data_dir: &Path,
         shared: &SharedStaticData,
+        pilot_systems: PilotSystems,
     ) -> Self {
         let mut problems = BTreeMap::new();
         let (settings, settings_problem) = IntelSettings::load(data_dir);
@@ -300,6 +305,7 @@ impl IntelSupervisor {
             deduper: Deduper::new(),
             channels_found: Vec::new(),
             pilots: BTreeMap::new(),
+            pilot_systems,
             last_jump: BTreeMap::new(),
             reports: VecDeque::new(),
             nearby: HashSet::new(),
@@ -386,8 +392,20 @@ impl IntelSupervisor {
             // Wormhole systems have no gates and aren't on the map.
             None => {
                 self.pilots.remove(pilot);
+                if let Ok(mut shared) = self.pilot_systems.lock() {
+                    shared.remove(pilot);
+                }
             }
             Some(system) => {
+                if let Ok(mut shared) = self.pilot_systems.lock() {
+                    shared.insert(
+                        pilot.to_string(),
+                        PilotSystem {
+                            system_id: system.id,
+                            since_unix: line.time.unix_seconds,
+                        },
+                    );
+                }
                 self.pilots.insert(
                     pilot.to_string(),
                     Pilot {
@@ -1110,7 +1128,13 @@ mod tests {
             data: Some(Arc::new(data)),
             problem: None,
         };
-        let mut module = IntelSupervisor::new(&egui::Context::default(), &settings, &dir, &shared);
+        let mut module = IntelSupervisor::new(
+            &egui::Context::default(),
+            &settings,
+            &dir,
+            &shared,
+            PilotSystems::default(),
+        );
         module.settings.channels = vec!["Branch Intel".into(), "Region Intel".into()];
         module
     }

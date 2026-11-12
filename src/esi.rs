@@ -1,6 +1,7 @@
 //! A small client for EVE's ESI API.
 //!
-//! Only public endpoints for now (no login). It follows ESI's rules
+//! Public endpoints, and a character's own data with an access token from
+//! `crate::auth` ([`EsiClient::get_json_authed`]). It follows ESI's rules
 //! (<https://developers.eveonline.com/docs/services/esi/best-practices/>):
 //!
 //! - sends `X-Compatibility-Date`, so a later ESI change can't silently
@@ -18,7 +19,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use serde::Serialize;
@@ -53,6 +54,22 @@ pub enum Fetched<T> {
     NotModified,
 }
 
+/// ESI answered with an error status. Callers that care (for example a
+/// 404 from `/universe/names`, which means one of the ids is unknown) find
+/// it with `error.downcast_ref::<HttpError>()`.
+#[derive(Debug)]
+pub struct HttpError {
+    pub status: u16,
+}
+
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}", self.status)
+    }
+}
+
+impl std::error::Error for HttpError {}
+
 pub struct EsiClient {
     http: Client,
     /// Errors we may still make before ESI blocks us, and seconds until that
@@ -86,9 +103,33 @@ impl EsiClient {
         path: &str,
         etag: Option<&str>,
     ) -> Result<Fetched<T>> {
+        self.get(path, None, etag)
+    }
+
+    /// Like [`EsiClient::get_json`], for a character's own data (wallet,
+    /// loyalty points, ...): sends `access_token` from `crate::auth`.
+    /// The token is only put in the request header, never logged.
+    pub fn get_json_authed<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        access_token: &str,
+        etag: Option<&str>,
+    ) -> Result<Fetched<T>> {
+        self.get(path, Some(access_token), etag)
+    }
+
+    fn get<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        access_token: Option<&str>,
+        etag: Option<&str>,
+    ) -> Result<Fetched<T>> {
         let url = format!("{BASE_URL}{path}");
         let response = self.send(&url, |http| {
-            let request = http.get(&url);
+            let mut request = http.get(&url);
+            if let Some(token) = access_token {
+                request = request.bearer_auth(token);
+            }
             match etag {
                 Some(etag) => request.header("If-None-Match", etag),
                 None => request,
@@ -162,7 +203,10 @@ impl EsiClient {
                 std::thread::sleep(Duration::from_secs(wait.clamp(1, 900)));
                 continue;
             }
-            bail!("{url} failed: HTTP {status}");
+            return Err(anyhow::Error::new(HttpError {
+                status: status.as_u16(),
+            })
+            .context(format!("{url} failed")));
         }
     }
 

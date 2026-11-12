@@ -21,7 +21,9 @@
 //!   their Jita prices can be looked up,
 //! - for the Intel Supervisor: regions, constellations, solar systems with
 //!   their security and map position, stargate connections and the names of
-//!   all ship types (see `map.rs`).
+//!   all ship types (see `map.rs`),
+//! - for the Finance module: NPC corporation names and their stations that
+//!   have a loyalty point store (see `stations.rs`).
 //!
 //! With `--dotlan <folder>`, the Intel map's layout comes from DOTLAN
 //! EveMaps' region maps in that folder (see `dotlan.rs`). `cargo xtask
@@ -30,6 +32,7 @@
 
 mod dotlan;
 mod map;
+mod stations;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -40,7 +43,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 /// Bump when the tables change, so the app can refuse a file it can't read.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// The SDE category that holds all asteroid ore, ice and moon ore.
 const CATEGORY_ASTEROID: i64 = 25;
@@ -340,6 +343,19 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
     )?;
     dotlan_check(map.from_dotlan, map.in_dotlan_regions, map.systems.len())?;
 
+    println!("Reading NPC corporations and stations...");
+    let system_names: BTreeMap<i64, String> = map
+        .systems
+        .iter()
+        .map(|(id, s)| (*id, s.name.clone()))
+        .collect();
+    let (corporations, lp_stations) = stations::build(
+        read_jsonl(&mut archive, "npcCorporations.jsonl")?,
+        read_jsonl(&mut archive, "stationOperations.jsonl")?,
+        read_jsonl(&mut archive, "npcStations.jsonl")?,
+        &system_names,
+    )?;
+
     let compressed: Vec<(i64, i64)> = compressible
         .iter()
         .filter(|c| items.contains_key(&c.id) && items.contains_key(&c.compressed_id))
@@ -380,10 +396,20 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         );
     }
 
-    write_database(out, info, &items, &reprocess, &compressed, &ships, &map)?;
+    let tables = Tables {
+        items: &items,
+        reprocess: &reprocess,
+        compressed: &compressed,
+        ships: &ships,
+        map: &map,
+        corporations: &corporations,
+        lp_stations: &lp_stations,
+    };
+    write_database(out, info, &tables)?;
     println!(
         "Wrote {}: {} items, {} reprocessing rows, {} compressible types, {} ships, \
-         {} regions, {} systems, {} gates, {} map layout",
+         {} regions, {} systems, {} gates, {} map layout, {} NPC corporations, \
+         {} stations with an LP store",
         out.display(),
         items.len(),
         reprocess.len(),
@@ -392,7 +418,9 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         map.regions.len(),
         map.systems.len(),
         map.gates.len(),
-        map.layout_name()
+        map.layout_name(),
+        corporations.len(),
+        lp_stations.len()
     );
     Ok(())
 }
@@ -504,20 +532,45 @@ fn create_schema(db: &rusqlite::Connection) -> Result<()> {
             map_y     REAL NOT NULL,
             PRIMARY KEY (region_id, system_id)
         );
+
+        -- NPC corporations, for loyalty point names.
+        CREATE TABLE npc_corporations (
+            corporation_id INTEGER PRIMARY KEY,
+            name           TEXT NOT NULL
+        );
+        -- NPC stations that have a loyalty point store of their owner.
+        CREATE TABLE lp_stations (
+            station_id     INTEGER PRIMARY KEY,
+            system_id      INTEGER NOT NULL,
+            corporation_id INTEGER NOT NULL,
+            name           TEXT NOT NULL
+        );
         ",
     )?;
     Ok(())
 }
 
-fn write_database(
-    out: &Path,
-    info: &SdeInfo,
-    items: &BTreeMap<i64, Item>,
-    reprocess: &[(i64, i64, i64)],
-    compressed: &[(i64, i64)],
-    ships: &BTreeMap<i64, (String, String)>,
-    map: &map::MapData,
-) -> Result<()> {
+/// Everything that goes into the file, besides `meta`.
+struct Tables<'a> {
+    items: &'a BTreeMap<i64, Item>,
+    reprocess: &'a [(i64, i64, i64)],
+    compressed: &'a [(i64, i64)],
+    ships: &'a BTreeMap<i64, (String, String)>,
+    map: &'a map::MapData,
+    corporations: &'a BTreeMap<i64, String>,
+    lp_stations: &'a BTreeMap<i64, stations::Station>,
+}
+
+fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
+    let Tables {
+        items,
+        reprocess,
+        compressed,
+        ships,
+        map,
+        corporations,
+        lp_stations,
+    } = *tables;
     // Write to a temporary file first, so a failed run never leaves a
     // half-written static.sqlite behind.
     let tmp = out.with_extension("sqlite.tmp");
@@ -610,6 +663,20 @@ fn write_database(
         )?;
         for b in &map.borders {
             insert.execute((b.region_id, b.system_id, b.map_x, b.map_y))?;
+        }
+
+        let mut insert =
+            tx.prepare("INSERT INTO npc_corporations (corporation_id, name) VALUES (?1, ?2)")?;
+        for (id, name) in corporations {
+            insert.execute((id, name))?;
+        }
+
+        let mut insert = tx.prepare(
+            "INSERT INTO lp_stations (station_id, system_id, corporation_id, name)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (id, s) in lp_stations {
+            insert.execute((id, s.system_id, s.corporation_id, &s.name))?;
         }
     }
     tx.commit()?;

@@ -6,6 +6,7 @@ mod app;
 mod auth;
 mod esi;
 mod layout;
+mod localtime;
 mod modules;
 mod overlay;
 mod settings;
