@@ -209,9 +209,11 @@ fn tab_bar(module: &mut Finance, ui: &mut egui::Ui) {
         ui.selectable_value(tab, Tab::Transactions, "Transactions");
         ui.selectable_value(tab, Tab::Loyalty, "Loyalty Points");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let can_refresh = module.can_refresh(now_unix());
             if ui
-                .small_button("Refresh")
+                .add_enabled(can_refresh, egui::Button::new(small("Refresh")))
                 .on_hover_text("Fetch everything from ESI now. ESI may still send its cached copy.")
+                .on_disabled_hover_text("Just refreshed. Try again in a minute.")
                 .clicked()
             {
                 module.refresh_now();
@@ -1149,6 +1151,9 @@ fn loyalty_tab(module: &mut Finance, ui: &mut egui::Ui) {
         .iter()
         .filter_map(|c| module.location(c))
         .collect();
+    // Only the systems the characters are in now: each entry is a whole
+    // BFS result (100+ KB), so old ones must not pile up.
+    module.view.jumps.retain(|start, _| starts.contains(start));
     if let Some(data) = module.static_data.clone() {
         for start in starts {
             module

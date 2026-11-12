@@ -36,8 +36,15 @@ pub fn to_local(unix: i64) -> i64 {
 pub fn local_day_start(unix: i64) -> i64 {
     let local = to_local(unix);
     let local_midnight = local.div_euclid(86_400) * 86_400;
-    // Midnight in local time, back to UTC with that moment's offset.
-    local_midnight - utc_offset_secs(unix)
+    from_local(local_midnight, unix)
+}
+
+/// A local time (as from [`to_local`]) back to real Unix seconds, using
+/// the offset at that moment, not at `near`: midnight on 1 October is in
+/// summer time even when asked in November. `near` gives the first guess.
+fn from_local(local: i64, near: i64) -> i64 {
+    let guess = local - utc_offset_secs(near);
+    local - utc_offset_secs(guess)
 }
 
 /// The start of the local month that `unix` falls in, `months_back`
@@ -48,7 +55,7 @@ pub fn local_month_start(unix: i64, months_back: i64) -> i64 {
     let index = year * 12 + (month - 1) - months_back;
     let (year, month) = (index.div_euclid(12), index.rem_euclid(12) + 1);
     let days = crate::modules::mining::gamelog::days_from_civil(year, month, 1);
-    days * 86_400 - utc_offset_secs(unix)
+    from_local(days * 86_400, unix)
 }
 
 /// "14:03:58" in local time.

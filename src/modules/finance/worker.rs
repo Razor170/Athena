@@ -142,6 +142,8 @@ struct Fetcher {
     named: HashSet<i64>,
     /// Ids ESI couldn't name this run; not asked again until restart.
     unnamed: HashSet<i64>,
+    /// Ids `/universe/names` answered 404 for, to save as unknown.
+    not_found: Vec<i64>,
 }
 
 impl Fetcher {
@@ -157,6 +159,7 @@ impl Fetcher {
             characters: HashMap::new(),
             named,
             unnamed: HashSet::new(),
+            not_found: Vec::new(),
         };
         Ok((fetcher, saved))
     }
@@ -448,6 +451,9 @@ impl Fetcher {
                 }
             }
         }
+        // Ids ESI doesn't know are saved with an empty name, so they aren't
+        // asked for again (and don't cost ESI errors) after a restart.
+        found.extend(self.not_found.drain(..).map(|id| (id, String::new())));
         for (id, _) in &found {
             self.named.insert(*id);
         }
@@ -486,6 +492,11 @@ impl Fetcher {
                     self.names_for(a, found);
                     self.names_for(b, found);
                 } else {
+                    // A single id ESI answered 404 for is unknown for good;
+                    // anything else (network, ESI down) is tried next run.
+                    if not_found {
+                        self.not_found.extend(ids.iter().copied());
+                    }
                     self.unnamed.extend(ids.iter().copied());
                 }
             }

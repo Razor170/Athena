@@ -70,7 +70,12 @@ pub struct Finance {
     data_version: u64,
     /// What the panel shows: tab, filters, cached lists.
     view: ui::ViewState,
+    /// When "Refresh" was last clicked.
+    last_refresh: Option<i64>,
 }
+
+/// "Refresh" works at most this often.
+const REFRESH_COOLDOWN_SECS: i64 = 60;
 
 impl Finance {
     pub fn new(
@@ -105,6 +110,7 @@ impl Finance {
             problems: problem.into_iter().collect(),
             data_version: 0,
             view: ui::ViewState::default(),
+            last_refresh: None,
         };
         module.read_roster();
         module
@@ -132,9 +138,19 @@ impl Finance {
         }
     }
 
-    /// "Refresh": fetch everything now.
-    pub fn refresh_now(&self) {
-        self.worker.send(Command::RefreshNow);
+    /// "Refresh": fetch everything now. With many characters that's a
+    /// lot of ESI requests, so it works at most once a minute.
+    pub fn refresh_now(&mut self) {
+        let now = crate::auth::now_unix();
+        if self.can_refresh(now) {
+            self.last_refresh = Some(now);
+            self.worker.send(Command::RefreshNow);
+        }
+    }
+
+    pub fn can_refresh(&self, now: i64) -> bool {
+        self.last_refresh
+            .is_none_or(|at| now - at >= REFRESH_COOLDOWN_SECS)
     }
 
     /// The characters whose wallets are picked.
@@ -195,7 +211,8 @@ impl Finance {
 
     /// A name for an id from the journal, or the id itself.
     pub fn name_of(&self, id: i64) -> String {
-        if let Some(name) = self.names.get(&id) {
+        // An empty name means ESI doesn't know the id.
+        if let Some(name) = self.names.get(&id).filter(|name| !name.is_empty()) {
             return name.clone();
         }
         if let Some(name) = self
