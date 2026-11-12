@@ -40,6 +40,11 @@ pub fn sane_size(placement: &WindowPlacement) -> bool {
 
 /// True if enough of the window's title bar lies inside `work_area` (the part
 /// of a monitor not covered by the taskbar) to grab it with the mouse.
+///
+/// Strictly, the placement is in Windows "workspace" coordinates, which are
+/// shifted by the taskbar's thickness when it sits on the top or left of the
+/// main monitor, while the work area is in screen coordinates. That only
+/// moves this check by a few dozen pixels, so we don't correct for it.
 pub fn title_bar_visible(placement: &WindowPlacement, work_area: ScreenRect) -> bool {
     let bar = title_bar(placement);
     let width = bar.right.min(work_area.right) - bar.left.max(work_area.left);
@@ -67,6 +72,15 @@ pub fn usable(placement: WindowPlacement) -> Option<WindowPlacement> {
     }
     let work_area = win::work_area_near(title_bar(&placement))?;
     title_bar_visible(&placement, work_area).then_some(placement)
+}
+
+/// Makes Athena DPI-aware, so monitor rects come back in real pixels like
+/// the saved placement. Must run before `usable`: winit does the same, but
+/// only when the window is created, and until then Windows scales monitor
+/// rects down to 96 DPI at display scaling above 100%. winit's own later
+/// call then fails quietly, which is fine.
+pub fn become_dpi_aware() {
+    win::become_dpi_aware();
 }
 
 /// The main window, so we can read and set its placement.
@@ -107,6 +121,10 @@ mod win {
     use windows_sys::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromRect,
     };
+    use windows_sys::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        SetProcessDpiAwarenessContext,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetWindowPlacement, SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWMINIMIZED, SetWindowPlacement,
         WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED,
@@ -114,6 +132,16 @@ mod win {
 
     use super::ScreenRect;
     use crate::layout::WindowPlacement;
+
+    pub fn become_dpi_aware() {
+        // Same as winit: per-monitor v2, or v1 on Windows 10 before 1703.
+        // SAFETY: plain calls with constant arguments; failure changes nothing.
+        unsafe {
+            if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == 0 {
+                SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+            }
+        }
+    }
 
     pub fn handle_of(cc: &eframe::CreationContext<'_>) -> isize {
         match cc.window_handle().map(|handle| handle.as_raw()) {
@@ -211,6 +239,8 @@ mod win {
 mod win {
     use super::ScreenRect;
     use crate::layout::WindowPlacement;
+
+    pub fn become_dpi_aware() {}
 
     pub fn handle_of(_cc: &eframe::CreationContext<'_>) -> isize {
         0

@@ -83,6 +83,8 @@ fn run() -> Result<()> {
     let saver = storage::Saver::start();
     let (settings, settings_warning) = settings::Settings::load(&data_dir.path);
 
+    // Before asking Windows about monitors, see `become_dpi_aware`.
+    window_place::become_dpi_aware();
     // Where the window was last time, if it still fits on the monitors
     // connected now. Reading the small layout file here is fine: the window
     // doesn't exist yet.
