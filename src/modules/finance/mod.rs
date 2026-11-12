@@ -66,8 +66,10 @@ pub struct Finance {
     /// Problems to show on top of the panel.
     problems: Vec<String>,
     /// Goes up whenever the data changes, so the tabs know when their
-    /// cached sums are stale.
+    /// cached lists are stale.
     data_version: u64,
+    /// What the panel shows: tab, filters, cached lists.
+    view: ui::ViewState,
 }
 
 impl Finance {
@@ -102,6 +104,7 @@ impl Finance {
             character_problems: HashMap::new(),
             problems: problem.into_iter().collect(),
             data_version: 0,
+            view: ui::ViewState::default(),
         };
         module.read_roster();
         module
@@ -129,7 +132,12 @@ impl Finance {
         }
     }
 
-    /// The characters whose wallets are picked, in roster order.
+    /// "Refresh": fetch everything now.
+    pub fn refresh_now(&self) {
+        self.worker.send(Command::RefreshNow);
+    }
+
+    /// The characters whose wallets are picked.
     pub fn picked(&self) -> BTreeSet<u64> {
         self.characters
             .iter()

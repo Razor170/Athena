@@ -67,7 +67,8 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # thread's id from Win32_System_Threading, the mouse capture while the
 # overlay is dragged from Win32_UI_Input_KeyboardAndMouse, and DPI
 # awareness before the saved window placement is checked from
-# Win32_UI_HiDpi). These are
+# Win32_UI_HiDpi, and local time with summer time for the Finance tab from
+# Win32_System_Time). These are
 # thin, official bindings to the Windows API, with no other dependencies.
 [target.'cfg(windows)'.dependencies]
 # Gets the main window's handle from eframe, to remember its position and
@@ -83,6 +84,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Threading",
+    "Win32_System_Time",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",

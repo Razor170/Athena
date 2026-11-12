@@ -9,8 +9,8 @@
 
 use eframe::egui::Color32;
 
-/// The groups the Overview ring shows. The order here is the order of the
-/// Types filter.
+/// The groups the Overview ring shows. The order here (`Ord`) is the order
+/// of the Types filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Category {
     Trade,
@@ -25,18 +25,6 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 9] = [
-        Category::Trade,
-        Category::Bounties,
-        Category::Missions,
-        Category::Industry,
-        Category::Planetary,
-        Category::CorpAlliance,
-        Category::Transfers,
-        Category::TaxesFees,
-        Category::Other,
-    ];
-
     pub fn label(self) -> &'static str {
         match self {
             Category::Trade => "Trade",
