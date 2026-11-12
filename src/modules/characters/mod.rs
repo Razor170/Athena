@@ -26,6 +26,7 @@ use eframe::egui;
 
 use self::store::{CharacterList, Place};
 use self::worker::{Command, Event, TokenStatus, Worker};
+use super::shared::{RosterCharacter, SharedRoster, publish_roster};
 use super::{Module, ModuleContext};
 use crate::auth::TokenStore;
 use crate::storage::Saver;
@@ -61,10 +62,18 @@ pub struct Characters {
     tag_editor: Option<(u64, String)>,
     /// UI state: show only characters with this tag.
     tag_filter: Option<String>,
+    /// The character list other modules read (Finance). Updated on every
+    /// save.
+    roster: SharedRoster,
 }
 
 impl Characters {
-    pub fn new(egui_ctx: &egui::Context, data_dir: &Path, tokens: Arc<TokenStore>) -> Characters {
+    pub fn new(
+        egui_ctx: &egui::Context,
+        data_dir: &Path,
+        tokens: Arc<TokenStore>,
+        roster: SharedRoster,
+    ) -> Characters {
         let (list, warning) = CharacterList::load(data_dir);
         let worker = Worker::start(egui_ctx, tokens);
         let ids: Vec<u64> = list.characters.iter().map(|c| c.id).collect();
@@ -72,7 +81,7 @@ impl Characters {
         if !ids.is_empty() && crate::auth::is_configured() {
             worker.send(Command::CheckAll(ids));
         }
-        Characters {
+        let module = Characters {
             data_dir: data_dir.to_path_buf(),
             saver: Saver::start(),
             list,
@@ -84,7 +93,10 @@ impl Characters {
             renaming: None,
             tag_editor: None,
             tag_filter: None,
-        }
+            roster,
+        };
+        module.publish_roster();
+        module
     }
 
     fn save(&self) {
@@ -92,6 +104,27 @@ impl Characters {
             self.saver
                 .save(CharacterList::file_path(&self.data_dir), text);
         }
+        self.publish_roster();
+    }
+
+    /// Hands the character list to the other modules, in the order this
+    /// tab shows it: accounts first, then the unassigned characters.
+    fn publish_roster(&self) {
+        let in_accounts = self
+            .list
+            .accounts
+            .iter()
+            .flat_map(|account| account.characters.iter())
+            .filter_map(|id| self.list.character(*id));
+        let characters = in_accounts
+            .chain(self.list.unassigned())
+            .map(|c| RosterCharacter {
+                id: c.id,
+                name: c.name.clone(),
+                tags: c.tags.clone(),
+            })
+            .collect();
+        publish_roster(&self.roster, characters);
     }
 
     /// The "+ Add character" button.

@@ -146,9 +146,6 @@ impl TokenStore {
 
     /// A working access token for the character, renewed first if needed.
     /// Blocks while it renews, so call it only from a background thread.
-    // Not called yet: the first module that reads a character's data from
-    // ESI (wallet, skills, ...) gets its token through this.
-    #[allow(dead_code)]
     pub fn access_token(&self, http: &Client, character_id: u64) -> Result<String, RefreshError> {
         // Held across the renewal on purpose, see the note on the struct.
         let mut tokens = self

@@ -1,7 +1,8 @@
 //! Static game data from EVE's static data export (SDE): ore, ice, moon ore
 //! and gas types with their volumes, what they reprocess into, and which
 //! type each one compresses into. Also the map (regions, systems, gates)
-//! and ship names, in [`Universe`].
+//! and ship names, in [`Universe`]. And NPC corporations with the stations
+//! of their loyalty point stores, for the Finance module.
 //!
 //! The data comes from `static.sqlite`, which `cargo xtask sde` builds from
 //! the official SDE (see `xtask/src/main.rs`). CI builds it and puts it in the
@@ -23,7 +24,7 @@ use crate::universe::Universe;
 pub const FILE_NAME: &str = "static.sqlite";
 
 /// The `schema_version` this code can read. Must match the xtask.
-const SCHEMA_VERSION: &str = "2";
+const SCHEMA_VERSION: &str = "3";
 
 /// What kind of thing an item is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +69,15 @@ pub struct Item {
     pub kind: ItemKind,
 }
 
+/// An NPC station with a loyalty point store.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LpStation {
+    pub station_id: i64,
+    pub system_id: i64,
+    /// For example "Jita IV - Moon 4 - Caldari Navy Assembly Plant".
+    pub name: String,
+}
+
 /// All static data Athena uses, in memory.
 #[derive(Debug, Clone, Default)]
 pub struct StaticData {
@@ -81,6 +91,10 @@ pub struct StaticData {
     compressed: HashMap<i64, i64>,
     /// The map and ship names, for the Intel Supervisor.
     pub universe: Universe,
+    /// NPC corporation id -> name.
+    corporation_names: HashMap<i64, String>,
+    /// NPC corporation id -> its stations that have its LP store.
+    lp_stations: HashMap<i64, Vec<LpStation>>,
 }
 
 impl StaticData {
@@ -182,6 +196,37 @@ impl StaticData {
             data.compressed.insert(type_id, compressed_id);
         }
 
+        let mut query = db.prepare("SELECT corporation_id, name FROM npc_corporations")?;
+        let rows = query.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, name) = row?;
+            data.corporation_names.insert(id, name);
+        }
+
+        let mut query = db.prepare(
+            "SELECT station_id, system_id, corporation_id, name FROM lp_stations
+             ORDER BY station_id",
+        )?;
+        let rows = query.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(2)?,
+                LpStation {
+                    station_id: row.get(0)?,
+                    system_id: row.get(1)?,
+                    name: row.get(3)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (corporation_id, station) = row?;
+            data.lp_stations
+                .entry(corporation_id)
+                .or_default()
+                .push(station);
+        }
+
         if data.items.is_empty() {
             bail!("static data contains no items");
         }
@@ -227,6 +272,22 @@ impl StaticData {
         )
     }
 
+    /// An NPC corporation's name, such as "Caldari Navy".
+    pub fn corporation_name(&self, corporation_id: i64) -> Option<&str> {
+        self.corporation_names
+            .get(&corporation_id)
+            .map(|name| name.as_str())
+    }
+
+    /// The NPC corporation's stations that have its loyalty point store.
+    /// Empty for corporations without one.
+    pub fn lp_stations(&self, corporation_id: i64) -> &[LpStation] {
+        self.lp_stations
+            .get(&corporation_id)
+            .map(|stations| stations.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Every material id any item reprocesses into: the types whose Jita
     /// prices are needed to value ore.
     pub fn material_ids(&self) -> Vec<i64> {
@@ -260,8 +321,13 @@ pub mod tests {
                 quantity INTEGER NOT NULL, PRIMARY KEY (type_id, material_id));
             CREATE TABLE compressed (type_id INTEGER PRIMARY KEY,
                 compressed_type_id INTEGER NOT NULL);
+            CREATE TABLE npc_corporations (corporation_id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL);
+            CREATE TABLE lp_stations (station_id INTEGER PRIMARY KEY,
+                system_id INTEGER NOT NULL, corporation_id INTEGER NOT NULL,
+                name TEXT NOT NULL);
 
-            INSERT INTO meta VALUES ('schema_version', '2'), ('sde_build', '3670638');
+            INSERT INTO meta VALUES ('schema_version', '3'), ('sde_build', '3670638');
             INSERT INTO items VALUES
                 (1230, 'Veldspar', 0.1, 100, 'Veldspar', 'ore'),
                 (62516, 'Compressed Veldspar', 0.001, 100, 'Veldspar', 'ore'),
@@ -276,6 +342,10 @@ pub mod tests {
                 (16265, 16272, 69),
                 (62399, 30370, 1);
             INSERT INTO compressed VALUES (1230, 62516), (30370, 62399);
+            INSERT INTO npc_corporations VALUES (1000035, 'Caldari Navy'), (1000120, 'DED');
+            INSERT INTO lp_stations VALUES
+                (60000001, 104, 1000035, 'A4 I - Caldari Navy Logistic Support'),
+                (60000002, 202, 1000035, 'B2 III - Moon 1 - Caldari Navy Assembly Plant');
             ",
         )
         .unwrap();
@@ -322,6 +392,17 @@ pub mod tests {
     #[test]
     fn material_ids_are_unique() {
         assert_eq!(sample().material_ids(), vec![34, 16272, 30370]);
+    }
+
+    #[test]
+    fn loads_corporations_and_lp_stations() {
+        let data = sample();
+        assert_eq!(data.corporation_name(1000035), Some("Caldari Navy"));
+        assert_eq!(data.corporation_name(1), None);
+        let stations = data.lp_stations(1000035);
+        assert_eq!(stations.len(), 2);
+        assert_eq!(stations[0].system_id, 104);
+        assert!(data.lp_stations(1000120).is_empty());
     }
 
     #[test]
