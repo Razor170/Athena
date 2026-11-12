@@ -317,7 +317,7 @@ pub fn full_isk(value: f64, sign: bool) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     pub fn entry(id: i64, ref_type: &str, amount: f64) -> JournalEntry {

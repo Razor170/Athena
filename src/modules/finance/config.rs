@@ -15,6 +15,18 @@ pub struct FinanceSettings {
     /// Characters whose wallet is NOT picked. Stored this way round so a
     /// newly logged-in character is picked from the start.
     pub unpicked: BTreeSet<u64>,
+    /// What the Overview chart's candles follow.
+    pub chart: ChartMode,
+}
+
+/// The Overview chart's Balance | Net switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ChartMode {
+    /// The combined wallet balance of the picked characters.
+    #[default]
+    Balance,
+    /// Income minus expenses, from 0 at the start of the time range.
+    Net,
 }
 
 impl FinanceSettings {
@@ -50,6 +62,7 @@ mod tests {
     fn round_trips_through_toml() {
         let settings = FinanceSettings {
             unpicked: [5, 7].into_iter().collect(),
+            chart: ChartMode::Net,
         };
         let text = toml::to_string(&settings).unwrap();
         assert_eq!(toml::from_str::<FinanceSettings>(&text).unwrap(), settings);
@@ -57,5 +70,8 @@ mod tests {
             toml::from_str::<FinanceSettings>("").unwrap(),
             FinanceSettings::default()
         );
+        // Files from before the chart existed still load.
+        let old: FinanceSettings = toml::from_str("unpicked = [5]").unwrap();
+        assert_eq!(old.chart, ChartMode::Balance);
     }
 }

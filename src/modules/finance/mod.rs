@@ -6,6 +6,7 @@
 //! - [`worker`]: fetches from ESI on a background thread and saves to
 //!   `finance.sqlite` ([`store`]), so the history grows past ESI's 30 days.
 //! - [`data`]: the entries and the sums the tabs show.
+//! - [`chart`]: the candle chart on the Overview tab.
 //! - [`categories`]: which category each kind of journal entry belongs to.
 //! - [`config`]: the picked wallets, saved in `finance.toml`.
 //! - `ui`: draws the panel.
@@ -14,6 +15,7 @@
 //! sent, and applies new events in `update`.
 
 pub mod categories;
+pub mod chart;
 pub mod config;
 pub mod data;
 pub mod store;
