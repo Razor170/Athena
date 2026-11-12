@@ -15,7 +15,7 @@
 //! This is plain blocking code with `std::net`: one request at a time is
 //! all a login needs, so no web server crate is needed.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +31,10 @@ pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// How often the waiting loop looks for a new connection or a cancel.
 /// Only runs while a login is in progress.
 const POLL: Duration = Duration::from_millis(100);
+
+/// Limits for one browser request.
+const MAX_REQUEST_BYTES: u64 = 16 * 1024;
+const MAX_HEADER_LINES: usize = 64;
 
 /// The address Athena opens in the browser to start a login.
 pub fn start_url() -> String {
@@ -112,10 +116,22 @@ fn handle(stream: TcpStream, login_url: &str, state: &str) -> Option<Outcome> {
     // reads with a time limit, so a stuck browser can't hang the login.
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut reader = BufReader::new(&stream);
+    // At most 16 KB of request, so an endless line can't eat memory.
+    let mut reader = BufReader::new((&stream).take(MAX_REQUEST_BYTES));
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() {
         return None;
+    }
+    // Read the rest of the headers too (up to the empty line). On Windows,
+    // closing a socket with unread data resets the connection, and the
+    // browser would show an error instead of our page.
+    for _ in 0..MAX_HEADER_LINES {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) if line.trim().is_empty() => break,
+            Ok(_) => {}
+        }
     }
     // "GET /callback?code=...&state=... HTTP/1.1"
     let target = request_line.split_whitespace().nth(1).unwrap_or("");
@@ -242,7 +258,6 @@ mod tests {
     /// the callback hands back the code.
     #[test]
     fn serves_a_login_over_localhost() {
-        use std::io::Read;
         let server = CallbackServer::start().unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
         let waiting = std::thread::spawn(move || {

@@ -19,7 +19,7 @@ use super::store::Affiliation;
 use crate::auth::callback::{CallbackServer, Outcome};
 use crate::auth::pkce::Pkce;
 use crate::auth::sso::{self, TokenCharacter};
-use crate::auth::{RefreshError, TokenStore, vault};
+use crate::auth::{RefreshError, TokenStore};
 use crate::esi::{EsiClient, Fetched};
 
 /// What the module asks the worker to do.
@@ -31,7 +31,12 @@ pub enum Command {
     FetchCorporation(u64),
     /// Forget a character's login: revoke it at EVE and delete it from
     /// Credential Manager.
-    Remove(u64),
+    Remove {
+        id: u64,
+        /// The character's login count when Remove was clicked, so a
+        /// login that finished since then is kept.
+        generation: u64,
+    },
 }
 
 /// How a character's login is doing.
@@ -101,6 +106,11 @@ impl Worker {
         }
     }
 
+    /// See `TokenStore::login_generation`. Only a short lock, no I/O.
+    pub fn login_generation(&self, character_id: u64) -> u64 {
+        self.tokens.login_generation(character_id)
+    }
+
     pub fn send(&self, command: Command) {
         let _ = self.commands.send(command);
     }
@@ -156,7 +166,7 @@ fn finish_login(tokens: &TokenStore, code: &str, pkce: &Pkce) -> Result<TokenCha
     let http = sso::http_client()?;
     let fresh = sso::exchange_code(&http, code, pkce)?;
     let id = fresh.character.id;
-    vault::save(id, &fresh.refresh_token)?;
+    tokens.save_login(id, &fresh.refresh_token)?;
     tokens.put(id, fresh.access_token, fresh.expires_at);
     Ok(fresh.character)
 }
@@ -206,8 +216,8 @@ impl WorkerState {
                     send(event);
                 }
             }
-            Command::Remove(id) => {
-                if let Some(problem) = self.remove(id) {
+            Command::Remove { id, generation } => {
+                if let Some(problem) = self.remove(id, generation) {
                     send(Event::Problem(problem));
                 }
             }
@@ -292,20 +302,18 @@ impl WorkerState {
     }
 
     /// Revokes and deletes a login. Returns a message if something failed.
-    fn remove(&mut self, id: u64) -> Option<String> {
-        self.tokens.forget(id);
-        let refresh_token = match vault::load(id) {
+    fn remove(&mut self, id: u64, generation: u64) -> Option<String> {
+        let refresh_token = match self.tokens.delete_login_if_unchanged(id, generation) {
             Ok(token) => token,
             Err(e) => return Some(format!("{e:#}")),
         };
         // Revoking is a courtesy to EVE: the login stops working at once
-        // instead of lingering under "Authorized Apps". Not being able to
-        // reach EVE must not keep the token on this PC, so the local copy
-        // is deleted whatever happens.
+        // instead of lingering under "Authorized Apps". The local copy is
+        // already gone, whatever EVE answers.
         if let (Some(token), Some(http)) = (&refresh_token, &self.sso_http) {
             let _ = sso::revoke(http, token);
         }
-        vault::remove(id).err().map(|e| format!("{e:#}"))
+        None
     }
 }
 

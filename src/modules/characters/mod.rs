@@ -115,7 +115,8 @@ impl Characters {
     fn remove_character(&mut self, id: u64) {
         self.list.remove_character(id);
         self.statuses.remove(&id);
-        self.worker.send(Command::Remove(id));
+        let generation = self.worker.login_generation(id);
+        self.worker.send(Command::Remove { id, generation });
         self.save();
     }
 

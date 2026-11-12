@@ -72,13 +72,62 @@ struct AccessToken {
 /// for the network.
 pub struct TokenStore {
     tokens: Mutex<HashMap<u64, AccessToken>>,
+    /// How many times each character has logged in this run. Removing a
+    /// character only deletes its login if nobody logged it in again since
+    /// the Remove click (see [`TokenStore::delete_login_if_unchanged`]).
+    /// A separate lock from `tokens`, so it's never held during a network call.
+    logins: Mutex<HashMap<u64, u64>>,
 }
 
 impl TokenStore {
     pub fn new() -> TokenStore {
         TokenStore {
             tokens: Mutex::new(HashMap::new()),
+            logins: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Saves the refresh token from a new login and counts the login.
+    pub fn save_login(&self, character_id: u64, refresh_token: &str) -> anyhow::Result<()> {
+        let mut logins = self
+            .logins
+            .lock()
+            .map_err(|_| anyhow::anyhow!("token store is broken"))?;
+        *logins.entry(character_id).or_insert(0) += 1;
+        vault::save(character_id, refresh_token)
+    }
+
+    /// How many times the character has logged in this run. The module
+    /// notes it when Remove is clicked.
+    pub fn login_generation(&self, character_id: u64) -> u64 {
+        self.logins
+            .lock()
+            .map(|logins| logins.get(&character_id).copied().unwrap_or(0))
+            .unwrap_or(0)
+    }
+
+    /// Deletes the character's login from Credential Manager and memory,
+    /// unless it logged in again after `generation` was read (then the
+    /// login is a new one the user wants to keep). Returns the deleted
+    /// refresh token, so the caller can revoke it at EVE.
+    pub fn delete_login_if_unchanged(
+        &self,
+        character_id: u64,
+        generation: u64,
+    ) -> anyhow::Result<Option<String>> {
+        // Held while deleting, so a login finishing at the same moment
+        // waits and then saves its new token after the delete.
+        let logins = self
+            .logins
+            .lock()
+            .map_err(|_| anyhow::anyhow!("token store is broken"))?;
+        if logins.get(&character_id).copied().unwrap_or(0) != generation {
+            return Ok(None);
+        }
+        self.forget(character_id);
+        let refresh_token = vault::load(character_id)?;
+        vault::remove(character_id)?;
+        Ok(refresh_token)
     }
 
     /// Keeps a fresh access token, for example right after a login.
@@ -111,7 +160,9 @@ impl TokenStore {
         {
             return Ok(cached.token.clone());
         }
-        let fresh = renew(http, character_id)?;
+        // A failed save is ignored here: the fresh token still works for
+        // this run, and the startup check reports the problem.
+        let (fresh, _save_problem) = renew(http, character_id)?;
         let token = fresh.access_token.clone();
         tokens.insert(
             character_id,
@@ -135,7 +186,7 @@ impl TokenStore {
             .tokens
             .lock()
             .map_err(|_| RefreshError::Other(anyhow::anyhow!("token store is broken")))?;
-        let fresh = renew(http, character_id)?;
+        let (fresh, save_problem) = renew(http, character_id)?;
         tokens.insert(
             character_id,
             AccessToken {
@@ -143,13 +194,22 @@ impl TokenStore {
                 expires_at: fresh.expires_at,
             },
         );
-        Ok(fresh.character)
+        match save_problem {
+            None => Ok(fresh.character),
+            Some(problem) => Err(RefreshError::Other(problem.context(
+                "the login works for now, but its renewed token couldn't be saved, so it will be lost when Athena closes. Log in again",
+            ))),
+        }
     }
 }
 
 /// Uses the saved refresh token to get new tokens, and saves the new
-/// refresh token EVE sends back.
-fn renew(http: &Client, character_id: u64) -> Result<sso::Tokens, RefreshError> {
+/// refresh token EVE sends back. If that save fails, the fresh tokens are
+/// still returned (they work until Athena closes), along with the problem.
+fn renew(
+    http: &Client,
+    character_id: u64,
+) -> Result<(sso::Tokens, Option<anyhow::Error>), RefreshError> {
     let refresh_token = vault::load(character_id)
         .map_err(RefreshError::Other)?
         .ok_or(RefreshError::LoginExpired)?;
@@ -159,8 +219,31 @@ fn renew(http: &Client, character_id: u64) -> Result<sso::Tokens, RefreshError> 
             "the login server sent a token for another character"
         )));
     }
+    let mut save_problem = None;
     if fresh.refresh_token != refresh_token {
-        vault::save(character_id, &fresh.refresh_token).map_err(RefreshError::Other)?;
+        save_problem = vault::save(character_id, &fresh.refresh_token).err();
     }
-    Ok(fresh)
+    Ok((fresh, save_problem))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_keeps_a_login_made_after_the_click() {
+        let store = TokenStore::new();
+        // Remove clicked while the character had logged in once...
+        store.save_login(7, "first").unwrap();
+        let generation = store.login_generation(7);
+        // ...then it logged in again before the worker got to the remove.
+        store.save_login(7, "second").unwrap();
+        assert_eq!(
+            store.delete_login_if_unchanged(7, generation).unwrap(),
+            None
+        );
+        // Without a new login the delete goes ahead.
+        let now = store.login_generation(7);
+        assert!(store.delete_login_if_unchanged(7, now).is_ok());
+    }
 }
