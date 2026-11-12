@@ -168,6 +168,8 @@ Athena updates itself from GitHub Releases. Mockup approved by Kevin on 2026-11-
 ### Step 8: Toggle bar and short names
 - The View menu is replaced by a row of toggle buttons on top, one per module from `modules::create_all` plus Settings on the right edge. A button is bright while its tab is open and dark while it's closed; clicking toggles the tab. Mockup: https://claude.ai/artifact/JM7q42WKY3NLwDhcBZ7y19.
 - The tabs are now called "Mining" and "Intel" (was Mining Supervisor and Intel Supervisor). Module ids are unchanged, so saved layouts keep working.
+- Closing a tab (toggle button or the tab's X) remembers where it was: in a tab group, split beside other tabs (with the split's size), or in a floating window (with its position and size). Toggling it on puts it back there; if that spot is gone it opens in the focused group as before. Floating windows also keep their place across restarts.
+- The main window's position, size and maximized state are saved in `layout.toml` (Windows `GetWindowPlacement`, in screen pixels, so it works across monitors). On start the window goes back there, unless its title bar would not be on any connected monitor; then it starts maximized as before.
 
 ### Step 9: Characters (ESI login)
 A module (id `characters`) that logs characters in with EVE's SSO and sorts them into accounts. Mockup approved by Kevin on 2026-11-12: https://claude.ai/artifact/CV7E765hJwHYpyTYHNNn9s

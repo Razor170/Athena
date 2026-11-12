@@ -68,6 +68,10 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # overlay is dragged from Win32_UI_Input_KeyboardAndMouse). These are
 # thin, official bindings to the Windows API, with no other dependencies.
 [target.'cfg(windows)'.dependencies]
+# Gets the main window's handle from eframe, to remember its position and
+# size (src/window_place.rs). Already part of the build through eframe and
+# winit, so it adds no new code.
+raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

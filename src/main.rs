@@ -15,6 +15,7 @@ mod storage;
 mod universe;
 mod updater;
 mod version;
+mod window_place;
 
 use std::path::PathBuf;
 
@@ -82,14 +83,22 @@ fn run() -> Result<()> {
     let saver = storage::Saver::start();
     let (settings, settings_warning) = settings::Settings::load(&data_dir.path);
 
+    // Where the window was last time, if it still fits on the monitors
+    // connected now. Reading the small layout file here is fine: the window
+    // doesn't exist yet.
+    let window_placement =
+        layout::saved_window_placement(&data_dir.path).and_then(window_place::usable);
+
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Athena")
-            // Start maximized. The inner size is what Windows uses when the
-            // user un-maximizes the window. Sizes are in logical points, so
-            // Windows display scaling (125%, 150%) is applied automatically;
-            // 1280x720 points still fits a 1080p screen at 150%.
-            .with_maximized(true)
+            // The first time, start maximized. The inner size is what Windows
+            // uses when the user un-maximizes the window. Sizes are in logical
+            // points, so Windows display scaling (125%, 150%) is applied
+            // automatically; 1280x720 points still fits a 1080p screen at 150%.
+            // With a saved placement, the window starts normal and hidden and
+            // `AthenaApp::new` moves it into place before it is shown.
+            .with_maximized(window_placement.is_none())
             .with_inner_size([1280.0, 720.0])
             .with_min_inner_size([800.0, 600.0]),
         renderer: renderer(),
@@ -100,8 +109,13 @@ fn run() -> Result<()> {
         "Athena",
         options,
         Box::new(move |cc| {
+            let main_window = window_place::MainWindow::new(cc);
+            if let Some(placement) = window_placement {
+                main_window.restore(placement);
+            }
             Ok(Box::new(app::AthenaApp::new(
                 &cc.egui_ctx,
+                main_window,
                 data_dir,
                 settings,
                 settings_warning,
