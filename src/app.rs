@@ -1,4 +1,4 @@
-//! The main window: a menu bar on top and the dock area with all tabs below.
+//! The main window: a bar of module toggle buttons on top and the dock area with all tabs below.
 
 use eframe::egui;
 use egui_dock::{DockArea, Style};
@@ -21,7 +21,7 @@ pub struct AthenaApp {
     mining_overlay: MiningOverlay,
     /// The layout text we last handed to the saver, so we only save when it changed.
     last_saved_layout: String,
-    /// The auto-updater: its strip under the menu bar and its Settings section.
+    /// The auto-updater: its strip under the toggle bar and its Settings section.
     updater: Updater,
     /// Set by "Restart now": start Athena again once this one has closed.
     restart_to_install: bool,
@@ -100,28 +100,48 @@ impl AthenaApp {
         }
     }
 
-    fn menu_bar(&mut self, ui: &mut egui::Ui) {
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("View", |ui| {
-                for module in &self.modules {
-                    let tab = Tab::Module(module.id().to_string());
-                    toggle_tab(ui, &mut self.layout, tab, module.title());
-                }
-                ui.separator();
-                toggle_tab(ui, &mut self.layout, Tab::Settings, "Settings");
+    /// The bar on top: one toggle button per module, Settings on the right.
+    /// The buttons come from `self.modules`, so a new module gets one for free.
+    fn toggle_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            for module in &self.modules {
+                let tab = Tab::Module(module.id().to_string());
+                toggle_button(ui, &mut self.layout, tab, module.title());
+            }
+            // Right-to-left layout fills the rest of the row from the right edge.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                toggle_button(ui, &mut self.layout, Tab::Settings, "Settings");
             });
         });
     }
 }
 
-/// A checkbox in the View menu that opens or closes one tab.
-fn toggle_tab(ui: &mut egui::Ui, layout: &mut Layout, tab: Tab, title: &str) {
-    let mut open = layout.is_open(&tab);
-    if ui.checkbox(&mut open, title).changed() {
+/// Fill and text colours of a toggle button whose tab is open: brighter than
+/// a closed one, so it shows at a glance which modules are open.
+const OPEN_FILL: egui::Color32 = egui::Color32::from_rgb(0x5b, 0x6f, 0x86);
+const OPEN_TEXT: egui::Color32 = egui::Color32::WHITE;
+const CLOSED_FILL: egui::Color32 = egui::Color32::from_rgb(0x2a, 0x2a, 0x2a);
+const CLOSED_TEXT: egui::Color32 = egui::Color32::from_gray(0x8c);
+const OPEN_EDGE: egui::Color32 = egui::Color32::from_rgb(0x8a, 0xa3, 0xbf);
+const CLOSED_EDGE: egui::Color32 = egui::Color32::from_gray(0x3a);
+
+/// A button in the top bar that opens or closes one tab. Bright when the tab
+/// is open, dark when it's closed.
+fn toggle_button(ui: &mut egui::Ui, layout: &mut Layout, tab: Tab, title: &str) {
+    let open = layout.is_open(&tab);
+    let (fill, text, edge) = if open {
+        (OPEN_FILL, OPEN_TEXT, OPEN_EDGE)
+    } else {
+        (CLOSED_FILL, CLOSED_TEXT, CLOSED_EDGE)
+    };
+    let button = egui::Button::new(egui::RichText::new(title).color(text))
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, edge));
+    if ui.add(button).clicked() {
         if open {
-            layout.open(tab);
-        } else {
             layout.close(&tab);
+        } else {
+            layout.open(tab);
         }
     }
 }
@@ -163,7 +183,7 @@ impl eframe::App for AthenaApp {
         ui.painter()
             .rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
 
-        egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
+        egui::Panel::top("toggle_bar").show(ui, |ui| self.toggle_bar(ui));
         if self.updater.strip_visible() {
             match self.updater.strip_ui(ui) {
                 StripAction::None => {}

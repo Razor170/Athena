@@ -34,10 +34,10 @@ run it. Click **More info**, then **Run anyway**.
 
 - Every module is a tab. Drag a tab by its title to move it, dock it beside another
   tab, or pull it out into its own floating window. Drag the gaps between panels to resize.
-- Closed tabs come back through the **View** menu.
+- The buttons in the top bar open and close tabs: bright means open, dark means closed.
 - The layout is saved when Athena closes.
 
-## Mining Supervisor
+## Mining
 
 One card per character, filled from the game logs (`Documents\EVE\logs\Gamelogs`; set
 another log folder in Athena's settings):

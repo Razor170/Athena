@@ -449,7 +449,7 @@ impl Module for MiningSupervisor {
     }
 
     fn title(&self) -> &'static str {
-        "Mining Supervisor"
+        "Mining"
     }
 
     fn update(&mut self, _ctx: &ModuleContext) {
