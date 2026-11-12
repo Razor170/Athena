@@ -2,7 +2,9 @@
 //! and gas types with their volumes, what they reprocess into, and which
 //! type each one compresses into. Also the map (regions, systems, gates)
 //! and ship names, in [`Universe`]. And NPC corporations with the stations
-//! of their loyalty point stores, for the Finance module.
+//! of their loyalty point stores, for the Finance module. And planetary
+//! commodities, colony structures and factory schematics, for the
+//! Planetary module.
 //!
 //! The data comes from `static.sqlite`, which `cargo xtask sde` builds from
 //! the official SDE (see `xtask/src/main.rs`). CI builds it and puts it in the
@@ -24,7 +26,7 @@ use crate::universe::Universe;
 pub const FILE_NAME: &str = "static.sqlite";
 
 /// The `schema_version` this code can read. Must match the xtask.
-const SCHEMA_VERSION: &str = "3";
+const SCHEMA_VERSION: &str = "4";
 
 /// What kind of thing an item is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +80,59 @@ pub struct LpStation {
     pub name: String,
 }
 
+/// What a colony structure on a planet is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PiStructureKind {
+    CommandCenter,
+    /// The extractor control unit.
+    Extractor,
+    /// Basic, advanced and high-tech industry facilities.
+    Factory,
+    Storage,
+    Launchpad,
+}
+
+impl PiStructureKind {
+    fn from_db(text: &str) -> Option<PiStructureKind> {
+        match text {
+            "command_center" => Some(PiStructureKind::CommandCenter),
+            "extractor" => Some(PiStructureKind::Extractor),
+            "factory" => Some(PiStructureKind::Factory),
+            "storage" => Some(PiStructureKind::Storage),
+            "launchpad" => Some(PiStructureKind::Launchpad),
+            _ => None,
+        }
+    }
+}
+
+/// A colony structure type, such as "Temperate Launchpad".
+#[derive(Debug, Clone, PartialEq)]
+pub struct PiStructure {
+    pub name: String,
+    pub kind: PiStructureKind,
+    /// How much it holds in m³; 0 for factories and extractors.
+    pub capacity_m3: f64,
+}
+
+/// A planetary commodity, P0 (raw resource) to P4.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PiCommodity {
+    pub name: String,
+    pub volume_m3: f64,
+    pub tier: i64,
+}
+
+/// A factory schematic: what one cycle takes and makes.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PiSchematic {
+    pub name: String,
+    pub cycle_secs: i64,
+    /// (type id, quantity per cycle).
+    pub inputs: Vec<(i64, i64)>,
+    /// (type id, quantity per cycle).
+    pub output: Option<(i64, i64)>,
+}
+
 /// All static data Athena uses, in memory.
 #[derive(Debug, Clone, Default)]
 pub struct StaticData {
@@ -95,6 +150,12 @@ pub struct StaticData {
     corporation_names: HashMap<i64, String>,
     /// NPC corporation id -> its stations that have its LP store.
     lp_stations: HashMap<i64, Vec<LpStation>>,
+    /// Planetary commodities by type id.
+    pi_commodities: HashMap<i64, PiCommodity>,
+    /// Colony structures by type id.
+    pi_structures: HashMap<i64, PiStructure>,
+    /// Factory schematics by schematic id.
+    pi_schematics: HashMap<i64, PiSchematic>,
 }
 
 impl StaticData {
@@ -227,11 +288,114 @@ impl StaticData {
                 .push(station);
         }
 
+        data.read_planetary(db).context("reading planetary data")?;
+
         if data.items.is_empty() {
             bail!("static data contains no items");
         }
         data.universe = Universe::from_connection(db).context("reading the map")?;
         Ok(data)
+    }
+
+    /// Reads the `pi_*` tables.
+    fn read_planetary(&mut self, db: &rusqlite::Connection) -> Result<()> {
+        let mut query = db.prepare("SELECT type_id, name, volume_m3, tier FROM pi_commodities")?;
+        let rows = query.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                PiCommodity {
+                    name: row.get(1)?,
+                    volume_m3: row.get(2)?,
+                    tier: row.get(3)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (id, commodity) = row?;
+            self.pi_commodities.insert(id, commodity);
+        }
+
+        let mut query = db.prepare("SELECT type_id, name, kind, capacity_m3 FROM pi_structures")?;
+        let rows = query.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, name, kind, capacity_m3) = row?;
+            let kind = PiStructureKind::from_db(&kind)
+                .with_context(|| format!("unknown structure kind {kind} for {name}"))?;
+            self.pi_structures.insert(
+                id,
+                PiStructure {
+                    name,
+                    kind,
+                    capacity_m3,
+                },
+            );
+        }
+
+        let mut query = db.prepare("SELECT schematic_id, name, cycle_secs FROM pi_schematics")?;
+        let rows = query.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, name, cycle_secs) = row?;
+            self.pi_schematics.insert(
+                id,
+                PiSchematic {
+                    name,
+                    cycle_secs,
+                    ..PiSchematic::default()
+                },
+            );
+        }
+
+        let mut query = db.prepare(
+            "SELECT schematic_id, type_id, quantity, is_input FROM pi_schematic_types
+             ORDER BY schematic_id, type_id",
+        )?;
+        let rows = query.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, bool>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, type_id, quantity, is_input) = row?;
+            if let Some(schematic) = self.pi_schematics.get_mut(&id) {
+                if is_input {
+                    schematic.inputs.push((type_id, quantity));
+                } else {
+                    schematic.output = Some((type_id, quantity));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A planetary commodity by type id.
+    pub fn pi_commodity(&self, type_id: i64) -> Option<&PiCommodity> {
+        self.pi_commodities.get(&type_id)
+    }
+
+    /// A colony structure type by type id.
+    pub fn pi_structure(&self, type_id: i64) -> Option<&PiStructure> {
+        self.pi_structures.get(&type_id)
+    }
+
+    /// A factory schematic by schematic id.
+    pub fn pi_schematic(&self, schematic_id: i64) -> Option<&PiSchematic> {
+        self.pi_schematics.get(&schematic_id)
     }
 
     /// Looks up an item by its English name, as written in the logs.
@@ -326,8 +490,41 @@ pub mod tests {
             CREATE TABLE lp_stations (station_id INTEGER PRIMARY KEY,
                 system_id INTEGER NOT NULL, corporation_id INTEGER NOT NULL,
                 name TEXT NOT NULL);
+            CREATE TABLE pi_commodities (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                volume_m3 REAL NOT NULL, tier INTEGER NOT NULL);
+            CREATE TABLE pi_structures (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                kind TEXT NOT NULL, capacity_m3 REAL NOT NULL);
+            CREATE TABLE pi_schematics (schematic_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                cycle_secs INTEGER NOT NULL);
+            CREATE TABLE pi_schematic_types (schematic_id INTEGER NOT NULL,
+                type_id INTEGER NOT NULL, quantity INTEGER NOT NULL, is_input INTEGER NOT NULL,
+                PRIMARY KEY (schematic_id, type_id));
 
-            INSERT INTO meta VALUES ('schema_version', '3'), ('sde_build', '3670638');
+            INSERT INTO meta VALUES ('schema_version', '4'), ('sde_build', '3670638');
+            INSERT INTO pi_commodities VALUES
+                (2268, 'Aqueous Liquids', 0.005, 0),
+                (3645, 'Water', 0.19, 1),
+                (2389, 'Plasmoids', 0.19, 1),
+                (9832, 'Coolant', 0.75, 2),
+                (9838, 'Superconductors', 0.75, 2),
+                (2393, 'Bacteria', 0.19, 1),
+                (2073, 'Microorganisms', 0.005, 0);
+            INSERT INTO pi_structures VALUES
+                (2254, 'Temperate Command Center', 'command_center', 500.0),
+                (3068, 'Temperate Extractor Control Unit', 'extractor', 0.0),
+                (2481, 'Temperate Basic Industry Facility', 'factory', 0.0),
+                (2480, 'Temperate Advanced Industry Facility', 'factory', 0.0),
+                (2562, 'Temperate Storage Facility', 'storage', 12000.0),
+                (2256, 'Temperate Launchpad', 'launchpad', 10000.0);
+            INSERT INTO pi_schematics VALUES
+                (121, 'Water', 1800),
+                (65, 'Superconductors', 3600);
+            INSERT INTO pi_schematic_types VALUES
+                (121, 2268, 3000, 1),
+                (121, 3645, 20, 0),
+                (65, 2389, 40, 1),
+                (65, 3645, 40, 1),
+                (65, 9838, 5, 0);
             INSERT INTO items VALUES
                 (1230, 'Veldspar', 0.1, 100, 'Veldspar', 'ore'),
                 (62516, 'Compressed Veldspar', 0.001, 100, 'Veldspar', 'ore'),
@@ -403,6 +600,19 @@ pub mod tests {
         assert_eq!(stations.len(), 2);
         assert_eq!(stations[0].system_id, 104);
         assert!(data.lp_stations(1000120).is_empty());
+    }
+
+    #[test]
+    fn loads_planetary_data() {
+        let data = sample();
+        assert_eq!(data.pi_commodity(3645).unwrap().name, "Water");
+        let pad = data.pi_structure(2256).unwrap();
+        assert_eq!(pad.kind, PiStructureKind::Launchpad);
+        assert_eq!(pad.capacity_m3, 10_000.0);
+        let schematic = data.pi_schematic(65).unwrap();
+        assert_eq!(schematic.cycle_secs, 3600);
+        assert_eq!(schematic.inputs, vec![(2389, 40), (3645, 40)]);
+        assert_eq!(schematic.output, Some((9838, 5)));
     }
 
     #[test]
