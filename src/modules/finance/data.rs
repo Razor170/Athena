@@ -4,6 +4,8 @@
 //! Also the pure calculations the tabs need (filters, sums per category),
 //! kept apart from drawing so they can be tested.
 
+use std::collections::BTreeSet;
+
 use serde::Deserialize;
 
 use super::categories::{Category, category};
@@ -38,6 +40,19 @@ pub struct JournalEntry {
 impl JournalEntry {
     pub fn category(&self) -> Category {
         category(&self.ref_type)
+    }
+
+    /// True when money moved between two of the `picked` characters, e.g.
+    /// one giving ISK to another. Overview leaves these out: they are
+    /// neither income nor expense for the picked wallets as a whole.
+    pub fn is_between(&self, picked: &BTreeSet<u64>) -> bool {
+        let is_picked = |id: Option<i64>| {
+            id.and_then(|id| u64::try_from(id).ok())
+                .is_some_and(|id| picked.contains(&id))
+        };
+        self.first_party_id != self.second_party_id
+            && is_picked(self.first_party_id)
+            && is_picked(self.second_party_id)
     }
 }
 
@@ -320,6 +335,22 @@ mod tests {
             description: String::new(),
             reason: None,
         }
+    }
+
+    #[test]
+    fn transfers_between_picked_characters() {
+        let mut e = entry(1, "player_donation", -5.0);
+        e.first_party_id = Some(1);
+        e.second_party_id = Some(2);
+        let both = BTreeSet::from([1, 2]);
+        let one = BTreeSet::from([1]);
+        assert!(e.is_between(&both));
+        assert!(!e.is_between(&one));
+        // A stranger, or a missing party, is a real income or expense.
+        e.second_party_id = Some(3);
+        assert!(!e.is_between(&both));
+        e.second_party_id = None;
+        assert!(!e.is_between(&both));
     }
 
     #[test]
