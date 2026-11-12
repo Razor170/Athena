@@ -381,7 +381,12 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
         {
             issues.push((Level::Soon, format!("Inputs last ~{}", duration_text(left))));
         }
-        if idle_count > 0 {
+        // Basic factories fed by a running extractor are often idle when
+        // you look, waiting for the next batch. That's normal; idle
+        // factories only matter when they live on outside inputs or no
+        // extractor is running any more.
+        let idle_matters = !inputs.is_empty() || running.is_empty();
+        if idle_count > 0 && idle_matters {
             issues.push((
                 Level::Soon,
                 format!("{idle_count} of {factory_count} factories idle at last view"),
@@ -735,6 +740,37 @@ mod tests {
         assert!((a.launchpads[0].added_m3 - expected).abs() < 1e-6);
         assert_eq!(a.level, Level::Active);
         assert_eq!(a.headline, "1 extractor · end in 5d · 1 factory running");
+    }
+
+    #[test]
+    fn idle_basic_factory_with_running_extractor_is_fine() {
+        let data = sample();
+        // The Water factory's last cycle ended long before the view: it
+        // waits for the next extractor batch.
+        let pins = vec![
+            ecu(1, NOW + 5 * 86_400),
+            factory(2, BASIC, 121, NOW - 5 * 3600),
+            pad(3, vec![]),
+        ];
+        let a = assess(&colony(pins, vec![], NOW), &data, &defaults(), NOW);
+        assert_eq!(a.factories[0].idle, 1);
+        assert_eq!(a.level, Level::Active);
+
+        // Once the extractor has stopped, the idle factory does count (the
+        // stopped extractor is the headline, as the worse problem).
+        let pins = vec![
+            ecu(1, NOW - 3600),
+            factory(2, BASIC, 121, NOW - 5 * 3600),
+            pad(3, vec![]),
+        ];
+        let a = assess(
+            &colony(pins, vec![], NOW - 2 * 3600),
+            &data,
+            &defaults(),
+            NOW,
+        );
+        assert_eq!(a.level, Level::Attention);
+        assert_eq!(a.headline, "Extractors stopped 1 h ago");
     }
 
     #[test]

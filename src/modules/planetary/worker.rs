@@ -297,7 +297,13 @@ impl Fetcher {
             });
         }
 
-        let names = self.look_up_planet_names();
+        // Only with a colony round (at most every 10 minutes), so a name
+        // ESI can't give isn't asked for every minute.
+        let names = if checked {
+            self.look_up_planet_names()
+        } else {
+            Vec::new()
+        };
         if !names.is_empty() {
             changed = true;
             send(Event::PlanetNames(names));
