@@ -24,8 +24,8 @@ the ESI web API. It never reads from or sends anything to the game client.";
 pub const GETTING_STARTED: &[&str] = &[
     "**Settings** › EVE logs: check that the log folder is right. The default is \
      Documents\\EVE\\logs.",
-    "**Characters**: click [+ Add character] and log in with EVE. Finance and Planetary \
-     need this. Mining and Intel work without it.",
+    "**Characters**: click [+ Add character] and log in with EVE. Finance, Planetary and \
+     Contracts need this. Mining and Intel work without it.",
     "**Intel** › Settings: tick the intel channels you want watched.",
     "**Mining** needs no setup. Start mining and a card shows up for each character.",
 ];
@@ -131,6 +131,23 @@ pub const SECTIONS: &[Section] = &[
         ],
         note: "Settings: the hours, pad levels and days that count as soon, full or old, and \
                the fill estimate on or off.",
+    },
+    Section {
+        title: "Contracts",
+        subtitle: "your contracts and what changed",
+        paragraphs: &[
+            "The list on the left shows every contract of your characters. [Active], \
+             [Finished] and [All], the type buttons, tag chips and the search box filter it. \
+             Click a row for the route, bids, who accepted it and the items.",
+            "The changelog on the right keeps every change: accepted, sold, delivered, new \
+             bid, expired, due soon and more. Drag the bar between them to resize.",
+            "Changes from while Athena was closed come first, marked **while closed**, with a \
+             dot on their row. Click one (or [Mark all seen]) and it moves into its day. The \
+             number on the Contracts button counts what you haven't seen.",
+        ],
+        note: "Settings: which changes alert (count and taskbar flash) and beep, the \
+               \"soon\" hours, and how long finished contracts stay in the list. Athena only \
+               reads contracts; accept them in EVE.",
     },
     Section {
         title: "Settings and updates",

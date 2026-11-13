@@ -56,6 +56,22 @@ pub struct PilotSystem {
 /// A pilot in a wormhole (no gates, not on the map) is left out.
 pub type PilotSystems = Arc<Mutex<HashMap<String, PilotSystem>>>;
 
+/// Plays the Windows "exclamation" sound, the alert beep of Mining and
+/// Contracts. It returns at once; Windows plays it in the background.
+#[cfg(windows)]
+pub fn alert_sound() {
+    // MessageBeep lives in the "Diagnostics::Debug" part of the bindings.
+    use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
+    use windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONEXCLAMATION;
+    // SAFETY: MessageBeep takes a plain number and has no other effects.
+    unsafe {
+        MessageBeep(MB_ICONEXCLAMATION);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn alert_sound() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
