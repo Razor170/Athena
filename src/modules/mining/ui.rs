@@ -11,7 +11,7 @@ use eframe::egui::{self, Align, Color32, CornerRadius, Layout, RichText, Sense, 
 use super::config::OverlaySettings;
 use super::gamelog::LogTime;
 use super::prices::{self, PriceSide};
-use super::scan::{self, BeltScan};
+use super::scan::{self, BeltDepletion, BeltScan};
 use super::session::{CharacterTracker, GuardState};
 use super::store::{PeriodTotal, SessionKind, StoredSession, Totals};
 use super::{AlertLevel, HistoryMode, MiningSupervisor, View};
@@ -367,6 +367,11 @@ fn character_card(
     let alert_at = tracker.settings.fill_alert_percent;
     let percent = tracker.fill_percent(&module.volumes).unwrap_or(0.0);
     let bar_color = fill_color(tracker, percent);
+    // When EVE says the hold is full but our count is lower (ore from
+    // before Athena ran, or a hold size set too big), stretch the bar so it
+    // looks full too.
+    let bar_capacity = bar_capacity(capacity, percent, fill.total_m3());
+    let compressed_percent = compressed_percent(bar_capacity, fill.compressed_m3);
 
     // What the character is doing, and how the border looks.
     let quiet_secs = tracker
@@ -464,10 +469,6 @@ fn character_card(
                     ),
                 );
                 let width = ui.available_width();
-                // When EVE says the hold is full but our count is lower
-                // (ore from before Athena ran, or a hold size set too big),
-                // stretch the bar so it looks full too.
-                let bar_capacity = bar_capacity(capacity, percent, fill.total_m3());
                 hold_bar(
                     ui,
                     width,
@@ -491,6 +492,11 @@ fn character_card(
                     ))
                     .color(SOFT),
                 );
+                // Right to left, so this lands left of the m³ amounts.
+                if let Some(share) = compressed_percent {
+                    ui.label(small(format!("{share:.0}%")).color(PURPLE).strong())
+                        .on_hover_text("Compressed ore, in percent of the ore hold");
+                }
             });
         });
         if !fill.unknown_items.is_empty() {
@@ -543,6 +549,16 @@ fn fill_color(tracker: &CharacterTracker, percent: f64) -> Color32 {
 /// The m³ the bar's full width stands for. When EVE says the hold is full
 /// but our count is lower (ore from before Athena ran, or a hold size set
 /// too big), the bar is stretched so it looks full too.
+/// The compressed ore in percent of the hold: the purple part of the bar.
+/// `None` without a hold size or without compressed ore. A little
+/// compressed ore shows as 1% rather than 0%.
+fn compressed_percent(bar_capacity: f64, compressed_m3: f64) -> Option<f64> {
+    if bar_capacity <= 0.0 || compressed_m3 <= 0.0 {
+        return None;
+    }
+    Some((compressed_m3 / bar_capacity * 100.0).round().max(1.0))
+}
+
 fn bar_capacity(capacity: f64, percent: f64, total_m3: f64) -> f64 {
     if percent >= 100.0 && total_m3 > 0.0 {
         capacity.min(total_m3)
@@ -578,6 +594,8 @@ pub(super) fn overlay_bar(module: &MiningSupervisor, tracker: &CharacterTracker)
         percent: tracker
             .fill_percent(&module.volumes)
             .map(|p| p.clamp(0.0, 999.0).round() as u32),
+        compressed_percent: compressed_percent(capacity, fill.compressed_m3)
+            .map(|p| p.clamp(0.0, 999.0) as u32),
     }
 }
 
@@ -699,6 +717,12 @@ fn belt_scan(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
         // compared with itself, which gives no rate.
         let previous = module.belt_scans.previous();
         let progress = scan::belt_progress(previous.unwrap_or(latest), latest);
+        let now = LogTime {
+            unix_seconds: now_unix(),
+        };
+        if let Some(depletion) = module.belt_scans.depletion(now) {
+            depletion_bar(ui, &depletion, previous.is_some());
+        }
         let value_left = scan_value(module, latest);
 
         let gap = 6.0;
@@ -770,6 +794,100 @@ fn belt_scan(module: &mut MiningSupervisor, ui: &mut egui::Ui) {
     if new_belt {
         module.belt_scans.clear();
     }
+}
+
+/// The belt's depletion bar: full at the first scan of the belt. Solid is
+/// what is probably left now, striped is what the latest scan still showed
+/// but should be mined away by now at the last belt rate, dark is gone.
+/// Thin ticks mark the scans in between.
+fn depletion_bar(ui: &mut egui::Ui, bar: &BeltDepletion, compared: bool) {
+    const HEIGHT: f32 = 14.0;
+    let color = if bar.estimated_share < 0.10 {
+        RED
+    } else if bar.estimated_share < 0.25 {
+        YELLOW
+    } else {
+        GREEN
+    };
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), HEIGHT), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, CornerRadius::same(3), BAR_BACK);
+    let x_at = |share: f64| rect.left() + share.clamp(0.0, 1.0) as f32 * rect.width();
+
+    let solid_right = x_at(bar.estimated_share);
+    painter.rect_filled(
+        egui::Rect::from_min_max(rect.left_top(), egui::pos2(solid_right, rect.bottom())),
+        CornerRadius::ZERO,
+        color,
+    );
+    let striped = egui::Rect::from_min_max(
+        egui::pos2(solid_right, rect.top()),
+        egui::pos2(x_at(bar.scanned_share), rect.bottom()),
+    );
+    if striped.width() > 0.5 {
+        let [r, g, b, _] = color.to_array();
+        painter.rect_filled(
+            striped,
+            CornerRadius::ZERO,
+            Color32::from_rgb(r / 2, g / 2, b / 2),
+        );
+        // Diagonal stripes, clipped to the striped part. They start at the
+        // bar's left edge, so they stand still while the part shrinks.
+        let stripes = painter.with_clip_rect(striped);
+        let step = 8.0;
+        let mut x = rect.left() - HEIGHT;
+        while x < striped.right() {
+            if x + HEIGHT >= striped.left() {
+                stripes.line_segment(
+                    [
+                        egui::pos2(x, rect.bottom()),
+                        egui::pos2(x + HEIGHT, rect.top()),
+                    ],
+                    Stroke::new(3.0, color),
+                );
+            }
+            x += step;
+        }
+    }
+    for &share in &bar.earlier_shares {
+        let x = x_at(share);
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xf0, 0xf0, 0xf0, 140)),
+        );
+    }
+    response.on_hover_text(
+        "Full at the first scan of this belt. Solid: probably still there. Striped: \
+         should be mined away since the last scan at the last belt rate. Dark: gone. \
+         Ticks: earlier scans.",
+    );
+
+    let percent = (bar.estimated_share * 100.0).round();
+    let left = if !compared {
+        format!(
+            "{} m³ left (first scan, no rate yet)",
+            short_m3(bar.estimated_m3)
+        )
+    } else if !bar.has_rate {
+        format!(
+            "{} m³ left at last scan ({percent:.0}%)",
+            short_m3(bar.estimated_m3)
+        )
+    } else if bar.estimated_m3 <= 0.0 {
+        "probably empty, copy a new scan".to_string()
+    } else {
+        format!(
+            "est. {} m³ left now ({percent:.0}%)",
+            short_m3(bar.estimated_m3)
+        )
+    };
+    ui.horizontal(|ui| {
+        ui.label(small(left).color(SOFT));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(small(format!("first scan {} m³", short_m3(bar.first_m3))).color(SOFT));
+        });
+    });
 }
 
 /// A stat tile: small label, big value, small note.
@@ -1777,6 +1895,12 @@ fn overlay_settings(
         .checkbox(
             &mut overlay.show_percent,
             "Show hold % under each bar (right side)",
+        )
+        .changed();
+    changed |= ui
+        .checkbox(
+            &mut overlay.show_compressed_percent,
+            "Show compressed % in purple, left of the hold %",
         )
         .changed();
     egui::Grid::new("overlay_opacity")

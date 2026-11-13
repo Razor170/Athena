@@ -93,6 +93,8 @@ pub struct OverlaySettings {
     pub show_names: bool,
     /// Show how full the hold is, in percent, under each bar on the right.
     pub show_percent: bool,
+    /// Show the compressed share of the hold, in purple, left of the hold %.
+    pub show_compressed_percent: bool,
     /// Opacity of the background, 0 to 100 percent.
     pub background_opacity: f64,
     /// Opacity of the bars and their text, 10 to 100 percent.
@@ -111,6 +113,7 @@ impl Default for OverlaySettings {
             width_px: 170,
             show_names: true,
             show_percent: true,
+            show_compressed_percent: true,
             background_opacity: 55.0,
             bar_opacity: 100.0,
             position: None,
