@@ -222,10 +222,8 @@ fn toggle_button(
         };
         job.append(&format!(" {badge} "), 6.0, format);
     }
-    let button = egui::Button::new(job)
-        .fill(fill)
-        .stroke(egui::Stroke::new(1.0, edge));
-    if ui.add(button).clicked() {
+    let button = egui::Button::new(job).fill(fill);
+    if crate::widgets::add_outlined(ui, true, button, egui::Stroke::new(1.0, edge)).clicked() {
         if open {
             layout.close(&tab, ui.ctx());
         } else {

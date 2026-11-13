@@ -16,6 +16,7 @@ mod storage;
 mod universe;
 mod updater;
 mod version;
+mod widgets;
 mod window_place;
 
 use std::path::PathBuf;
