@@ -292,7 +292,8 @@ impl Contracts {
     /// The Price column's text: "620 m", "-24.0 m", "+412 m".
     fn price_text(&self, contract: &Contract, side: Side) -> String {
         let value = self.price_value(contract, side);
-        let wanted = contract.kind == ContractType::ItemExchange
+        // Same rule as the "want to buy" arm in `price_value`.
+        let wanted = !matches!(contract.kind, ContractType::Courier | ContractType::Auction)
             && contract.price == 0.0
             && contract.reward > 0.0;
         if wanted && value > 0.0 {
