@@ -21,7 +21,6 @@ use super::data::{Contract, ContractType, Side, Stage, finished_label};
 use super::store::LogEntry;
 use crate::localtime;
 use crate::modules::finance::data::short_isk;
-use crate::modules::planetary::status::duration_text;
 
 // Colours from the mockup (the same as Planetary and Finance).
 const GREEN: Color32 = Color32::from_rgb(0x7c, 0xc4, 0x7c);
@@ -58,7 +57,8 @@ const CONTRACT_MIN_W: f32 = 150.0;
 const CHARACTER_W: f32 = 120.0;
 const PRICE_W: f32 = 84.0;
 const WHERE_W: f32 = 150.0;
-const TIME_W: f32 = 120.0;
+const ISSUED_W: f32 = 104.0;
+const END_W: f32 = 104.0;
 const MIN_LIST_WIDTH: f32 = 420.0;
 const MIN_LOG_WIDTH: f32 = 300.0;
 const HANDLE_WIDTH: f32 = 12.0;
@@ -219,17 +219,19 @@ struct Row {
     character: String,
     price: String,
     location: String,
-    time: String,
-    time_color: Color32,
+    issued: String,
+    end: String,
+    end_color: Color32,
     /// It has a "while closed" entry not seen yet.
     closed_change: bool,
     /// Default sort key: active ones by how soon they need you, finished
     /// ones by when they ended (newest first).
     sort: (u8, i64),
-    /// For sorting by column: the price as a number, and the time the
-    /// Time column shows (a deadline, or when it ended).
+    /// For sorting by column: the price as a number, when it was issued,
+    /// and the time the End column shows (a deadline, or when it ended).
     price_value: f64,
-    time_value: i64,
+    issued_value: i64,
+    end_value: i64,
 }
 
 fn stage_color(stage: Stage) -> Color32 {
@@ -352,7 +354,7 @@ fn rows(module: &Contracts, mine: &[u64], now: i64) -> (Vec<Row>, Counts) {
         if !needle.is_empty() && !search_text(module, contract, &title).contains(&needle) {
             continue;
         }
-        let (time, time_color, sort) = time_cell(contract, stage, side, soon, now);
+        let (end_value, end_color, sort) = end_cell(contract, stage, side, soon);
         let location = if contract.start_location_id > 0 {
             module.name(contract.start_location_id)
         } else {
@@ -369,12 +371,15 @@ fn rows(module: &Contracts, mine: &[u64], now: i64) -> (Vec<Row>, Counts) {
             character: character.map_or_else(String::new, |id| module.character_name(id)),
             price: module.price_text(contract, side),
             location,
-            time,
-            time_color,
+            issued: date_time_text(contract.issued),
+            end: end_value.map_or_else(|| "-".to_string(), date_time_text),
+            end_color,
             closed_change: closed.contains(&contract.id),
             sort,
             price_value: module.price_value(contract, side),
-            time_value: sort.1.abs(),
+            issued_value: contract.issued,
+            // No deadline (in progress, no due date) sorts as "latest".
+            end_value: end_value.unwrap_or(i64::MAX),
         });
     }
     sort_rows(&mut out, module.settings.sort);
@@ -400,7 +405,8 @@ fn sort_rows(rows: &mut [Row], sort: Option<Sort>) {
             SortColumn::Character => text(&a.character, &b.character),
             SortColumn::Price => a.price_value.total_cmp(&b.price_value),
             SortColumn::Where => text(&a.location, &b.location),
-            SortColumn::Time => a.time_value.cmp(&b.time_value),
+            SortColumn::Issued => a.issued_value.cmp(&b.issued_value),
+            SortColumn::End => a.end_value.cmp(&b.end_value),
         };
         if sort.descending {
             order.reverse()
@@ -420,57 +426,49 @@ struct Counts {
 }
 
 /// The "Time" column, its colour and the row's sort key.
-fn time_cell(
+/// The End column: when it expires, is due or ended (`None`: in progress
+/// with no due date), its colour, and the default sort key.
+fn end_cell(
     contract: &Contract,
     stage: Stage,
     side: Side,
     soon: bool,
-    now: i64,
-) -> (String, Color32, (u8, i64)) {
+) -> (Option<i64>, Color32, (u8, i64)) {
     let soon_color = if soon { YELLOW } else { TEXT };
     match stage {
-        Stage::AssignedToYou => (
-            format!("expires in {}", duration_text(contract.expires - now)),
-            soon_color,
-            (0, contract.expires),
-        ),
+        Stage::AssignedToYou => (Some(contract.expires), soon_color, (0, contract.expires)),
         Stage::Overdue => {
             let due = contract.due().unwrap_or(contract.expires);
-            (
-                format!("overdue {}", duration_text(now - due)),
-                RED,
-                (0, due),
-            )
+            (Some(due), RED, (0, due))
         }
         Stage::Waiting | Stage::HasBids => {
-            let word = if contract.kind == ContractType::Auction {
-                "ends"
-            } else {
-                "expires"
-            };
-            (
-                format!("{word} in {}", duration_text(contract.expires - now)),
-                soon_color,
-                (1, contract.expires),
-            )
+            (Some(contract.expires), soon_color, (1, contract.expires))
         }
         Stage::InProgress => match contract.due() {
-            Some(due) => (
-                format!("due in {}", duration_text(due - now)),
-                if side == Side::Accepted {
+            Some(due) => {
+                let color = if side == Side::Accepted {
                     soon_color
                 } else {
                     TEXT
-                },
-                (1, due),
-            ),
-            None => ("in progress".to_string(), TEXT, (1, i64::MAX)),
+                };
+                (Some(due), color, (1, due))
+            }
+            None => (None, TEXT, (1, i64::MAX)),
         },
         _ => {
             let ended = contract.ended_at(stage);
-            (when_text(ended, now), DIM, (2, -ended))
+            (Some(ended), DIM, (2, -ended))
         }
     }
+}
+
+/// "2026-11-14 04:04" in local time: year first, so dates read (and
+/// sort) the same way everywhere.
+fn date_time_text(unix: i64) -> String {
+    let (year, month, day) =
+        localtime::civil_from_days(localtime::to_local(unix).div_euclid(86_400));
+    let clock = &localtime::clock_text(unix)[..5];
+    format!("{year}-{month:02}-{day:02} {clock}")
 }
 
 fn contract_list(module: &mut Contracts, ui: &mut egui::Ui, mine: &[u64], now: i64) {
@@ -602,7 +600,8 @@ fn dot(ui: &mut egui::Ui, color: Color32) {
     ui.painter().circle_filled(rect.center(), 3.5, color);
 }
 
-/// The x positions of the columns in a row of `rect`.
+/// The x positions of the columns in a row of `rect`. A hidden column
+/// has width 0.
 struct Columns {
     dot: Rect,
     status: Rect,
@@ -611,40 +610,57 @@ struct Columns {
     character: Rect,
     price: Rect,
     location: Rect,
-    time: Rect,
+    issued: Rect,
+    end: Rect,
 }
 
 fn columns(rect: Rect) -> Columns {
-    // In a narrow list, "Where" goes first, then "Type", so the contract
-    // keeps room for its title.
-    let base = DOT_W + STATUS_W + CHARACTER_W + PRICE_W + TIME_W + CELL_GAP * 7.0;
-    let room = |extra: f32| rect.width() - base - extra;
-    let (type_w, where_w) = if room(TYPE_W + WHERE_W + CELL_GAP * 2.0) >= CONTRACT_MIN_W {
-        (TYPE_W, WHERE_W)
-    } else if room(TYPE_W + CELL_GAP) >= CONTRACT_MIN_W {
-        (TYPE_W, 0.0)
-    } else {
-        (0.0, 0.0)
+    // In a narrow list, columns are hidden one by one, in this order,
+    // until the contract keeps room for its title: Where, Type, Issued,
+    // Character, Price. Status and End always stay.
+    let contract_room = |widths: [f32; 5]| {
+        let shown: f32 = widths
+            .iter()
+            .map(|w| if *w > 0.0 { w + CELL_GAP } else { 0.0 })
+            .sum();
+        rect.width() - CELL_GAP - (DOT_W + STATUS_W + END_W + CELL_GAP * 4.0) - shown
     };
-    let gaps = |w: f32| if w > 0.0 { CELL_GAP } else { 0.0 };
-    let contract_w = room(type_w + where_w + gaps(type_w) + gaps(where_w)).max(40.0);
+    let mut widths = [WHERE_W, TYPE_W, ISSUED_W, CHARACTER_W, PRICE_W];
+    for i in 0..widths.len() {
+        if contract_room(widths) >= CONTRACT_MIN_W {
+            break;
+        }
+        widths[i] = 0.0;
+    }
+    let [where_w, kind_w, issued_w, character_w, price_w] = widths;
+    let contract_w = contract_room(widths).max(0.0);
+
     let mut x = rect.left() + CELL_GAP;
     let mut next = |w: f32| {
         let r = Rect::from_min_max(Pos2::new(x, rect.top()), Pos2::new(x + w, rect.bottom()));
         if w > 0.0 {
             x += w + CELL_GAP;
         }
-        r
+        // Anything past the row's right edge is cut off (or hidden), so
+        // nothing is drawn over the changelog even in a tiny list.
+        let r = r.intersect(rect);
+        if r.width() < 1.0 {
+            let x = r.min.x.min(rect.right());
+            Rect::from_min_max(Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom()))
+        } else {
+            r
+        }
     };
     Columns {
         dot: next(DOT_W),
         status: next(STATUS_W),
-        kind: next(type_w),
+        kind: next(kind_w),
         contract: next(contract_w),
-        character: next(CHARACTER_W),
-        price: next(PRICE_W),
+        character: next(character_w),
+        price: next(price_w),
         location: next(where_w),
-        time: next(TIME_W),
+        issued: next(issued_w),
+        end: next(END_W),
     }
 }
 
@@ -715,7 +731,8 @@ fn header_row(module: &mut Contracts, ui: &mut egui::Ui) {
         (c.character, "Character", false, SortColumn::Character),
         (c.price, "Price / reward", true, SortColumn::Price),
         (c.location, "Where", false, SortColumn::Where),
-        (c.time, "Time", true, SortColumn::Time),
+        (c.issued, "Issued", true, SortColumn::Issued),
+        (c.end, "End", true, SortColumn::End),
     ] {
         if cell.width() < 1.0 {
             continue;
@@ -794,7 +811,12 @@ fn contract_row(module: &mut Contracts, ui: &mut egui::Ui, row: &Row, mine: &[u6
     paint_cell(ui, c.status, row.status, 13.0, row.status_color, false);
     paint_cell(ui, c.kind, row.kind, 13.0, TYPE_TEXT, false);
     // Title and "you issued" share the Contract column.
-    let side_width = if row.side.is_empty() { 0.0 } else { 80.0 };
+    // In a narrow column the title keeps the room and "you issued" goes.
+    let side_width = if row.side.is_empty() || c.contract.width() < 200.0 {
+        0.0
+    } else {
+        80.0
+    };
     let title_rect = Rect::from_min_max(
         c.contract.min,
         Pos2::new(c.contract.right() - side_width, c.contract.bottom()),
@@ -810,7 +832,8 @@ fn contract_row(module: &mut Contracts, ui: &mut egui::Ui, row: &Row, mine: &[u6
     paint_cell(ui, c.character, &row.character, 13.0, TEXT, false);
     paint_cell(ui, c.price, &row.price, 13.0, BRIGHT, true);
     paint_cell(ui, c.location, &row.location, 13.0, TEXT, false);
-    paint_cell(ui, c.time, &row.time, 13.0, row.time_color, true);
+    paint_cell(ui, c.issued, &row.issued, 13.0, DIM, true);
+    paint_cell(ui, c.end, &row.end, 13.0, row.end_color, true);
     ui.painter().hline(
         rect.x_range(),
         rect.bottom() - 0.5,
@@ -917,13 +940,13 @@ fn details(
         );
     }
     if let Some(due) = contract.due() {
-        fact("Deliver by", when_text(due, now));
+        fact("Deliver by", date_time_text(due));
     }
-    fact("Issued", when_text(contract.issued, now));
+    fact("Issued", date_time_text(contract.issued));
     if stage.is_open() {
-        fact("Expires", when_text(contract.expires, now));
+        fact("Expires", date_time_text(contract.expires));
     } else if !stage.is_active() {
-        fact("Ended", when_text(contract.ended_at(stage), now));
+        fact("Ended", date_time_text(contract.ended_at(stage)));
     }
 
     let mut items: Vec<(String, String)> = Vec::new();
@@ -1423,12 +1446,14 @@ mod tests {
             character: String::new(),
             price: String::new(),
             location: String::new(),
-            time: String::new(),
-            time_color: TEXT,
+            issued: String::new(),
+            end: String::new(),
+            end_color: TEXT,
             closed_change: false,
             sort,
             price_value: price,
-            time_value: sort.1.abs(),
+            issued_value: id,
+            end_value: sort.1.abs(),
         }
     }
 
@@ -1450,8 +1475,41 @@ mod tests {
         // Equal prices keep the default order (3 before 1).
         sort_rows(&mut rows, by(SortColumn::Price, true));
         assert_eq!(ids(&rows), vec![3, 1, 2]);
-        sort_rows(&mut rows, by(SortColumn::Time, false));
+        sort_rows(&mut rows, by(SortColumn::End, false));
         assert_eq!(ids(&rows), vec![3, 1, 2]);
+        sort_rows(&mut rows, by(SortColumn::Issued, true));
+        assert_eq!(ids(&rows), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn dates_read_year_first() {
+        // Tests run on Linux, where local time is UTC. 2026-11-01 04:05 UTC.
+        assert_eq!(date_time_text(1_793_505_900), "2026-11-01 04:05");
+    }
+
+    #[test]
+    fn narrow_lists_hide_columns_and_stay_inside() {
+        let rect = |w: f32| Rect::from_min_size(Pos2::ZERO, Vec2::new(w, 24.0));
+        let wide = columns(rect(1200.0));
+        assert!(wide.location.width() > 0.0 && wide.issued.width() > 0.0);
+        for w in [700.0, 500.0, 300.0, 120.0] {
+            let c = columns(rect(w));
+            for cell in [
+                c.status,
+                c.kind,
+                c.contract,
+                c.character,
+                c.price,
+                c.location,
+                c.issued,
+                c.end,
+            ] {
+                assert!(cell.right() <= w + 0.01, "width {w}: {cell:?}");
+            }
+        }
+        let mid = columns(rect(700.0));
+        assert_eq!(mid.location.width(), 0.0);
+        assert!(mid.contract.width() >= CONTRACT_MIN_W);
     }
 
     #[test]
