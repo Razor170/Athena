@@ -16,7 +16,7 @@ use eframe::egui::{
 
 use super::Contracts;
 use super::changes::{AlertKind, ChangeKind, deadline};
-use super::config::{StatusFilter, TypeFilter};
+use super::config::{Sort, SortColumn, StatusFilter, TypeFilter};
 use super::data::{Contract, ContractType, Side, Stage, finished_label};
 use super::store::LogEntry;
 use crate::localtime;
@@ -223,9 +223,13 @@ struct Row {
     time_color: Color32,
     /// It has a "while closed" entry not seen yet.
     closed_change: bool,
-    /// Sort key: active ones by how soon they need you, finished ones by
-    /// when they ended (newest first).
+    /// Default sort key: active ones by how soon they need you, finished
+    /// ones by when they ended (newest first).
     sort: (u8, i64),
+    /// For sorting by column: the price as a number, and the time the
+    /// Time column shows (a deadline, or when it ended).
+    price_value: f64,
+    time_value: i64,
 }
 
 fn stage_color(stage: Stage) -> Color32 {
@@ -369,10 +373,41 @@ fn rows(module: &Contracts, mine: &[u64], now: i64) -> (Vec<Row>, Counts) {
             time_color,
             closed_change: closed.contains(&contract.id),
             sort,
+            price_value: module.price_value(contract, side),
+            time_value: sort.1.abs(),
         });
     }
-    out.sort_by(|a, b| a.sort.cmp(&b.sort).then(a.id.cmp(&b.id)));
+    sort_rows(&mut out, module.settings.sort);
     (out, counts)
+}
+
+/// Sorts by the clicked column, or the default order. Ties keep the
+/// default order, so the list never jumps around between frames.
+fn sort_rows(rows: &mut [Row], sort: Option<Sort>) {
+    rows.sort_by(|a, b| a.sort.cmp(&b.sort).then(a.id.cmp(&b.id)));
+    let Some(sort) = sort else {
+        return;
+    };
+    let text = |a: &str, b: &str| a.to_lowercase().cmp(&b.to_lowercase());
+    // `sort_by` is stable: rows that compare equal keep the order above.
+    rows.sort_by(|a, b| {
+        let order = match sort.column {
+            SortColumn::Status => (a.stage as u8)
+                .cmp(&(b.stage as u8))
+                .then(text(a.status, b.status)),
+            SortColumn::Type => text(a.kind, b.kind),
+            SortColumn::Contract => text(&a.title, &b.title),
+            SortColumn::Character => text(&a.character, &b.character),
+            SortColumn::Price => a.price_value.total_cmp(&b.price_value),
+            SortColumn::Where => text(&a.location, &b.location),
+            SortColumn::Time => a.time_value.cmp(&b.time_value),
+        };
+        if sort.descending {
+            order.reverse()
+        } else {
+            order
+        }
+    });
 }
 
 #[derive(Default)]
@@ -475,7 +510,7 @@ fn contract_list(module: &mut Contracts, ui: &mut egui::Ui, mine: &[u64], now: i
         .show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             ui.spacing_mut().item_spacing = Vec2::ZERO;
-            header_row(ui);
+            header_row(module, ui);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -615,9 +650,18 @@ fn columns(rect: Rect) -> Columns {
 
 /// One line of text in a cell, cut with "…" when too long. Nothing is
 /// drawn in a column hidden for lack of room (width 0).
-fn paint_cell(ui: &egui::Ui, rect: Rect, text: &str, size: f32, color: Color32, right: bool) {
+///
+/// Returns the width of the text as drawn.
+fn paint_cell(
+    ui: &egui::Ui,
+    rect: Rect,
+    text: &str,
+    size: f32,
+    color: Color32,
+    right: bool,
+) -> f32 {
     if rect.width() < 1.0 {
-        return;
+        return 0.0;
     }
     let mut job = LayoutJob::simple_singleline(text.to_string(), FontId::proportional(size), color);
     job.wrap = TextWrapping::truncate_at_width(rect.width().max(1.0));
@@ -629,24 +673,93 @@ fn paint_cell(ui: &egui::Ui, rect: Rect, text: &str, size: f32, color: Color32, 
     };
     let pos = Pos2::new(x, rect.center().y - galley.size().y / 2.0);
     // Clipped to the cell, so nothing spills into the changelog.
+    let width = galley.size().x;
     ui.painter()
         .with_clip_rect(ui.clip_rect().intersect(rect.expand(1.0)))
         .galley(pos, galley, color);
+    width
 }
 
-fn header_row(ui: &mut egui::Ui) {
+/// A small triangle: pointing up for ascending, down for descending.
+/// Painted, because the built-in fonts have no arrows.
+fn sort_triangle(ui: &egui::Ui, center: Pos2, descending: bool) {
+    let (w, h) = (4.0, 3.0);
+    let points = if descending {
+        vec![
+            center + Vec2::new(-w, -h),
+            center + Vec2::new(w, -h),
+            center + Vec2::new(0.0, h),
+        ]
+    } else {
+        vec![
+            center + Vec2::new(-w, h),
+            center + Vec2::new(w, h),
+            center + Vec2::new(0.0, -h),
+        ]
+    };
+    ui.painter()
+        .add(egui::Shape::convex_polygon(points, BRIGHT, Stroke::NONE));
+}
+
+/// The column titles. Clicking one sorts by it: ascending, descending,
+/// then back to the default order. A small triangle marks the sorted one.
+fn header_row(module: &mut Contracts, ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover());
     let c = columns(rect);
-    for (cell, label, right) in [
-        (c.status, "Status", false),
-        (c.kind, "Type", false),
-        (c.contract, "Contract", false),
-        (c.character, "Character", false),
-        (c.price, "Price / reward", true),
-        (c.location, "Where", false),
-        (c.time, "Time", true),
+    let current = module.settings.sort;
+    let mut clicked = None;
+    for (cell, label, right, column) in [
+        (c.status, "Status", false, SortColumn::Status),
+        (c.kind, "Type", false, SortColumn::Type),
+        (c.contract, "Contract", false, SortColumn::Contract),
+        (c.character, "Character", false, SortColumn::Character),
+        (c.price, "Price / reward", true, SortColumn::Price),
+        (c.location, "Where", false, SortColumn::Where),
+        (c.time, "Time", true, SortColumn::Time),
     ] {
-        paint_cell(ui, cell, label, 12.0, DIM, right);
+        if cell.width() < 1.0 {
+            continue;
+        }
+        let response = ui
+            .interact(
+                cell,
+                ui.id().with(("contracts_sort", label)),
+                Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Click to sort: up, down, then the default order");
+        let sorted = current.filter(|s| s.column == column);
+        let color = if sorted.is_some() || response.hovered() {
+            BRIGHT
+        } else {
+            DIM
+        };
+        // The triangle goes after a left-aligned title and before a
+        // right-aligned one, so titles stay lined up with their values.
+        let arrow_w = 12.0;
+        let text_rect = Rect::from_min_max(
+            cell.min,
+            Pos2::new(
+                cell.right() - if right { 0.0 } else { arrow_w },
+                cell.bottom(),
+            ),
+        );
+        let width = paint_cell(ui, text_rect, label, 12.0, color, right);
+        if let Some(sort) = sorted {
+            let x = if right {
+                cell.right() - width - arrow_w / 2.0
+            } else {
+                cell.left() + width + arrow_w / 2.0
+            };
+            sort_triangle(ui, Pos2::new(x, cell.center().y), sort.descending);
+        }
+        if response.clicked() {
+            clicked = Some(column);
+        }
+    }
+    if let Some(column) = clicked {
+        module.settings.sort = Sort::click(current, column);
+        module.save_settings();
     }
     ui.painter().hline(
         rect.x_range(),
@@ -1297,6 +1410,49 @@ fn settings_view(module: &mut Contracts, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row(id: i64, title: &str, price: f64, sort: (u8, i64)) -> Row {
+        Row {
+            id,
+            stage: Stage::Waiting,
+            status: "Waiting",
+            status_color: BLUE,
+            kind: "Courier",
+            title: title.into(),
+            side: "",
+            character: String::new(),
+            price: String::new(),
+            location: String::new(),
+            time: String::new(),
+            time_color: TEXT,
+            closed_change: false,
+            sort,
+            price_value: price,
+            time_value: sort.1.abs(),
+        }
+    }
+
+    #[test]
+    fn sorting_by_columns() {
+        let ids = |rows: &[Row]| rows.iter().map(|r| r.id).collect::<Vec<_>>();
+        let mut rows = vec![
+            row(1, "beta", 50.0, (1, 300)),
+            row(2, "Alpha", -10.0, (0, 500)),
+            row(3, "gamma", 50.0, (1, 100)),
+        ];
+        sort_rows(&mut rows, None);
+        assert_eq!(ids(&rows), vec![2, 3, 1]);
+        let by = |column, descending| Some(Sort { column, descending });
+        sort_rows(&mut rows, by(SortColumn::Contract, false));
+        assert_eq!(ids(&rows), vec![2, 1, 3]);
+        sort_rows(&mut rows, by(SortColumn::Contract, true));
+        assert_eq!(ids(&rows), vec![3, 1, 2]);
+        // Equal prices keep the default order (3 before 1).
+        sort_rows(&mut rows, by(SortColumn::Price, true));
+        assert_eq!(ids(&rows), vec![3, 1, 2]);
+        sort_rows(&mut rows, by(SortColumn::Time, false));
+        assert_eq!(ids(&rows), vec![3, 1, 2]);
+    }
 
     #[test]
     fn day_titles() {
