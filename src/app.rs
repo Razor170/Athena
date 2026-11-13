@@ -170,11 +170,12 @@ impl AthenaApp {
         ui.horizontal(|ui| {
             for module in &self.modules {
                 let tab = Tab::Module(module.id().to_string());
-                toggle_button(ui, &mut self.layout, tab, module.title());
+                let badge = module.badge();
+                toggle_button(ui, &mut self.layout, tab, module.title(), badge.as_deref());
             }
             // Right-to-left layout fills the rest of the row from the right edge.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                toggle_button(ui, &mut self.layout, Tab::Settings, "Settings");
+                toggle_button(ui, &mut self.layout, Tab::Settings, "Settings", None);
             });
         });
     }
@@ -189,16 +190,39 @@ const CLOSED_TEXT: egui::Color32 = egui::Color32::from_gray(0x8c);
 const OPEN_EDGE: egui::Color32 = egui::Color32::from_rgb(0x8a, 0xa3, 0xbf);
 const CLOSED_EDGE: egui::Color32 = egui::Color32::from_gray(0x3a);
 
+/// The badge on a toggle button (for example unseen contract changes).
+const BADGE_FILL: egui::Color32 = egui::Color32::from_rgb(0xe8, 0x91, 0x3a);
+const BADGE_TEXT: egui::Color32 = egui::Color32::from_rgb(0x1b, 0x1b, 0x1b);
+
 /// A button in the top bar that opens or closes one tab. Bright when the tab
-/// is open, dark when it's closed.
-fn toggle_button(ui: &mut egui::Ui, layout: &mut Layout, tab: Tab, title: &str) {
+/// is open, dark when it's closed. `badge`, if any, is drawn after the title
+/// on an orange background.
+fn toggle_button(
+    ui: &mut egui::Ui,
+    layout: &mut Layout,
+    tab: Tab,
+    title: &str,
+    badge: Option<&str>,
+) {
     let open = layout.is_open(&tab);
     let (fill, text, edge) = if open {
         (OPEN_FILL, OPEN_TEXT, OPEN_EDGE)
     } else {
         (CLOSED_FILL, CLOSED_TEXT, CLOSED_EDGE)
     };
-    let button = egui::Button::new(egui::RichText::new(title).color(text))
+    // The title and the badge as one piece of text with two formats.
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::default();
+    let plain = egui::TextFormat::simple(font.clone(), text);
+    job.append(title, 0.0, plain);
+    if let Some(badge) = badge {
+        let format = egui::TextFormat {
+            background: BADGE_FILL,
+            ..egui::TextFormat::simple(font, BADGE_TEXT)
+        };
+        job.append(&format!(" {badge} "), 6.0, format);
+    }
+    let button = egui::Button::new(job)
         .fill(fill)
         .stroke(egui::Stroke::new(1.0, edge));
     if ui.add(button).clicked() {

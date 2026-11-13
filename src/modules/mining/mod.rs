@@ -319,7 +319,7 @@ impl MiningSupervisor {
         if play_sound {
             let now = Instant::now();
             if sound_allowed(self.last_sound, now, self.settings.quiet_time()) {
-                sound::alert();
+                super::shared::alert_sound();
                 self.last_sound = Some(now);
             }
         }
@@ -620,25 +620,6 @@ fn sound_allowed(last_sound: Option<Instant>, now: Instant, quiet: Duration) -> 
         // clock values are out of order.
         Some(last) => now.saturating_duration_since(last) >= quiet,
     }
-}
-
-/// The alert sound.
-mod sound {
-    /// Plays the Windows "exclamation" sound. It returns at once; Windows
-    /// plays it in the background.
-    #[cfg(windows)]
-    pub fn alert() {
-        // MessageBeep lives in the "Diagnostics::Debug" part of the bindings.
-        use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
-        use windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONEXCLAMATION;
-        // SAFETY: MessageBeep takes a plain number and has no other effects.
-        unsafe {
-            MessageBeep(MB_ICONEXCLAMATION);
-        }
-    }
-
-    #[cfg(not(windows))]
-    pub fn alert() {}
 }
 
 #[cfg(test)]

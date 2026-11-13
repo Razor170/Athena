@@ -20,6 +20,7 @@ use crate::settings::Settings;
 use crate::static_data::StaticData;
 
 pub mod characters;
+pub mod contracts;
 pub mod finance;
 pub mod intel;
 pub mod mining;
@@ -55,6 +56,12 @@ pub trait Module {
 
     /// Draws the module's panel. Only called while its tab is visible.
     fn ui(&mut self, ui: &mut egui::Ui, ctx: &ModuleContext);
+
+    /// A short text shown on the module's toggle button, such as the
+    /// number of unseen changes. `None` (the default) shows nothing.
+    fn badge(&self) -> Option<String> {
+        None
+    }
 
     /// The hold bars overlay to show, or `None` while the module doesn't
     /// want one. Called before every frame, so keep it cheap; the overlay
@@ -127,6 +134,13 @@ pub fn create_all(
             pilot_systems,
         )),
         Box::new(planetary::Planetary::new(
+            egui_ctx,
+            data_dir,
+            tokens.clone(),
+            roster.clone(),
+            &static_data,
+        )),
+        Box::new(contracts::Contracts::new(
             egui_ctx,
             data_dir,
             tokens,
