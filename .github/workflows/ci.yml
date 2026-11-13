@@ -30,6 +30,9 @@ env:
   # throw away the build cache (that made runs take 25 minutes instead of 5).
   # To update Rust, change this in its own PR; that PR's run is a slow one.
   RUST_VERSION: "1.100.0"
+  # Build on the Dev Drive (see "Dev Drive for target"). Relative to the
+  # repository folder, where every cargo command runs.
+  CARGO_TARGET_DIR: devdrive/target
 
 jobs:
   # fmt, clippy and tests. Runs on every push and pull request, side by side
@@ -45,14 +48,21 @@ jobs:
       - uses: actions/checkout@v4
 
       # A Windows "Dev Drive" (ReFS, not scanned by the virus checker) for
-      # the target folder, where cargo writes thousands of small files.
-      # It is mounted at ./target, so cargo and rust-cache work as usual.
+      # cargo's target folder, where it writes thousands of small files.
+      # It is mounted at ./devdrive and cargo builds into devdrive/target
+      # (CARGO_TARGET_DIR above). The target folder is a normal folder on the
+      # drive, not the drive's root, because rust-cache can't list a mounted
+      # drive's root folder.
       - name: Dev Drive for target
         uses: samypr100/setup-dev-drive@v4
         with:
           drive-size: 12GB
-          mount-path: ${{ github.workspace }}/target
+          mount-path: ${{ github.workspace }}/devdrive
           trusted-dev-drive: true
+
+      - name: Make target folder
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path devdrive/target | Out-Null
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -62,6 +72,8 @@ jobs:
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> devdrive/target"
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -131,14 +143,21 @@ jobs:
           "ATHENA_VERSION=$version" >> $env:GITHUB_ENV
 
       # A Windows "Dev Drive" (ReFS, not scanned by the virus checker) for
-      # the target folder, where cargo writes thousands of small files.
-      # It is mounted at ./target, so cargo and rust-cache work as usual.
+      # cargo's target folder, where it writes thousands of small files.
+      # It is mounted at ./devdrive and cargo builds into devdrive/target
+      # (CARGO_TARGET_DIR above). The target folder is a normal folder on the
+      # drive, not the drive's root, because rust-cache can't list a mounted
+      # drive's root folder.
       - name: Dev Drive for target
         uses: samypr100/setup-dev-drive@v4
         with:
           drive-size: 12GB
-          mount-path: ${{ github.workspace }}/target
+          mount-path: ${{ github.workspace }}/devdrive
           trusted-dev-drive: true
+
+      - name: Make target folder
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path devdrive/target | Out-Null
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -147,6 +166,8 @@ jobs:
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> devdrive/target"
 
       - name: Release build
         run: cargo build --release --locked
@@ -273,7 +294,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           cargo run --locked --package xtask -- sde sde.zip "$dir/static.sqlite" --dotlan dotlan
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          Copy-Item target/release/athena.exe "$dir/Athena.exe"
+          Copy-Item devdrive/target/release/athena.exe "$dir/Athena.exe"
           Copy-Item README.md "$dir/README.md"
 
       # Saved only after the build used the files, so a broken download
