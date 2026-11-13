@@ -4,7 +4,8 @@
 //! The overlay is one small, always-on-top, click-through window with one
 //! hold bar per character, stacked from top to bottom. Under each bar there
 //! can be a line with the character's name on the left and the hold's fill
-//! in percent on the right. The background and the bars each have their
+//! in percent on the right, with the compressed share in purple just left
+//! of it. The background and the bars each have their
 //! own opacity.
 //!
 //! This file holds only plain data and the drawing into a pixel buffer, so
@@ -83,6 +84,9 @@ pub struct HoldBar {
     pub alert_mark: Option<f32>,
     /// How full the hold is, in percent, if the hold size is known.
     pub percent: Option<u32>,
+    /// How much of the hold is compressed ore, in percent. `None` when the
+    /// hold size is unknown or there is no compressed ore.
+    pub compressed_percent: Option<u32>,
 }
 
 /// Where the user put the overlay: its top-left corner and its width, in
@@ -104,6 +108,8 @@ pub struct BarsOverlay {
     pub bar_height_px: i32,
     pub show_names: bool,
     pub show_percent: bool,
+    /// Show the compressed share of the hold, in purple, left of the hold %.
+    pub show_compressed_percent: bool,
     /// 0 (invisible) to 255 (solid).
     pub background_alpha: u8,
     /// 0 (invisible) to 255 (solid). Also used for the text.
@@ -118,7 +124,7 @@ pub struct BarsOverlay {
 impl BarsOverlay {
     /// Whether there is a text line under each bar.
     pub fn has_text_line(&self) -> bool {
-        self.show_names || self.show_percent
+        self.show_names || self.show_percent || self.show_compressed_percent
     }
 
     /// The width the window gets, kept within sensible limits.
@@ -328,6 +334,11 @@ pub fn percent_text(bar: &HoldBar) -> Option<String> {
     bar.percent.map(|p| format!("{p}%"))
 }
 
+/// The purple compressed-ore percent shown left of the hold percent.
+pub fn compressed_percent_text(bar: &HoldBar) -> Option<String> {
+    bar.compressed_percent.map(|p| format!("{p}%"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +351,7 @@ mod tests {
             color: Color32::GREEN,
             alert_mark: Some(0.7),
             percent: Some(50),
+            compressed_percent: Some(20),
         }
     }
 
@@ -351,6 +363,7 @@ mod tests {
             bar_height_px: 3,
             show_names: true,
             show_percent: true,
+            show_compressed_percent: true,
             background_alpha: 0,
             bar_alpha: 255,
             compressed_color: Color32::from_rgb(0x80, 0x40, 0xc0),
@@ -377,11 +390,17 @@ mod tests {
         let mut o = overlay(vec![bar("A"), bar("B")]);
         o.show_names = false;
         o.show_percent = false;
+        o.show_compressed_percent = false;
         let (rows, height) = layout(&o, 100);
         assert!(rows.iter().all(|r| r.text.is_none()));
         assert_eq!(height, 3 + 3 + 2 + 3 + 3);
         // Only the percent: the line stays.
         o.show_percent = true;
+        let (rows, _) = layout(&o, 100);
+        assert!(rows[0].text.is_some());
+        // Only the compressed percent: the line stays too.
+        o.show_percent = false;
+        o.show_compressed_percent = true;
         let (rows, _) = layout(&o, 100);
         assert!(rows[0].text.is_some());
     }
@@ -399,6 +418,7 @@ mod tests {
         let mut o = overlay(vec![bar("A")]);
         o.show_names = false;
         o.show_percent = false;
+        o.show_compressed_percent = false;
         let (rows, height) = layout(&o, 16);
         let pixels = paint(&o, &rows, 16, height);
         assert_eq!(pixels.len(), 16 * height as usize);
@@ -472,5 +492,8 @@ mod tests {
         let mut unknown = bar("A");
         unknown.percent = None;
         assert_eq!(percent_text(&unknown), None);
+        assert_eq!(compressed_percent_text(&bar("A")).as_deref(), Some("20%"));
+        unknown.compressed_percent = None;
+        assert_eq!(compressed_percent_text(&unknown), None);
     }
 }

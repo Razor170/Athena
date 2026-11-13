@@ -427,6 +427,14 @@ impl MiningSupervisor {
     fn anyone_mining(&self) -> bool {
         self.trackers.values().any(|t| t.session().is_some())
     }
+
+    /// Whether the belt scan's depletion bar is still emptying: there is a
+    /// belt rate and the estimate hasn't reached empty yet.
+    fn belt_draining(&self) -> bool {
+        self.belt_scans
+            .depletion(now())
+            .is_some_and(|bar| bar.has_rate && bar.estimated_m3 > 0.0)
+    }
 }
 
 /// Shortens EVE's long "deactivates ..." text for the alert list.
@@ -526,6 +534,10 @@ impl Module for MiningSupervisor {
                 }
             }
             self.egui_ctx.request_repaint_after(TICK_EVERY);
+        } else if self.belt_draining() {
+            // The belt scan's estimate moves on even while none of our
+            // pilots mines (others may still be on the belt).
+            self.egui_ctx.request_repaint_after(TICK_EVERY);
         }
 
         // Midnight EVE time: "Today" and "Yesterday" move on.
@@ -573,6 +585,7 @@ impl Module for MiningSupervisor {
             bar_height_px: settings.bar_height_px.clamp(2.0, 20.0).round() as i32,
             show_names: settings.show_names,
             show_percent: settings.show_percent,
+            show_compressed_percent: settings.show_compressed_percent,
             background_alpha: alpha(settings.background_opacity),
             bar_alpha: alpha(settings.bar_opacity.max(10.0)),
             compressed_color: ui::PURPLE,

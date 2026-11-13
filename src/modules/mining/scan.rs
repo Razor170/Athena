@@ -143,6 +143,33 @@ pub struct BeltScans {
     /// Oldest first. The first entry is the comparison scan once one exists;
     /// everything older than that has been dropped.
     recent: Vec<BeltScan>,
+    /// Total m³ of every scan of this belt, oldest first, for the depletion
+    /// bar. The first one is the full bar. Kept apart from `recent`, which
+    /// forgets old scans.
+    totals_m3: Vec<f64>,
+}
+
+/// Most scan totals kept for the depletion bar's ticks. The first scan is
+/// always kept.
+const MAX_TOTALS: usize = 50;
+
+/// What the belt scan's depletion bar shows. All shares are of the first
+/// scan of the belt, from 0 to 1.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BeltDepletion {
+    /// m³ in the first scan: the full bar.
+    pub first_m3: f64,
+    /// What the latest scan still showed.
+    pub scanned_share: f64,
+    /// What is probably left now, after mining at the last belt rate since
+    /// the latest scan. Never more than `scanned_share`.
+    pub estimated_share: f64,
+    pub estimated_m3: f64,
+    /// Whether there is a belt rate. Without one there is no estimate and
+    /// `estimated_share` equals `scanned_share`.
+    pub has_rate: bool,
+    /// Where the scans between the first and the latest one were.
+    pub earlier_shares: Vec<f64>,
 }
 
 impl BeltScans {
@@ -155,6 +182,12 @@ impl BeltScans {
             .is_some_and(|newest| is_same_belt(newest, &scan));
         if !same_belt {
             self.recent.clear();
+            self.totals_m3.clear();
+        }
+        self.totals_m3.push(scan.total_m3());
+        if self.totals_m3.len() > MAX_TOTALS {
+            // Drop the oldest tick, but never the first scan.
+            self.totals_m3.remove(1);
         }
         self.recent.push(scan);
 
@@ -190,6 +223,44 @@ impl BeltScans {
     /// Forgets all scans ("New belt").
     pub fn clear(&mut self) {
         self.recent.clear();
+        self.totals_m3.clear();
+    }
+
+    /// The depletion bar at `now`, or `None` before the first scan.
+    ///
+    /// The estimate takes the rate between the latest scan and the one it
+    /// is compared with, and assumes the belt kept being mined at that rate
+    /// since the latest scan.
+    pub fn depletion(&self, now: LogTime) -> Option<BeltDepletion> {
+        let latest = self.latest()?;
+        let first_m3 = *self.totals_m3.first()?;
+        if first_m3 <= 0.0 {
+            return None;
+        }
+        let share = |m3: f64| (m3 / first_m3).clamp(0.0, 1.0);
+        let scanned_m3 = latest.total_m3();
+        let rate = self
+            .previous()
+            .and_then(|previous| belt_progress(previous, latest).m3_per_hour);
+        let estimated_m3 = match rate {
+            Some(per_hour) => {
+                let seconds = now.seconds_since(latest.taken).max(0) as f64;
+                (scanned_m3 - per_hour / 3600.0 * seconds).max(0.0)
+            }
+            None => scanned_m3,
+        };
+        let earlier = match self.totals_m3.len() {
+            0..=2 => &[][..],
+            len => &self.totals_m3[1..len - 1],
+        };
+        Some(BeltDepletion {
+            first_m3,
+            scanned_share: share(scanned_m3),
+            estimated_share: share(estimated_m3),
+            estimated_m3,
+            has_rate: rate.is_some(),
+            earlier_shares: earlier.iter().map(|&m3| share(m3)).collect(),
+        })
     }
 }
 
@@ -594,5 +665,72 @@ Mordunium\t{units}\t{m3} m3\t1 ISK\t1,507 m
         assert_eq!(scans.previous().unwrap().taken, at(600));
         scans.add(scan_with_mordunium("3,970,000", "397,000", 735));
         assert_eq!(scans.previous().unwrap().taken, at(645));
+    }
+
+    #[test]
+    fn depletion_bar_starts_full_and_drains_live() {
+        let mut scans = BeltScans::default();
+        assert_eq!(scans.depletion(at(0)), None);
+        scans.add(scan_with_mordunium("5,000,000", "500,000", 0));
+        let first_m3 = scans.latest().unwrap().total_m3();
+        let bar = scans.depletion(at(300)).unwrap();
+        // One scan: full, no rate, nothing estimated.
+        assert_eq!(bar.scanned_share, 1.0);
+        assert_eq!(bar.estimated_share, 1.0);
+        assert!(!bar.has_rate);
+        assert!(bar.earlier_shares.is_empty());
+
+        // 10 minutes later 100,000 m³ are gone: 600,000 m³/h.
+        scans.add(scan_with_mordunium("4,000,000", "400,000", 600));
+        let left = first_m3 - 100_000.0;
+        let bar = scans.depletion(at(600)).unwrap();
+        assert!(bar.has_rate);
+        assert!((bar.scanned_share - left / first_m3).abs() < 1e-9);
+        assert_eq!(bar.estimated_share, bar.scanned_share);
+        // 5 minutes after that scan another 50,000 m³ should be gone.
+        let bar = scans.depletion(at(900)).unwrap();
+        assert!((bar.estimated_m3 - (left - 50_000.0)).abs() < 0.01);
+        assert!(bar.estimated_share < bar.scanned_share);
+        // Much later the estimate stops at empty.
+        let bar = scans.depletion(at(100_000)).unwrap();
+        assert_eq!(bar.estimated_m3, 0.0);
+        assert_eq!(bar.estimated_share, 0.0);
+
+        // A third scan: the second one becomes a tick, the first stays 100%.
+        scans.add(scan_with_mordunium("3,800,000", "380,000", 1_200));
+        let bar = scans.depletion(at(1_200)).unwrap();
+        assert_eq!(bar.first_m3, first_m3);
+        assert_eq!(bar.earlier_shares.len(), 1);
+        assert!((bar.earlier_shares[0] - left / first_m3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn depletion_bar_restarts_with_a_new_belt() {
+        let mut scans = BeltScans::default();
+        scans.add(scan_with_mordunium("5,000,000", "500,000", 0));
+        scans.add(scan_with_mordunium("4,000,000", "400,000", 600));
+        let other = BeltScan::parse("Veldspar\t900,000\t50,000 m3\t1 ISK\t64 km\n", at(900));
+        scans.add(other.unwrap());
+        let bar = scans.depletion(at(900)).unwrap();
+        assert_eq!(bar.first_m3, 50_000.0);
+        assert_eq!(bar.scanned_share, 1.0);
+        assert!(bar.earlier_shares.is_empty());
+    }
+
+    #[test]
+    fn depletion_bar_keeps_the_first_scan_when_trimming_ticks() {
+        let mut scans = BeltScans::default();
+        for step in 0..(MAX_TOTALS as i64 + 10) {
+            let m3 = 500_000 - step * 1_000;
+            scans.add(scan_with_mordunium(
+                &(m3 * 10).to_string(),
+                &m3.to_string(),
+                step * 120,
+            ));
+        }
+        assert_eq!(scans.totals_m3.len(), MAX_TOTALS);
+        let bar = scans.depletion(at(0)).unwrap();
+        // The first scan is still the full bar.
+        assert!(bar.first_m3 > scans.totals_m3[1]);
     }
 }

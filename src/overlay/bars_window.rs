@@ -52,7 +52,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use super::mining_bars::{
     BarsOverlay, DEFAULT_POSITION, MAX_WIDTH_PX, MIN_WIDTH_PX, OverlayPlace, Row, TEXT,
-    TEXT_HEIGHT_PX, apply_text, layout, paint, percent_text,
+    TEXT_HEIGHT_PX, apply_text, compressed_percent_text, layout, paint, percent_text,
 };
 
 /// The window's class name and title. Not shown anywhere.
@@ -520,7 +520,13 @@ fn draw(hwnd: HWND, place: OverlayPlace, overlay: &BarsOverlay) -> bool {
     let (rows, height) = layout(overlay, width);
     let mut pixels = paint(overlay, &rows, width, height);
     if let Some(coverage) = text_coverage(overlay, &rows, width, height) {
-        apply_text(&mut pixels, &coverage, TEXT, overlay.bar_alpha);
+        apply_text(&mut pixels, &coverage.white, TEXT, overlay.bar_alpha);
+        apply_text(
+            &mut pixels,
+            &coverage.purple,
+            overlay.compressed_color,
+            overlay.bar_alpha,
+        );
     }
     // SAFETY: every GDI object made here is released before returning. The
     // bitmap's memory is exactly `width * height` 32-bit pixels, and that
@@ -569,11 +575,30 @@ fn draw(hwnd: HWND, place: OverlayPlace, overlay: &BarsOverlay) -> bool {
     }
 }
 
-/// Draws the names and percentages with Windows' font rendering, white on
-/// black, and returns how much each pixel is covered by text (0 to 255).
-/// `apply_text` then lays the text over the picture in its colour. `None`
-/// when there is no text to draw.
-fn text_coverage(overlay: &BarsOverlay, rows: &[Row], width: i32, height: i32) -> Option<Vec<u8>> {
+/// How much each pixel is covered by text (0 to 255), one list for the
+/// white text and one for the purple compressed percent.
+struct TextCoverage {
+    white: Vec<u8>,
+    purple: Vec<u8>,
+}
+
+/// Text colour for the purple percent while drawing the coverage: pure red
+/// (Windows colours are 0x00BBGGRR). White text has the same value in all
+/// three channels and red text only in the red one, so the two can be told
+/// apart afterwards. They never overlap.
+const PURPLE_MARKER: u32 = 0x0000_00ff;
+const WHITE_MARKER: u32 = 0x00ff_ffff;
+
+/// Draws the names and percentages with Windows' font rendering on black,
+/// and returns how much each pixel is covered by text. `apply_text` then
+/// lays the text over the picture in its colour. `None` when there is no
+/// text to draw.
+fn text_coverage(
+    overlay: &BarsOverlay,
+    rows: &[Row],
+    width: i32,
+    height: i32,
+) -> Option<TextCoverage> {
     if !overlay.has_text_line() || rows.is_empty() {
         return None;
     }
@@ -619,7 +644,7 @@ fn text_coverage(overlay: &BarsOverlay, rows: &[Row], width: i32, height: i32) -
                 font_name.as_ptr(),
             );
             let previous_font = SelectObject(memory, font);
-            SetTextColor(memory, 0x00ff_ffff);
+            SetTextColor(memory, WHITE_MARKER);
             SetBkMode(memory, TRANSPARENT as i32);
 
             for (row, bar) in rows.iter().zip(&overlay.bars) {
@@ -629,17 +654,29 @@ fn text_coverage(overlay: &BarsOverlay, rows: &[Row], width: i32, height: i32) -
                 // A little taller than the line, so letters like "g" and
                 // "y" aren't cut; the next row's gap is below it.
                 let bottom = (line.bottom + 3).min(height);
+                // Texts on the right, from the right edge leftwards: the hold
+                // percent in white, then the compressed percent in purple.
                 let mut name_right = line.right;
-                if overlay.show_percent
-                    && let Some(text) = percent_text(bar)
-                {
+                let right_texts = [
+                    (overlay.show_percent, percent_text(bar), WHITE_MARKER),
+                    (
+                        overlay.show_compressed_percent,
+                        compressed_percent_text(bar),
+                        PURPLE_MARKER,
+                    ),
+                ];
+                for (shown, text, color) in right_texts {
+                    let Some(text) = text.filter(|_| shown) else {
+                        continue;
+                    };
                     let text: Vec<u16> = text.encode_utf16().collect();
                     let mut rect = RECT {
                         left: line.left,
                         top: line.top,
-                        right: line.right,
+                        right: name_right,
                         bottom,
                     };
+                    SetTextColor(memory, color);
                     DrawTextW(
                         memory,
                         text.as_ptr(),
@@ -647,9 +684,10 @@ fn text_coverage(overlay: &BarsOverlay, rows: &[Row], width: i32, height: i32) -
                         &mut rect,
                         DT_RIGHT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX,
                     );
+                    SetTextColor(memory, WHITE_MARKER);
                     let mut size = SIZE { cx: 0, cy: 0 };
                     GetTextExtentPoint32W(memory, text.as_ptr(), text.len() as i32, &mut size);
-                    name_right = line.right - size.cx - 4;
+                    name_right -= size.cx + 4;
                 }
                 if overlay.show_names && name_right > line.left {
                     let text: Vec<u16> = bar.character.encode_utf16().collect();
@@ -671,15 +709,18 @@ fn text_coverage(overlay: &BarsOverlay, rows: &[Row], width: i32, height: i32) -
             }
             GdiFlush();
             let drawn = std::slice::from_raw_parts(bits as *const u32, count);
-            coverage = Some(
-                drawn
+            // White text: blue channel (equal to red and green). Purple
+            // text: whatever red has beyond blue.
+            coverage = Some(TextCoverage {
+                white: drawn.iter().map(|pixel| pixel.to_be_bytes()[3]).collect(),
+                purple: drawn
                     .iter()
                     .map(|pixel| {
-                        let [_, r, g, b] = pixel.to_be_bytes();
-                        r.max(g).max(b)
+                        let [_, r, _, b] = pixel.to_be_bytes();
+                        r.saturating_sub(b)
                     })
                     .collect(),
-            );
+            });
             SelectObject(memory, previous_font);
             DeleteObject(font);
             SelectObject(memory, previous_bitmap);

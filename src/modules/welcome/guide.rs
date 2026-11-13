@@ -44,13 +44,15 @@ pub const SECTIONS: &[Section] = &[
         subtitle: "ore holds, alerts and history from your game logs",
         paragraphs: &[
             "**Live** shows one card per character. Bars: {green} ore, {purple} compressed \
-             ore, {yellow} past your warning level, {red} full.",
+             ore, {yellow} past your warning level, {red} full. The purple % is the \
+             compressed share of the hold.",
             "A red dashed border means the miner stopped (also when the asteroid is gone). \
              A purple dashed border means a crystal broke.",
             "Click [Emptied] after you unload a hold, or [Empty all] in the header.",
             "**Belt scan:** in EVE, select the Mining Survey Scanner results and press \
              Ctrl+C. Athena picks it up from the clipboard and shows m³ left, rocks left \
-             and time to clear. Scan again later to update the rate.",
+             and time to clear. Scan again later to update the rate. The bar is full at \
+             the first scan; its striped part is the estimate since the last scan.",
             "ISK is the reprocessed value at Jita prices, refreshed every hour.",
             "[End session] saves the session for all characters to **History**, with daily \
              and weekly totals.",
