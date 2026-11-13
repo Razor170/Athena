@@ -213,12 +213,10 @@ fn pilot_chip(ui: &mut egui::Ui, text: &str, hidden: bool) -> egui::Response {
     } else {
         (CHIP_FILL, CHIP_BORDER, CHIP_TEXT)
     };
-    ui.add(
-        egui::Button::new(RichText::new(text).color(color))
-            .fill(fill)
-            .stroke(Stroke::new(1.0, stroke))
-            .corner_radius(CornerRadius::same(10)),
-    )
+    let button = egui::Button::new(RichText::new(text).color(color))
+        .fill(fill)
+        .corner_radius(CornerRadius::same(10));
+    crate::widgets::add_outlined(ui, true, button, Stroke::new(1.0, stroke))
 }
 
 /// The map on the left, the report list on the right, and a handle
