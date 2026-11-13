@@ -1,4 +1,6 @@
-# Checks every push and pull request, and builds the portable Windows zip.
+# Checks every push and pull request. Pushes to main, version tags and
+# manual runs also build the portable Windows zip; pull requests only run
+# the checks, which is much faster.
 # Every push to main is tagged and published as a pre-release such as
 # v0.1.1-alpha.6 (see "Work out the version" below). Pushing a version tag
 # such as v0.2.0 by hand publishes a normal release.
@@ -15,13 +17,85 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels that PR's older, still running check.
+# Every other run (main, tags, manual) gets a group of its own, so it never
+# waits for or cancels another run, and every merge gets its release.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
+  # The Rust version CI uses. Pinned, so a new Rust release doesn't silently
+  # throw away the build cache (that made runs take 25 minutes instead of 5).
+  # To update Rust, change this in its own PR; that PR's run is a slow one.
+  RUST_VERSION: "1.100.0"
+  # Build on the Dev Drive (see "Dev Drive for target"). Relative to the
+  # repository folder, where every cargo command runs.
+  CARGO_TARGET_DIR: devdrive/target
 
 jobs:
-  build:
-    name: Check and build (Windows)
+  # fmt, clippy and tests. Runs on every push and pull request, side by side
+  # with the build job below.
+  check:
+    name: Checks (Windows)
     runs-on: windows-latest
+    env:
+      # No debug info in check and test builds: they compile faster and the
+      # cache gets much smaller. Test failures still show their messages.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      # A Windows "Dev Drive" (ReFS, not scanned by the virus checker) for
+      # cargo's target folder, where it writes thousands of small files.
+      # It is mounted at ./devdrive and cargo builds into devdrive/target
+      # (CARGO_TARGET_DIR above). The target folder is a normal folder on the
+      # drive, not the drive's root, because rust-cache can't list a mounted
+      # drive's root folder.
+      - name: Dev Drive for target
+        uses: samypr100/setup-dev-drive@v4
+        with:
+          drive-size: 12GB
+          mount-path: ${{ github.workspace }}/devdrive
+          trusted-dev-drive: true
+
+      - name: Make target folder
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path devdrive/target | Out-Null
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> devdrive/target"
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Clippy (wgpu renderer)
+        run: cargo clippy --locked --all-targets --features wgpu -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked --workspace
+
+  # The release exe and the portable zip. Not run for pull requests.
+  build:
+    name: Build zip (Windows)
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    env:
+      # The xtask that makes static.sqlite runs in the dev profile; it needs
+      # no debug info either.
+      CARGO_PROFILE_DEV_DEBUG: "0"
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -38,8 +112,9 @@ jobs:
       #   main's first-parent line since that tag (each merged PR adds one).
       #   So v0.1.0 + 6 merges = 0.1.1-alpha.6.
       # Pre-release tags (anything with a "-") are never used as the base.
-      # PR builds add "+pr.<number>" so their zip can't be mistaken for a
-      # main build. The exe reads the result from ATHENA_VERSION at compile time.
+      # A manual run on another branch adds "+<branch>" so its zip can't be
+      # mistaken for a main build. The exe reads the result from ATHENA_VERSION
+      # at compile time.
       - name: Work out the version
         id: version
         shell: pwsh
@@ -60,35 +135,39 @@ jobs:
           } else {
             $version = "$major.$minor.$($patch + 1)-alpha.$height"
           }
-          if ("${{ github.event_name }}" -eq "pull_request") {
-            $version = "$version+pr.${{ github.event.number }}"
-          } elseif ("${{ github.ref_type }}" -ne "tag" -and "${{ github.ref }}" -ne "refs/heads/main") {
-            # A manual run on another branch: mark it like a PR build.
+          if ("${{ github.ref_type }}" -ne "tag" -and "${{ github.ref }}" -ne "refs/heads/main") {
             $version = "$version+${{ github.ref_name }}" -replace '[^0-9A-Za-z.+-]', '-'
           }
           Write-Output "Version: $version (base $base, height $height)"
           "version=$version" >> $env:GITHUB_OUTPUT
           "ATHENA_VERSION=$version" >> $env:GITHUB_ENV
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      # A Windows "Dev Drive" (ReFS, not scanned by the virus checker) for
+      # cargo's target folder, where it writes thousands of small files.
+      # It is mounted at ./devdrive and cargo builds into devdrive/target
+      # (CARGO_TARGET_DIR above). The target folder is a normal folder on the
+      # drive, not the drive's root, because rust-cache can't list a mounted
+      # drive's root folder.
+      - name: Dev Drive for target
+        uses: samypr100/setup-dev-drive@v4
         with:
-          components: rustfmt, clippy
+          drive-size: 12GB
+          mount-path: ${{ github.workspace }}/devdrive
+          trusted-dev-drive: true
+
+      - name: Make target folder
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path devdrive/target | Out-Null
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
-
-      - name: Format
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-
-      - name: Clippy (wgpu renderer)
-        run: cargo clippy --locked --all-targets --features wgpu -- -D warnings
-
-      - name: Tests
-        run: cargo test --locked --workspace
+        with:
+          workspaces: ". -> devdrive/target"
 
       - name: Release build
         run: cargo build --release --locked
@@ -180,8 +259,8 @@ jobs:
       # Intel map layout: DOTLAN EveMaps' region maps (© Wollari), which are
       # never committed (PLAN.md Step 6). Cached per month; a new month
       # starts from last month's files and downloads them all again. Only
-      # pushes to main save the cache, because GitHub doesn't share a PR's
-      # cache with main or other PRs.
+      # pushes to main save the cache, so a manual run on another branch
+      # doesn't store its own copy.
       - name: Dotlan cache key
         id: dotlan-key
         shell: pwsh
@@ -215,7 +294,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           cargo run --locked --package xtask -- sde sde.zip "$dir/static.sqlite" --dotlan dotlan
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          Copy-Item target/release/athena.exe "$dir/Athena.exe"
+          Copy-Item devdrive/target/release/athena.exe "$dir/Athena.exe"
           Copy-Item README.md "$dir/README.md"
 
       # Saved only after the build used the files, so a broken download
@@ -241,7 +320,7 @@ jobs:
   # v0.1.1-alpha.6) and every hand-pushed v* tag as a normal release.
   release:
     name: Publish release
-    needs: build
+    needs: [check, build]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
