@@ -29,6 +29,45 @@ pub struct ContractsSettings {
     pub tag: Option<String>,
     /// The changelog shows only the unseen "while closed" entries.
     pub log_only_closed: bool,
+    /// The column the list is sorted by, clicked in its header. `None`:
+    /// the default order (what needs you soonest first).
+    pub sort: Option<Sort>,
+}
+
+/// A list column to sort by, and which way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sort {
+    pub column: SortColumn,
+    pub descending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SortColumn {
+    Status,
+    Type,
+    Contract,
+    Character,
+    Price,
+    Where,
+    Time,
+}
+
+impl Sort {
+    /// A click on `column`'s header: ascending first, then descending,
+    /// then back to the default order.
+    pub fn click(current: Option<Sort>, column: SortColumn) -> Option<Sort> {
+        match current {
+            Some(sort) if sort.column == column && !sort.descending => Some(Sort {
+                column,
+                descending: true,
+            }),
+            Some(sort) if sort.column == column => None,
+            _ => Some(Sort {
+                column,
+                descending: false,
+            }),
+        }
+    }
 }
 
 impl Default for ContractsSettings {
@@ -42,6 +81,7 @@ impl Default for ContractsSettings {
             type_filter: None,
             tag: None,
             log_only_closed: false,
+            sort: None,
         }
     }
 }
@@ -149,12 +189,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn header_clicks_cycle() {
+        let asc = Sort::click(None, SortColumn::Price);
+        assert_eq!(
+            asc,
+            Some(Sort {
+                column: SortColumn::Price,
+                descending: false
+            })
+        );
+        let desc = Sort::click(asc, SortColumn::Price);
+        assert!(desc.unwrap().descending);
+        assert_eq!(Sort::click(desc, SortColumn::Price), None);
+        // Another column starts ascending again.
+        let other = Sort::click(desc, SortColumn::Time).unwrap();
+        assert_eq!(other.column, SortColumn::Time);
+        assert!(!other.descending);
+    }
+
+    #[test]
     fn round_trips_through_toml() {
         let mut settings = ContractsSettings {
             soon_hours: 12,
             finished_days: 0,
             type_filter: Some(TypeFilter::Courier),
             tag: Some("Hauler".into()),
+            sort: Some(Sort {
+                column: SortColumn::Where,
+                descending: true,
+            }),
             ..ContractsSettings::default()
         };
         settings.alerts.get_mut(AlertKind::Bid).sound = true;

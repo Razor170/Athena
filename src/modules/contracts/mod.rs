@@ -271,23 +271,35 @@ impl Contracts {
         }
     }
 
-    /// The money line: courier reward, top bid, or price. A "want to
-    /// buy" (the issuer pays) shows minus for the issuer, plus for the
-    /// other side.
-    fn price_text(&self, contract: &Contract, side: Side) -> String {
+    /// The money in the Price column, as a number: courier reward, top
+    /// bid, or price. A "want to buy" (the issuer pays) is minus for the
+    /// issuer, plus for the other side.
+    fn price_value(&self, contract: &Contract, side: Side) -> f64 {
         match contract.kind {
-            ContractType::Courier => short_isk(contract.reward),
-            ContractType::Auction => {
-                short_isk(contract.top_bid().map_or(contract.price, |b| b.amount))
-            }
+            ContractType::Courier => contract.reward,
+            ContractType::Auction => contract.top_bid().map_or(contract.price, |b| b.amount),
             _ if contract.price == 0.0 && contract.reward > 0.0 => {
                 if side == Side::Issued {
-                    short_isk(-contract.reward)
+                    -contract.reward
                 } else {
-                    format!("+{}", short_isk(contract.reward))
+                    contract.reward
                 }
             }
-            _ => short_isk(contract.price),
+            _ => contract.price,
+        }
+    }
+
+    /// The Price column's text: "620 m", "-24.0 m", "+412 m".
+    fn price_text(&self, contract: &Contract, side: Side) -> String {
+        let value = self.price_value(contract, side);
+        // Same rule as the "want to buy" arm in `price_value`.
+        let wanted = !matches!(contract.kind, ContractType::Courier | ContractType::Auction)
+            && contract.price == 0.0
+            && contract.reward > 0.0;
+        if wanted && value > 0.0 {
+            format!("+{}", short_isk(value))
+        } else {
+            short_isk(value)
         }
     }
 
