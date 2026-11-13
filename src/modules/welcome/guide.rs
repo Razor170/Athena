@@ -67,8 +67,9 @@ pub const SECTIONS: &[Section] = &[
             "The map shows the region of the character you follow. Reported systems light \
              up red and fade to grey over 10 minutes.",
             "Athena beeps and flashes the taskbar when a report is 5 jumps away or less, \
-             and louder at 2 or less. [Mute 5 min] silences it for a while.",
-            "Click a pilot chip to hide that character from the map and from alerts.",
+             and louder at 2 or less. [Mute 5 min] silences it for a while, \
+             [Silence Alarms] until you click [Enable Alarms] (or restart Athena).",
+            "Untick a character under [Pilots] to hide it from the map and from alerts.",
             "Right-click a system for **Add tag…**, **Open on Dotlan** and **Mark clear**. \
              Pilot names in the intel list open zKillboard.",
         ],
