@@ -170,6 +170,9 @@ pub struct IntelSupervisor {
     popup: AlertPopup,
     /// "Mute 5 min" was clicked: no sound or flashing until then.
     muted_until: Option<LogTime>,
+    /// "Silence Alarms" was clicked: no sound or flashing until "Enable
+    /// Alarms" is clicked. Not saved, so a restart turns alarms back on.
+    silenced: bool,
     /// The clear words box in Settings while it is being typed in.
     clear_words_text: String,
     /// System tags, sorted by system and label.
@@ -314,6 +317,7 @@ impl IntelSupervisor {
             sound: SoundPlayer::start(),
             alert: None,
             muted_until: None,
+            silenced: false,
             popup: AlertPopup::new(),
             clear_words_text,
             tags,
@@ -504,12 +508,16 @@ impl IntelSupervisor {
         self.update_nearby();
     }
 
-    /// A pilot chip was clicked: hide or show that pilot.
-    fn toggle_pilot_hidden(&mut self, name: &str) {
-        if self.settings.hidden_pilots.iter().any(|n| n == name) {
-            self.settings.hidden_pilots.retain(|n| n != name);
-        } else {
-            self.settings.hidden_pilots.push(name.to_string());
+    /// Pilots were ticked or unticked in the Pilots list: show or hide
+    /// them on the map and for alerts. Saves once for all of them.
+    fn set_pilots_hidden(&mut self, names: &[String], hidden: bool) {
+        for name in names {
+            let is_hidden = self.settings.hidden_pilots.contains(name);
+            if hidden && !is_hidden {
+                self.settings.hidden_pilots.push(name.clone());
+            } else if !hidden && is_hidden {
+                self.settings.hidden_pilots.retain(|n| n != name);
+            }
         }
         self.save_settings();
         self.update_nearby();
@@ -537,20 +545,37 @@ impl IntelSupervisor {
         self.settings.alert_jumps.min(sound::MAX_JUMPS)
     }
 
+    /// No sound or flashing right now: silenced, or muted for 5 minutes.
     pub fn is_muted(&self) -> bool {
+        self.silenced || self.mute_timer_running()
+    }
+
+    /// "Mute 5 min" is counting down.
+    fn mute_timer_running(&self) -> bool {
         self.muted_until
             .is_some_and(|until| now().seconds_since(until) < 0)
     }
 
-    /// "Mute 5 min", or unmute when clicked again.
+    /// "Mute 5 min", or unmute when clicked again. Does nothing while
+    /// silenced (the button is greyed out then).
     fn toggle_mute(&mut self) {
-        self.muted_until = if self.is_muted() {
+        if self.silenced {
+            return;
+        }
+        self.muted_until = if self.mute_timer_running() {
             None
         } else {
             Some(LogTime {
                 unix_seconds: now().unix_seconds + MUTE_SECS,
             })
         };
+    }
+
+    /// "Silence Alarms" / "Enable Alarms". Either way a running 5 min
+    /// mute ends: silence replaces it, and enabling turns everything on.
+    fn toggle_silence(&mut self) {
+        self.silenced = !self.silenced;
+        self.muted_until = None;
     }
 
     /// The report at `at` just arrived live: raise an alert if it is close
@@ -1315,7 +1340,7 @@ mod tests {
         assert_eq!(m.active_pilot().unwrap().name, "Pilot Bravo");
         m.follow = Some("Pilot Alpha".into());
         assert_eq!(m.active_pilot().unwrap().name, "Pilot Alpha");
-        m.toggle_pilot_hidden("Pilot Alpha");
+        m.set_pilots_hidden(&["Pilot Alpha".to_string()], true);
         assert_eq!(m.shown_pilots().count(), 1);
         assert_eq!(m.current_pilots().count(), 2);
         // The picked pilot is hidden, so it falls back to the last jumper.
@@ -1514,6 +1539,34 @@ mod tests {
         assert!(!m.is_muted());
         m.set_clear_words("Clr,  CLEAR  gone");
         assert_eq!(m.settings.clear_words, ["clr", "clear", "gone"]);
+    }
+
+    #[test]
+    fn silence_ends_the_mute_and_stays_until_enabled() {
+        let mut m = module();
+        m.toggle_mute();
+        m.toggle_silence();
+        assert!(m.is_muted());
+        assert!(m.muted_until.is_none());
+        // Mute 5 min does nothing while silenced.
+        m.toggle_mute();
+        assert!(m.muted_until.is_none());
+        assert!(m.is_muted());
+        m.toggle_silence();
+        assert!(!m.is_muted());
+    }
+
+    #[test]
+    fn pilots_can_be_hidden_and_shown_together() {
+        let mut m = module();
+        let names = vec!["Pilot Alpha".to_string(), "Pilot Bravo".to_string()];
+        m.set_pilots_hidden(&names, true);
+        m.set_pilots_hidden(&names, true);
+        assert_eq!(m.settings.hidden_pilots, names);
+        m.set_pilots_hidden(&names[..1], false);
+        assert_eq!(m.settings.hidden_pilots, ["Pilot Bravo"]);
+        m.set_pilots_hidden(&names, false);
+        assert!(m.settings.hidden_pilots.is_empty());
     }
 
     #[test]

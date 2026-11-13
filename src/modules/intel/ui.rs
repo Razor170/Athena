@@ -1,7 +1,8 @@
 //! Draws the Intel Supervisor panel, following the approved mockup
 //! (<https://claude.ai/artifact/AAU2CByJPT4bJj9xbcFqeY>).
 //!
-//! The toolbar (region picker, Follow, pilot chips, alert range, Mute),
+//! The toolbar (region picker, Follow, Pilots list, alert range, Mute,
+//! Silence Alarms),
 //! the map with the alert banner and tags, a draggable split, and the
 //! intel list with zKillboard links. Settings has the "Intel channels",
 //! "Alerts", "Map" and "System tags" boxes.
@@ -16,6 +17,7 @@ use super::lookup;
 use super::sound::{self, SoundKind};
 use super::tags;
 use super::{Alert, IntelSupervisor, Report, View, map, now};
+use crate::universe::Universe;
 
 /// The Settings view has the same width as the Mining panel.
 const SETTINGS_WIDTH: f32 = 480.0;
@@ -26,7 +28,6 @@ const BRIGHT: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
 const DIM: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9a);
 const CHIP_FILL: Color32 = Color32::from_rgb(0x1d, 0x33, 0x52);
 const CHIP_BORDER: Color32 = Color32::from_rgb(0x3d, 0x6f, 0xae);
-const CHIP_TEXT: Color32 = Color32::from_rgb(0xcf, 0xe2, 0xff);
 const HANDLE: Color32 = Color32::from_rgb(0x4a, 0x4f, 0x57);
 const NOTE: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x8a);
 const TEXT: Color32 = Color32::from_rgb(0xc8, 0xc8, 0xc8);
@@ -42,6 +43,9 @@ const CLEAR_BORDER: Color32 = Color32::from_rgb(0x33, 0x50, 0x3a);
 const OLD_FILL: Color32 = Color32::from_rgb(0x22, 0x22, 0x22);
 // The alert banner.
 const BANNER_TITLE: Color32 = Color32::from_rgb(0xff, 0xb3, 0xad);
+// "Enable Alarms" while silenced.
+const SILENCED_FILL: Color32 = Color32::from_rgb(0x5a, 0x1d, 0x19);
+const SILENCED_BORDER: Color32 = Color32::from_rgb(0xc0, 0x46, 0x3c);
 const BANNER_TEXT: Color32 = Color32::from_rgb(0xf0, 0xd0, 0xcc);
 /// While reports are fading, the map and list are redrawn this often (not
 /// every frame): the badges count whole minutes.
@@ -82,7 +86,8 @@ pub fn show(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
     }
 }
 
-/// Map/Settings, the region picker, Follow and the pilot chips.
+/// Map/Settings, the region picker, Follow, the Pilots list and the
+/// alarm buttons.
 fn toolbar(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
     ui.horizontal_wrapped(|ui| {
         ui.selectable_value(&mut module.view, View::Map, "Map");
@@ -147,33 +152,7 @@ fn toolbar(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
                 }
             }
         });
-        ui.add_space(12.0);
-        ui.label(RichText::new("My pilots").color(DIM));
-        let mut clicked = None;
-        let all: Vec<(String, i64)> = module
-            .current_pilots()
-            .map(|p| (p.name.clone(), p.system_id))
-            .collect();
-        for (name, system_id) in all {
-            let hidden = module.settings.hidden_pilots.contains(&name);
-            let system = universe
-                .system(system_id)
-                .map(|s| s.name.clone())
-                .unwrap_or_default();
-            if pilot_chip(ui, &format!("{name} · {system}"), hidden)
-                .on_hover_text(if hidden {
-                    "Hidden: not on the map and not counted for alerts. Click to show."
-                } else {
-                    "Click to hide this pilot from the map and from alerts."
-                })
-                .clicked()
-            {
-                clicked = Some(name);
-            }
-        }
-        if let Some(name) = clicked {
-            module.toggle_pilot_hidden(&name);
-        }
+        pilots_button(module, ui, universe);
 
         ui.add_space(12.0);
         let alert_jumps = module.alert_jumps();
@@ -185,38 +164,104 @@ fn toolbar(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
             .color(DIM),
         );
         let mute_text = match module.muted_until {
-            Some(until) if module.is_muted() => {
+            Some(until) if module.mute_timer_running() => {
                 let left = (-now().seconds_since(until)).max(0);
                 format!("Muted · {}:{:02}", left / 60, left % 60)
             }
             _ => "Mute 5 min".to_string(),
         };
         if ui
-            .button(mute_text)
+            .add_enabled(!module.silenced, egui::Button::new(mute_text))
             .on_hover_text("No sound or flashing for 5 minutes. Click again to unmute.")
+            .on_disabled_hover_text("Alarms are silenced. Click Enable Alarms to turn them on.")
             .clicked()
         {
             module.toggle_mute();
         }
+        let silence = if module.silenced {
+            let button = egui::Button::new(RichText::new("Enable Alarms").color(BANNER_TITLE))
+                .fill(SILENCED_FILL);
+            crate::widgets::add_outlined(ui, true, button, Stroke::new(1.0, SILENCED_BORDER))
+                .on_hover_text("Alarms are off. Click to turn sound and flashing back on.")
+        } else {
+            ui.button("Silence Alarms").on_hover_text(
+                "No sound or flashing until you click again. \
+                 Restarting Athena turns alarms back on.",
+            )
+        };
+        if silence.clicked() {
+            module.toggle_silence();
+        }
         let minimized = ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
-        if module.is_muted() && !minimized {
+        if module.mute_timer_running() && !minimized {
             // Counts down once a second while muted and visible.
             ui.ctx().request_repaint_after(Duration::from_secs(1));
         }
     });
 }
 
-/// A rounded chip like the mockup's "Pilot Alpha · KV-8SN".
-fn pilot_chip(ui: &mut egui::Ui, text: &str, hidden: bool) -> egui::Response {
-    let (fill, stroke, color) = if hidden {
-        (BOX_FILL, BORDER, DIM)
-    } else {
-        (CHIP_FILL, CHIP_BORDER, CHIP_TEXT)
-    };
-    let button = egui::Button::new(RichText::new(text).color(color))
-        .fill(fill)
-        .corner_radius(CornerRadius::same(10));
-    crate::widgets::add_outlined(ui, true, button, Stroke::new(1.0, stroke))
+/// The "Pilots 5/6" button and its list of own pilots with a checkbox
+/// each. Unticked pilots are left off the map and out of alerts.
+fn pilots_button(module: &mut IntelSupervisor, ui: &mut egui::Ui, universe: &Universe) {
+    // (name, system, shown) for every pilot logged in since downtime.
+    let mut pilots: Vec<(String, String, bool)> = module
+        .current_pilots()
+        .map(|p| {
+            let system = universe
+                .system(p.system_id)
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
+            let shown = !module.settings.hidden_pilots.contains(&p.name);
+            (p.name.clone(), system, shown)
+        })
+        .collect();
+    pilots.sort_by_key(|p| p.0.to_lowercase());
+    let shown = pilots.iter().filter(|p| p.2).count();
+
+    let button = ui
+        .button(format!("Pilots {shown}/{} ⏷", pilots.len()))
+        .on_hover_text("Pick which of your pilots are on the map and count for alerts.");
+    // What was clicked in the list: (names, hide them?). Applied after the
+    // list is drawn, because the list borrows `pilots`.
+    let mut change: Option<(Vec<String>, bool)> = None;
+    egui::Popup::from_toggle_button_response(&button)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            if pilots.is_empty() {
+                ui.label(RichText::new("No pilots logged in since downtime.").color(DIM));
+                return;
+            }
+            egui::Grid::new("intel_pilot_list")
+                .num_columns(2)
+                .spacing([16.0, 4.0])
+                .show(ui, |ui| {
+                    for (name, system, shown) in &pilots {
+                        let mut ticked = *shown;
+                        if ui.checkbox(&mut ticked, name).changed() {
+                            change = Some((vec![name.clone()], !ticked));
+                        }
+                        ui.label(RichText::new(system).color(DIM));
+                        ui.end_row();
+                    }
+                });
+            ui.separator();
+            ui.horizontal(|ui| {
+                let all: Vec<String> = pilots.iter().map(|p| p.0.clone()).collect();
+                if ui.button("All").clicked() {
+                    change = Some((all.clone(), false));
+                }
+                if ui.button("None").clicked() {
+                    change = Some((all, true));
+                }
+            });
+            ui.label(
+                small("Unticked pilots are left off the map\nand don't count for alerts.")
+                    .color(DIM),
+            );
+        });
+    if let Some((names, hidden)) = change {
+        module.set_pilots_hidden(&names, hidden);
+    }
 }
 
 /// The map on the left, the report list on the right, and a handle
