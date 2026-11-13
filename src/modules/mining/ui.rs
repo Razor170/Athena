@@ -546,9 +546,6 @@ fn fill_color(tracker: &CharacterTracker, percent: f64) -> Color32 {
     }
 }
 
-/// The m³ the bar's full width stands for. When EVE says the hold is full
-/// but our count is lower (ore from before Athena ran, or a hold size set
-/// too big), the bar is stretched so it looks full too.
 /// The compressed ore in percent of the hold: the purple part of the bar.
 /// `None` without a hold size or without compressed ore. A little
 /// compressed ore shows as 1% rather than 0%.
@@ -559,6 +556,9 @@ fn compressed_percent(bar_capacity: f64, compressed_m3: f64) -> Option<f64> {
     Some((compressed_m3 / bar_capacity * 100.0).round().max(1.0))
 }
 
+/// The m³ the bar's full width stands for. When EVE says the hold is full
+/// but our count is lower (ore from before Athena ran, or a hold size set
+/// too big), the bar is stretched so it looks full too.
 fn bar_capacity(capacity: f64, percent: f64, total_m3: f64) -> f64 {
     if percent >= 100.0 && total_m3 > 0.0 {
         capacity.min(total_m3)
