@@ -202,6 +202,7 @@ impl Fetcher {
                 }
                 Ok(Command::SetSoonHours(hours)) => {
                     self.soon_secs = i64::from(hours) * 3600;
+                    self.rebaseline_soon(now_unix(), send);
                 }
                 Ok(Command::MarkSeen(ids)) => self.report(self.store.mark_seen(&ids), send),
                 Ok(Command::MarkAllSeen) => self.report(self.store.mark_all_seen(), send),
@@ -212,6 +213,32 @@ impl Fetcher {
             self.do_due_rounds(send);
             self.check_changes(send);
         }
+    }
+
+    /// After the "soon" hours changed: takes each contract's "soon" flag
+    /// as it is now, without changelog entries. Otherwise a longer window
+    /// would log "expires soon" for contracts that were never news.
+    fn rebaseline_soon(&mut self, now: i64, send: &impl Fn(Event)) {
+        let mine = self.mine();
+        let mut ids: Vec<i64> = self.snapshots.keys().copied().collect();
+        ids.sort_unstable();
+        let result = self.store.begin().and_then(|tx| {
+            for contract_id in ids {
+                let (Some(contract), Some(old)) = (
+                    self.contracts.get(&contract_id),
+                    self.snapshots.get_mut(&contract_id),
+                ) else {
+                    continue;
+                };
+                let soon = changes::snapshot(contract, &mine, now, self.soon_secs).soon;
+                if old.soon != soon {
+                    old.soon = soon;
+                    self.store.save_contract(contract, Some(old))?;
+                }
+            }
+            Ok(tx.commit()?)
+        });
+        self.report(result, send);
     }
 
     fn report(&self, result: Result<()>, send: &impl Fn(Event)) {
@@ -361,6 +388,9 @@ impl Fetcher {
         }
         let mut sorted: Vec<i64> = touched.into_iter().collect();
         sorted.sort_unstable();
+        // One transaction for the whole round: one write to disk instead
+        // of one per contract.
+        let tx = self.store.begin()?;
         for contract_id in sorted {
             if let Some(c) = self.contracts.get(&contract_id) {
                 self.store
@@ -368,6 +398,7 @@ impl Fetcher {
                 changed.push(c.clone());
             }
         }
+        tx.commit()?;
         Ok(expires)
     }
 
@@ -668,6 +699,28 @@ mod tests {
         let (mut again, saved) = Fetcher::new(tokens, &db, 1, started + 60).unwrap();
         assert_eq!(saved.log.len(), 1);
         assert!(check(&mut again, started + 60).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_longer_soon_window_logs_nothing() {
+        let (dir, db) = temp_db("soon");
+        let contract = Contract::from_esi(esi_courier(), 1).unwrap();
+        // 30 hours before it expires: not "soon" with 24 hours.
+        let now = contract.expires - 30 * 3600;
+        let (mut fetcher, _) =
+            Fetcher::new(Arc::new(TokenStore::new()), &db, 24, contract.issued).unwrap();
+        fetcher.known.push(1);
+        let snapshot = changes::snapshot(&contract, &[1], now, fetcher.soon_secs);
+        assert!(!snapshot.soon);
+        fetcher.snapshots.insert(contract.id, snapshot);
+        fetcher.contracts.insert(contract.id, contract.clone());
+        assert!(check(&mut fetcher, now).is_empty());
+        // The setting goes to 48 hours: taken in quietly.
+        fetcher.soon_secs = 48 * 3600;
+        fetcher.rebaseline_soon(now, &|_| {});
+        assert!(fetcher.snapshots[&contract.id].soon);
+        assert!(check(&mut fetcher, now).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -126,9 +126,25 @@ impl ChangeKind {
         ChangeKind::ALL.into_iter().find(|kind| kind.key() == key)
     }
 
-    /// Which Settings switch covers it. `None`: only logged, never an
-    /// alert (things you did yourself).
-    pub fn alert_kind(self) -> Option<AlertKind> {
+    /// Which Settings switch covers it, for a contract where our
+    /// character is on `side`. `None`: only logged, never an alert. That
+    /// covers what you did yourself: issuing, accepting, a purchase or a
+    /// delivery of yours finishing, rejecting a contract made for you, and
+    /// cancelling or deleting your own. Bids only alert on your own
+    /// auctions.
+    pub fn alert_kind(self, side: Side) -> Option<AlertKind> {
+        match (self, side) {
+            (ChangeKind::Issued | ChangeKind::YouAccepted, _) => None,
+            (ChangeKind::Finished, Side::Accepted) => None,
+            (ChangeKind::Rejected, Side::AssignedToMe) => None,
+            (ChangeKind::Cancelled | ChangeKind::Deleted, Side::Issued) => None,
+            (ChangeKind::NewBid, side) if side != Side::Issued => None,
+            (kind, _) => kind.switch(),
+        }
+    }
+
+    /// The switch of each kind, before looking at who did it.
+    fn switch(self) -> Option<AlertKind> {
         match self {
             ChangeKind::Issued | ChangeKind::YouAccepted => None,
             ChangeKind::NewForYou => Some(AlertKind::Assigned),
@@ -288,6 +304,51 @@ mod tests {
 
     fn kinds(list: &[Change]) -> Vec<ChangeKind> {
         list.iter().map(|c| c.kind).collect()
+    }
+
+    #[test]
+    fn own_actions_never_alert() {
+        // Buying someone's item exchange: accepted and finished by you.
+        let mut esi = esi_courier();
+        esi.kind = "item_exchange".into();
+        esi.issuer_id = 77;
+        esi.acceptor_id = 1;
+        esi.price = Some(5e6);
+        esi.status = "finished".into();
+        esi.date_accepted = Some("2026-11-13T06:00:00Z".into());
+        esi.date_completed = Some("2026-11-13T06:00:00Z".into());
+        let bought = Contract::from_esi(esi, 1).unwrap();
+        let now = bought.completed.unwrap() + 60;
+        let snap = snapshot(&bought, &[1], now, SOON);
+        let list = changes(&bought, None, snap, &[1], now, SOON);
+        let side = bought.side(&[1]).0;
+        let alerts: Vec<_> = list
+            .iter()
+            .map(|c| (c.kind, c.kind.alert_kind(side)))
+            .collect();
+        assert_eq!(
+            alerts,
+            vec![
+                (ChangeKind::YouAccepted, None),
+                (ChangeKind::Finished, None)
+            ]
+        );
+        // Your own contract sold by someone else does alert.
+        assert_eq!(
+            ChangeKind::Finished.alert_kind(Side::Issued),
+            Some(AlertKind::Finished)
+        );
+        assert_eq!(ChangeKind::Deleted.alert_kind(Side::Issued), None);
+        assert_eq!(ChangeKind::Rejected.alert_kind(Side::AssignedToMe), None);
+        assert_eq!(
+            ChangeKind::Rejected.alert_kind(Side::Issued),
+            Some(AlertKind::Ended)
+        );
+        assert_eq!(ChangeKind::NewBid.alert_kind(Side::Other), None);
+        assert_eq!(
+            ChangeKind::NewBid.alert_kind(Side::Issued),
+            Some(AlertKind::Bid)
+        );
     }
 
     #[test]

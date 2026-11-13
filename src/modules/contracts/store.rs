@@ -202,6 +202,15 @@ impl Store {
         Ok(())
     }
 
+    /// Starts a transaction: everything saved until `commit` is written to
+    /// disk at once (dropping it without `commit` undoes it). It borrows
+    /// the store only shared (`unchecked`), so the store's other methods
+    /// can still be called while it is open; they all use this one
+    /// connection, so they are part of it.
+    pub fn begin(&self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(self.db.unchecked_transaction()?)
+    }
+
     pub fn mark_seen(&self, ids: &[i64]) -> Result<()> {
         for id in ids {
             self.db

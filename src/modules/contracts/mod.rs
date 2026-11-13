@@ -335,10 +335,16 @@ impl Contracts {
         let mut flash = false;
         let mut beep = false;
         let mut auto_seen = Vec::new();
+        let mine = self.mine();
         for entry in &mut entries {
+            // The worker sends the contracts before their entries.
+            let side = self
+                .contracts
+                .get(&entry.contract_id)
+                .map_or(Side::Other, |c| c.side(&mine).0);
             let switch = entry
                 .kind
-                .alert_kind()
+                .alert_kind(side)
                 .map(|kind| self.settings.alerts.get(kind));
             let alert = switch.is_some_and(|s| s.alert);
             if alert {

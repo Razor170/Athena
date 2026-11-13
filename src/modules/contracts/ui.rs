@@ -1256,9 +1256,17 @@ fn settings_view(module: &mut Contracts, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label("\"Expires soon\" and \"due soon\" warning");
-            soon_changed |= ui
-                .add(egui::DragValue::new(&mut module.settings.soon_hours).range(1..=168))
-                .changed();
+            let response =
+                ui.add(egui::DragValue::new(&mut module.settings.soon_hours).range(1..=168));
+            // Only once the drag ends or the typed number is done, not on
+            // every pixel of a drag.
+            let editing = response.dragged() || response.has_focus();
+            if response.changed() && !editing {
+                soon_changed = true;
+            }
+            if response.drag_stopped() || response.lost_focus() {
+                soon_changed = true;
+            }
             ui.label("hours before");
         });
         ui.horizontal(|ui| {
