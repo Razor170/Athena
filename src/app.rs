@@ -198,10 +198,8 @@ fn toggle_button(ui: &mut egui::Ui, layout: &mut Layout, tab: Tab, title: &str) 
     } else {
         (CLOSED_FILL, CLOSED_TEXT, CLOSED_EDGE)
     };
-    let button = egui::Button::new(egui::RichText::new(title).color(text))
-        .fill(fill)
-        .stroke(egui::Stroke::new(1.0, edge));
-    if ui.add(button).clicked() {
+    let button = egui::Button::new(egui::RichText::new(title).color(text)).fill(fill);
+    if crate::widgets::add_outlined(ui, true, button, egui::Stroke::new(1.0, edge)).clicked() {
         if open {
             layout.close(&tab, ui.ctx());
         } else {
