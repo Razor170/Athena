@@ -49,7 +49,11 @@ pub enum SortColumn {
     Character,
     Price,
     Where,
-    Time,
+    Issued,
+    /// "End" in the list: the deadline, or when it ended. Saved as "Time"
+    /// by the first version, so that name still reads.
+    #[serde(alias = "Time")]
+    End,
 }
 
 impl Sort {
@@ -202,8 +206,11 @@ mod tests {
         assert!(desc.unwrap().descending);
         assert_eq!(Sort::click(desc, SortColumn::Price), None);
         // Another column starts ascending again.
-        let other = Sort::click(desc, SortColumn::Time).unwrap();
-        assert_eq!(other.column, SortColumn::Time);
+        // The first version saved the End column as "Time".
+        let old: Sort = toml::from_str("column = \"Time\"\ndescending = true").unwrap();
+        assert_eq!(old.column, SortColumn::End);
+        let other = Sort::click(desc, SortColumn::End).unwrap();
+        assert_eq!(other.column, SortColumn::End);
         assert!(!other.descending);
     }
 
