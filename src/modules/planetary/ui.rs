@@ -139,7 +139,8 @@ struct CharacterCard {
     soon: usize,
 }
 
-/// Builds the cards of the characters to show (tag filter applied).
+/// Builds the cards of the characters to show (tag filter and "Hide
+/// characters without colonies" applied).
 fn cards(module: &Planetary) -> Vec<CharacterCard> {
     let mut out = Vec::new();
     for c in &module.characters {
@@ -149,6 +150,9 @@ fn cards(module: &Planetary) -> Vec<CharacterCard> {
             continue;
         }
         let colonies = module.colonies.get(&c.id).cloned().unwrap_or_default();
+        if module.settings.hide_empty && colonies.is_empty() {
+            continue;
+        }
         let mut planets: Vec<(Colony, Assessment)> = colonies
             .into_iter()
             .filter_map(|colony| {
@@ -218,6 +222,13 @@ fn planets_view(module: &mut Planetary, ui: &mut egui::Ui, now: i64) {
                 small(format!("Needs attention ({})", attention + soon)),
             )
             .on_hover_text("Hide the planets that are fine")
+            .changed();
+        ui.add_space(8.0);
+        changed |= ui
+            .checkbox(
+                &mut module.settings.hide_empty,
+                small("Hide characters without colonies"),
+            )
             .changed();
         if !tags.is_empty() {
             ui.add_space(8.0);

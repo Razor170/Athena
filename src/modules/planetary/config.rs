@@ -16,6 +16,8 @@ pub struct PlanetarySettings {
     pub only_attention: bool,
     /// Only show characters with this tag.
     pub tag: Option<String>,
+    /// Hide characters that have no colonies.
+    pub hide_empty: bool,
 }
 
 /// When a planet turns yellow or red.
@@ -88,6 +90,7 @@ mod tests {
             },
             only_attention: true,
             tag: Some("Industry".into()),
+            hide_empty: true,
         };
         let text = toml::to_string(&settings).unwrap();
         assert_eq!(
