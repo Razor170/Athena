@@ -18,9 +18,10 @@ permissions:
   contents: read
 
 # A new push to a pull request cancels that PR's older, still running check.
-# Runs on main are never cancelled, so every merge gets its release.
+# Every other run (main, tags, manual) gets a group of its own, so it never
+# waits for or cancels another run, and every merge gets its release.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -79,6 +80,10 @@ jobs:
     name: Build zip (Windows)
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
+    env:
+      # The xtask that makes static.sqlite runs in the dev profile; it needs
+      # no debug info either.
+      CARGO_PROFILE_DEV_DEBUG: "0"
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
