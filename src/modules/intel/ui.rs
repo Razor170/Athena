@@ -237,7 +237,13 @@ fn pilots_button(module: &mut IntelSupervisor, ui: &mut egui::Ui, universe: &Uni
                 .show(ui, |ui| {
                     for (name, system, shown) in &pilots {
                         let mut ticked = *shown;
-                        if ui.checkbox(&mut ticked, name).changed() {
+                        // Unticked pilots are dimmed, like the mockup.
+                        let label = if ticked {
+                            RichText::new(name)
+                        } else {
+                            RichText::new(name).color(DIM)
+                        };
+                        if ui.checkbox(&mut ticked, label).changed() {
                             change = Some((vec![name.clone()], !ticked));
                         }
                         ui.label(RichText::new(system).color(DIM));
@@ -304,7 +310,8 @@ fn map_and_list(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
         &map::MapContent {
             pilots: &pilots,
             marks: &marks,
-            alert_frame: module.alert.is_some() && module.settings.flash,
+            // No red frame while muted or silenced, like the taskbar flash.
+            alert_frame: module.alert.is_some() && module.settings.flash && !module.is_muted(),
             fade_minutes: module.settings.fade_minutes,
             tags: &shown_tags,
             activity: &module.activity,
