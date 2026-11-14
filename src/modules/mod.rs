@@ -20,6 +20,7 @@ use crate::settings::Settings;
 use crate::static_data::StaticData;
 
 pub mod characters;
+pub mod cic;
 pub mod contracts;
 pub mod finance;
 pub mod intel;
@@ -144,8 +145,15 @@ pub fn create_all(
             egui_ctx,
             data_dir,
             tokens,
-            roster,
+            roster.clone(),
             &static_data,
+        )),
+        Box::new(cic::Cic::new(
+            egui_ctx,
+            settings,
+            data_dir,
+            &static_data,
+            roster,
         )),
         Box::new(welcome::Welcome),
         // Add new modules here, one line each.
