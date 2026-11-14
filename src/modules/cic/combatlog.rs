@@ -7,14 +7,14 @@
 //! (shown without the markup):
 //!
 //! ```text
-//! 353 remote shield boosted to Metenox Moon Drill [NC] [TICK]  [System - Name] - - Large Remote Shield Booster II
-//! 428 remote shield boosted by Pilot Name [NC][TICK] Scimitar - Large Remote Shield Booster II
-//! 117 remote capacitor transmitted to Basilisk [NC] [TICK]  [Pilot Name] - - Medium Remote Capacitor Transmitter II
+//! 353 remote shield boosted to Metenox Moon Drill [AA] [TICK]  [System - Name] - - Large Remote Shield Booster II
+//! 428 remote shield boosted by Pilot Name [AA][TICK] Scimitar - Large Remote Shield Booster II
+//! 117 remote capacitor transmitted to Basilisk [AA] [TICK]  [Pilot Name] - - Medium Remote Capacitor Transmitter II
 //! 36 from Guristas Eraser - Penetrates
 //! 886 from Pilot Name[TICK](Drake Navy Issue) - Heavy Missile - Hits
 //! Guristas Eraser misses you completely
 //! You're jammed by Guristas Eliminator - Guristas Eliminator
-//! Warp disruption attempt from Pilot [NC][TICK] Malediction to Other Pilot  Basilisk
+//! Warp disruption attempt from Pilot [AA][TICK] Malediction to Other Pilot  Basilisk
 //! Warp scramble attempt from …
 //! ```
 //!
@@ -258,10 +258,10 @@ mod tests {
 
     // Shaped like real game log lines, with the markup EVE writes, but with
     // made-up names and tickers. Never paste real names into tests.
-    const SHIELD_OUT_STRUCTURE: &str = "[ 2026.11.08 10:58:12 ] (combat) <color=0xffccff66><b>353</b><color=0x77ffffff><font size=10> remote shield boosted to </font><b><color=0xffffffff><font size=12><color=0xFFFFB300> <u><b>Metenox Moon Drill</b></u></color></font><font size=12><color=0xFFFFFF66> [<b>AA</b>]</color></font> [<b>TICK</b>]  [Test-1 - 6-13]<color=0xFFFFFFFF><b> -</b><color=0x77ffffff><font size=10> - Large S95a Scoped Remote Shield Booster</font>";
+    const SHIELD_OUT_STRUCTURE: &str = "[ 2026.11.08 10:58:12 ] (combat) <color=0xffccff66><b>353</b><color=0x77ffffff><font size=10> remote shield boosted to </font><b><color=0xffffffff><font size=12><color=0xFFFFB300> <u><b>Metenox Moon Drill</b></u></color></font><font size=12><color=0xFFFFFF66> [<b>AA</b>]</color></font> [<b>TICK</b>]  [Test-1 - Drill]<color=0xFFFFFFFF><b> -</b><color=0x77ffffff><font size=10> - Large S95a Scoped Remote Shield Booster</font>";
     const CAP_OUT_OLD: &str = "[ 2026.11.08 10:58:15 ] (combat) <color=0xffccff66><b>117</b><color=0x77ffffff><font size=10> remote capacitor transmitted to </font><b><color=0xffffffff><font size=12><color=0xFFFFB300> <u><b>Basilisk</b></u></color></font><font size=12><color=0xFFFFFF66> [<b>AA</b>]</color></font> [<b>-TCK</b>]  [Mira Tal]<color=0xFFFFFFFF><b> -</b><color=0x77ffffff><font size=10> - Medium Remote Capacitor Transmitter II</font>";
     const CAP_IN_OLD: &str = "[ 2026.11.08 10:58:15 ] (combat) <color=0xffccff66><b>0</b><color=0x77ffffff><font size=10> remote capacitor transmitted by </font><b><color=0xffffffff><font size=12><color=0xFFFFB300> <u><b>Basilisk</b></u></color></font><font size=12><color=0xFFFFFF66> [<b>AA</b>]</color></font> [<b>-TCK</b>]  [Mira Tal]<color=0xFFFFFFFF><b> -</b><color=0x77ffffff><font size=10> - Large Inductive Compact Remote Capacitor Transmitter</font>";
-    const SHIELD_IN_NEW: &str = "[ 2026.11.12 20:21:05 ] (combat) <color=0xffccff66><b>428</b><color=0x77ffffff><font size=10> remote shield boosted by </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Juno Varr</b> </color></font><font size=12><color=0xFFFFB300>[AA]</color></font><font size=12>[POD-]</font> <font size=12><color=0xFFFFFFFF><b>Scimitar</b></color></font></b><color=0x77ffffff><font size=10> - Pithum C-Type Medium Remote Shield Booster</font>";
+    const SHIELD_IN_NEW: &str = "[ 2026.11.12 20:21:05 ] (combat) <color=0xffccff66><b>428</b><color=0x77ffffff><font size=10> remote shield boosted by </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Juno Varr</b> </color></font><font size=12><color=0xFFFFB300>[AA]</color></font><font size=12>[DDD-]</font> <font size=12><color=0xFFFFFFFF><b>Scimitar</b></color></font></b><color=0x77ffffff><font size=10> - Pithum C-Type Medium Remote Shield Booster</font>";
     const SHIELD_OUT_NEW: &str = "[ 2026.11.12 20:01:37 ] (combat) <color=0xffccff66><b>428</b><color=0x77ffffff><font size=10> remote shield boosted to </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Count Test</b> </color></font><font size=12><color=0xFFFFB300>[AA]</color></font><font size=12>[BBBB]</font> <font size=12><color=0xFFFFFFFF><b>Muninn</b></color></font></b><color=0x77ffffff><font size=10> - Pithum C-Type Medium Remote Shield Booster</font>";
     const DAMAGE_NPC: &str = "[ 2026.11.08 09:28:02 ] (combat) <color=0xffcc0000><b>36</b> <color=0x77ffffff><font size=10>from</font> <b><color=0xffffffff>Guristas Eraser</b><font size=10><color=0x77ffffff> - Penetrates";
     const DAMAGE_PLAYER: &str = "[ 2026.11.12 20:21:02 ] (combat) <color=0xffcc0000><b>886</b> <color=0x77ffffff><font size=10>from</font> <b><color=0xffffffff>Some Pilot[TICK](Drake Navy Issue)</b><font size=10><color=0x77ffffff> - Caldari Navy Nova Heavy Missile - Hits";
@@ -269,7 +269,7 @@ mod tests {
     const MISS_IN: &str = "[ 2026.11.08 09:27:52 ] (combat) Guristas Eraser misses you completely";
     const MISS_OUT: &str = "[ 2026.11.08 09:28:33 ] (combat) Your Vespa II misses Guristas Destroyer completely - Vespa II";
     const JAMMED: &str = "[ 2026.11.12 17:01:40 ] (combat) <color=0x77ffffff><font size=10>You're</font> <color=0xffffffff><b>jammed</b> <color=0x77ffffff><font size=10>by</font> <color=0xffffffff><b>Guristas Eliminator</b><color=0x77ffffff><font size=10> - Guristas Eliminator</font>";
-    const POINT: &str = "[ 2026.11.12 19:45:52 ] (combat) <color=0xffffffff><b>Warp disruption attempt</b> <color=0x77ffffff><font size=10>from</font> <color=0xffffffff><b><font size=12><color=0xFFFFFFFF><b>Vel Arkon</b> </color></font><font size=12><color=0xFFFFB300>[AA]</color></font><font size=12>[8DIR]</font> <font size=12><color=0xFFFFFFFF><b>Malediction</b></color></font></b> <color=0x77ffffff><font size=10>to <b><color=0xffffffff></font><font size=12><color=0xFFFFFFFF><b>Test Pilot</b> </color></font> <font size=12><color=0xFFFFFFFF><b>Thrasher Fleet Issue</b></color></font>";
+    const POINT: &str = "[ 2026.11.12 19:45:52 ] (combat) <color=0xffffffff><b>Warp disruption attempt</b> <color=0x77ffffff><font size=10>from</font> <color=0xffffffff><b><font size=12><color=0xFFFFFFFF><b>Vel Arkon</b> </color></font><font size=12><color=0xFFFFB300>[AA]</color></font><font size=12>[CCCC]</font> <font size=12><color=0xFFFFFFFF><b>Malediction</b></color></font></b> <color=0x77ffffff><font size=10>to <b><color=0xffffffff></font><font size=12><color=0xFFFFFFFF><b>Test Pilot</b> </color></font> <font size=12><color=0xFFFFFFFF><b>Thrasher Fleet Issue</b></color></font>";
     const SCRAM: &str = "[ 2026.11.12 20:00:50 ] (combat) <color=0xffffffff><b>Warp scramble attempt</b> <color=0x77ffffff><font size=10>from</font> <color=0xffffffff><b><font size=12><color=0xFFFFFFFF><b>Rex Halden</b> </color></font><font size=12><color=0xFFFFB300>[AA]</color></font><font size=12>[BBB]</font> <font size=12><color=0xFFFFFFFF><b>Sabre</b></color></font></b> <color=0x77ffffff><font size=10>to <b><color=0xffffffff></font><font size=12><color=0xFFFFFFFF><b>Test Pilot</b> </color></font> <font size=12><color=0xFFFFFFFF><b>Basilisk</b></color></font>";
 
     fn parse(line: &str) -> Option<CombatEvent> {
@@ -285,7 +285,7 @@ mod tests {
                 outgoing: true,
                 amount: 353,
                 other: Other {
-                    name: "Test-1 - 6-13".into(),
+                    name: "Test-1 - Drill".into(),
                     ship: "Metenox Moon Drill".into()
                 },
                 module: "Large S95a Scoped Remote Shield Booster".into(),

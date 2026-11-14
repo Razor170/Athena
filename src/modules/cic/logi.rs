@@ -267,22 +267,30 @@ impl PilotState {
                 next = Some(next.map_or(at, |n: f64| n.min(at)));
             }
         };
-        // Entries fade over the second half of their time; step the fade
-        // once a second.
-        let fading = self
-            .lanes
-            .iter()
-            .flat_map(|lane| lane.iter())
-            .any(|e| now - e.at < keep);
-        if fading {
-            consider(now + 1.0);
+        // Entries fade over the second half of their time: step the fade
+        // once a second while one is fading, and otherwise wake up when
+        // the next one starts to fade.
+        let half = keep / 2.0;
+        for entry in self.lanes.iter().flat_map(|lane| lane.iter()) {
+            let age = now - entry.at;
+            if age >= keep {
+                continue;
+            }
+            if age >= half {
+                consider(now + 1.0);
+            } else {
+                consider(entry.at + half);
+            }
         }
         if self.hit(now).is_some() {
             // The DMG badge blinks every half second while it shows.
             consider(now + 0.5);
         }
-        if self.ecm_left(now, settings).is_some() {
-            consider(now + 1.0);
+        if let Some((left, _)) = self.ecm_left(now, settings) {
+            // The countdown shows whole seconds (rounded up): wake up when
+            // the number drops.
+            let to_next = left - left.ceil() + 1.0;
+            consider(now + to_next.clamp(0.01, 1.0));
         }
         for (at, _) in [&self.point, &self.scram].into_iter().flatten() {
             consider(at + TACKLE_SECS + 0.01);
@@ -540,6 +548,26 @@ mod tests {
         assert_eq!(pilot.next_change(1.0, &s), Some(1.5));
         // After everything has faded, no more repaints.
         assert_eq!(pilot.next_change(100.0, &s), None);
+    }
+
+    #[test]
+    fn repaints_only_when_something_shows_a_change() {
+        let s = settings();
+        let mut pilot = PilotState::default();
+        pilot.apply(CombatEvent::Miss, String::new(), 0.0, Ship::Basilisk, &s);
+        // A miss doesn't blink: the next change is when it starts to fade.
+        assert_eq!(pilot.next_change(1.0, &s), Some(15.0));
+        assert_eq!(pilot.next_change(20.0, &s), Some(21.0));
+        pilot.apply(
+            CombatEvent::Jammed { by: "Npc".into() },
+            String::new(),
+            30.0,
+            Ship::Basilisk,
+            &s,
+        );
+        // 20 s lock-out, 19.7 s left shows "20 s"; it drops to 19 in 0.7 s.
+        let next = pilot.next_change(30.3, &s).unwrap();
+        assert!((next - 31.0).abs() < 1e-9, "{next}");
     }
 
     #[test]

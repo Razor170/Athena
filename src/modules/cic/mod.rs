@@ -256,7 +256,7 @@ mod tests {
     fn structures_show_their_type() {
         let data = crate::static_data::tests::sample();
         let structure = Other {
-            name: "Test-1 - 6-13".into(),
+            name: "Test-1 - Drill".into(),
             ship: "Metenox Moon Drill".into(),
         };
         let pilot = Other {
