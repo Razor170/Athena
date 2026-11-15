@@ -166,12 +166,14 @@ pub struct IntelSupervisor {
     /// The banner over the map, while the alert popup shows (or would
     /// show, see [`banner_is_over`]).
     alert: Option<Alert>,
-    /// The alert popup over EVE (shown even while muted).
+    /// The alert popup over EVE (shown even while muted for 5 minutes,
+    /// but not while silenced).
     popup: AlertPopup,
     /// "Mute 5 min" was clicked: no sound or flashing until then.
     muted_until: Option<LogTime>,
-    /// "Silence Alarms" was clicked: no sound or flashing until "Enable
-    /// Alarms" is clicked. Not saved, so a restart turns alarms back on.
+    /// "Silence Alarms" was clicked: no sound, flashing or popup until
+    /// "Enable Alarms" is clicked. Not saved, so a restart turns alarms
+    /// back on.
     silenced: bool,
     /// The clear words box in Settings while it is being typed in.
     clear_words_text: String,
@@ -573,9 +575,19 @@ impl IntelSupervisor {
 
     /// "Silence Alarms" / "Enable Alarms". Either way a running 5 min
     /// mute ends: silence replaces it, and enabling turns everything on.
+    /// Silencing also closes a popup that is showing; the map banner
+    /// stays for the popup's time, as if no popup had been shown.
     fn toggle_silence(&mut self) {
         self.silenced = !self.silenced;
         self.muted_until = None;
+        if self.silenced {
+            if let Some(alert) = &mut self.alert {
+                alert.popup_shown = false;
+            }
+            if self.popup.is_showing() {
+                self.popup.hide(&self.egui_ctx);
+            }
+        }
     }
 
     /// The report at `at` just arrived live: raise an alert if it is close
@@ -620,7 +632,9 @@ impl IntelSupervisor {
             .as_ref()
             .is_some_and(|shown| shown.jumps < level.jumps && shown.report.time >= report.time);
         if !keep_banner {
-            let popup_shown = self.settings.popup && (level.loud || !self.settings.popup_only_loud);
+            let popup_shown = !self.silenced
+                && self.settings.popup
+                && (level.loud || !self.settings.popup_only_loud);
             let alert = Alert {
                 report: report.clone(),
                 system_id,
@@ -632,7 +646,8 @@ impl IntelSupervisor {
             };
             let hide_after = self.popup_hide_after();
             // Same rule as the banner: what replaces the banner replaces
-            // the popup. Muting doesn't stop it (mute is about sound).
+            // the popup. "Mute 5 min" doesn't stop it (mute is about
+            // sound), "Silence Alarms" does.
             if popup_shown {
                 let (title, details) = ui::alert_texts(self, &alert);
                 let content = PopupContent {
@@ -1554,6 +1569,43 @@ mod tests {
         assert!(m.is_muted());
         m.toggle_silence();
         assert!(!m.is_muted());
+    }
+
+    #[test]
+    fn silence_stops_the_popup_but_not_the_banner() {
+        let mut m = module();
+        jump(&mut m, "Pilot Alpha", 60, "A1-XYZ");
+        m.handle_lines(
+            "Branch Intel",
+            "Pilot Alpha",
+            vec![line(10, "Scout", "A2-XYZ")],
+            false,
+        );
+        assert!(m.alert.as_ref().is_some_and(|a| a.popup_shown));
+        // Silencing closes the popup; the banner stays for the popup's time.
+        m.toggle_silence();
+        assert!(m.alert.as_ref().is_some_and(|a| !a.popup_shown));
+        assert!(!m.popup.is_showing());
+        // A new alert while silenced: banner, but no popup.
+        m.alert = None;
+        m.handle_lines(
+            "Branch Intel",
+            "Pilot Alpha",
+            vec![line(5, "Scout", "A2-XYZ loki")],
+            false,
+        );
+        assert!(m.alert.as_ref().is_some_and(|a| !a.popup_shown));
+        assert!(!m.popup.is_showing());
+        // Enabled again: popups are back.
+        m.toggle_silence();
+        m.alert = None;
+        m.handle_lines(
+            "Branch Intel",
+            "Pilot Alpha",
+            vec![line(3, "Scout", "A2-XYZ")],
+            false,
+        );
+        assert!(m.alert.as_ref().is_some_and(|a| a.popup_shown));
     }
 
     #[test]

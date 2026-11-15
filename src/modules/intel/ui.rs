@@ -182,10 +182,10 @@ fn toolbar(module: &mut IntelSupervisor, ui: &mut egui::Ui) {
             let button = egui::Button::new(RichText::new("Enable Alarms").color(BANNER_TITLE))
                 .fill(SILENCED_FILL);
             crate::widgets::add_outlined(ui, true, button, Stroke::new(1.0, SILENCED_BORDER))
-                .on_hover_text("Alarms are off. Click to turn sound and flashing back on.")
+                .on_hover_text("Alarms are off. Click to turn sound, flashing and popups back on.")
         } else {
             ui.button("Silence Alarms").on_hover_text(
-                "No sound or flashing until you click again. \
+                "No sound, flashing or popups until you click again. \
                  Restarting Athena turns alarms back on.",
             )
         };
