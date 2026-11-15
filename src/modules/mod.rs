@@ -24,6 +24,7 @@ pub mod characters;
 pub mod cic;
 pub mod contracts;
 pub mod finance;
+pub mod fittings;
 pub mod intel;
 pub mod mining;
 pub mod planetary;
@@ -117,12 +118,7 @@ pub fn create_all(
     let roster = shared::SharedRoster::default();
     let pilot_systems = shared::PilotSystems::default();
     vec![
-        Box::new(mining::MiningSupervisor::new(
-            egui_ctx,
-            settings,
-            data_dir,
-            &static_data,
-        )),
+        Box::new(welcome::Welcome),
         Box::new(intel::IntelSupervisor::new(
             egui_ctx,
             settings,
@@ -130,12 +126,27 @@ pub fn create_all(
             &static_data,
             pilot_systems.clone(),
         )),
-        Box::new(characters::Characters::new(
+        Box::new(mining::MiningSupervisor::new(
+            egui_ctx,
+            settings,
+            data_dir,
+            &static_data,
+        )),
+        Box::new(cic::Cic::new(
+            egui_ctx,
+            settings,
+            data_dir,
+            &static_data,
+            roster.clone(),
+        )),
+        Box::new(contracts::Contracts::new(
             egui_ctx,
             data_dir,
             tokens.clone(),
             roster.clone(),
+            &static_data,
         )),
+        Box::new(fittings::Fittings::new(data_dir)),
         Box::new(finance::Finance::new(
             egui_ctx,
             data_dir,
@@ -151,21 +162,9 @@ pub fn create_all(
             roster.clone(),
             &static_data,
         )),
-        Box::new(contracts::Contracts::new(
-            egui_ctx,
-            data_dir,
-            tokens,
-            roster.clone(),
-            &static_data,
+        Box::new(characters::Characters::new(
+            egui_ctx, data_dir, tokens, roster,
         )),
-        Box::new(cic::Cic::new(
-            egui_ctx,
-            settings,
-            data_dir,
-            &static_data,
-            roster,
-        )),
-        Box::new(welcome::Welcome),
         // Add new modules here, one line each.
     ]
 }
