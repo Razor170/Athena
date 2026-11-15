@@ -1101,7 +1101,6 @@ fn chain_box(module: &mut Cic, ui: &mut egui::Ui) -> bool {
     changed
 }
 
-/// The running log and timing numbers. True if changed.
 /// The Logi overlay: on/off, what it shows, and moving it.
 fn overlay_box(module: &mut Cic, ui: &mut egui::Ui) -> bool {
     box_title(
@@ -1166,6 +1165,7 @@ fn overlay_box(module: &mut Cic, ui: &mut egui::Ui) -> bool {
     changed
 }
 
+/// The running log and timing numbers. True if changed.
 fn timing_box(settings: &mut CicSettings, ui: &mut egui::Ui) -> bool {
     box_title(
         ui,

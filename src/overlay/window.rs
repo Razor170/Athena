@@ -691,7 +691,10 @@ impl Fonts {
         unsafe {
             let screen = GetDC(std::ptr::null_mut());
             let memory = CreateCompatibleDC(screen);
-            let fonts = Fonts {
+            // Built once and changed in place: copying it into a new
+            // `Fonts` would drop this one, and its `drop` would release the
+            // handles the copy still uses.
+            let mut fonts = Fonts {
                 screen,
                 memory,
                 bold: font(CHIP_TEXT_PX, FW_BOLD as i32),
@@ -701,8 +704,8 @@ impl Fonts {
             if memory.is_null() || fonts.bold.is_null() || fonts.normal.is_null() {
                 return None;
             }
-            let previous = SelectObject(memory, fonts.bold);
-            Some(Fonts { previous, ..fonts })
+            fonts.previous = SelectObject(memory, fonts.bold);
+            Some(fonts)
         }
     }
 
