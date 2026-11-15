@@ -154,6 +154,22 @@ pub const SECTIONS: &[Section] = &[
                reads contracts; accept them in EVE.",
     },
     Section {
+        title: "Fittings",
+        subtitle: "compare a fit with the one it should be",
+        paragraphs: &[
+            "**Compare**: put the fit you have in **Is** and the fit you want in **Should**. \
+             In EVE's fitting window use \"Copy to clipboard\", then click [Paste] on the \
+             column. [Text] shows the fit as text to edit, [List] as a list with duplicate \
+             lines added up.",
+            "**Diff** shows what is missing in green (+) and what is too much in red (−), by \
+             rigs, high, med and low slots, drones and fighters, and cargo. A module in cargo \
+             only counts against cargo.",
+            "[Copy missing] copies the green items for EVE's Multibuy. [Swap] exchanges the \
+             two fits. **Show matching** also lists what both fits have.",
+        ],
+        note: "Both fits are kept when Athena restarts.",
+    },
+    Section {
         title: "Settings and updates",
         subtitle: "",
         paragraphs: &[
