@@ -11,6 +11,7 @@
 //!   background thread.
 //! - [`logi`]: what each pilot's card shows, over time.
 //! - [`config`]: Settings, saved in `cic.toml`.
+//! - `overlay`: the Logi overlay's lines (drawn by `crate::overlay`).
 //! - `icons`: the ISIS icons (CCP art, from the EVE University wiki).
 //! - `ui`: draws the panel.
 //!
@@ -20,13 +21,14 @@ pub mod combatlog;
 pub mod config;
 mod icons;
 pub mod logi;
+mod overlay;
 mod ui;
 pub mod watcher;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 
@@ -36,6 +38,8 @@ use self::logi::PilotState;
 use self::watcher::{CombatLogWatcher, WatchEvent};
 use super::shared::{RosterCharacter, SharedRoster, roster_if_changed};
 use super::{Module, ModuleContext, SharedStaticData};
+use crate::overlay::logi_lines::LogiOverlay;
+use crate::overlay::mining_bars::OverlayPlace;
 use crate::settings::Settings;
 use crate::static_data::StaticData;
 use crate::storage::Saver;
@@ -76,6 +80,8 @@ pub struct Cic {
     submodule: Submodule,
     view: View,
     icons: Option<icons::Icons>,
+    /// The overlay takes clicks so it can be moved. Not saved.
+    overlay_move_mode: bool,
 }
 
 impl Cic {
@@ -110,6 +116,7 @@ impl Cic {
             submodule: Submodule::default(),
             view: View::default(),
             icons: None,
+            overlay_move_mode: false,
         };
         module.read_roster();
         module
@@ -222,6 +229,30 @@ impl Module for Cic {
                 WatchEvent::Problem(text) => self.log_problem = Some(text),
             }
         }
+        // The overlay's blinks and countdowns change on their own, also
+        // while the CIC tab is hidden or the window minimized: ask for one
+        // frame when the next is due. Nothing pending, no frame.
+        let now = self.now();
+        if let Some(at) = overlay::next_change(&self.settings, |n| self.pilots.get(n), now) {
+            let wait = (at - now).max(0.05);
+            self.egui_ctx
+                .request_repaint_after(Duration::from_secs_f64(wait));
+        }
+    }
+
+    fn logi_overlay(&self) -> Option<LogiOverlay> {
+        overlay::overlay(
+            &self.settings,
+            |name| self.pilots.get(name),
+            self.now(),
+            self.overlay_move_mode,
+        )
+    }
+
+    fn logi_overlay_moved(&mut self, place: OverlayPlace) {
+        self.settings.overlay.position = Some([place.x, place.y]);
+        self.settings.overlay.width_px = place.width;
+        self.settings_edited();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _ctx: &ModuleContext) {

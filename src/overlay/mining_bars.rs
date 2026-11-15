@@ -19,6 +19,9 @@
 
 use eframe::egui::Color32;
 
+pub use super::pixels::PixelRect;
+use super::pixels::{over, premultiplied_argb, with_alpha};
+
 /// Space between the window's edge and the bars, in pixels.
 pub const PADDING_PX: i32 = 3;
 /// Space between one character's row and the next, in pixels.
@@ -44,30 +47,11 @@ const MARK_WIDTH_PX: usize = 2;
 /// The colour of the names and percentages.
 pub const TEXT: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
 /// The dashed frame shown while the overlay is being moved.
-const MOVE_FRAME: Color32 = Color32::from_rgb(0xa3, 0x7e, 0xf0);
+pub(super) const MOVE_FRAME: Color32 = Color32::from_rgb(0xa3, 0x7e, 0xf0);
 /// While the overlay is being moved its background is at least this opaque
 /// (0-255): Windows lets clicks through fully see-through pixels, so the
 /// overlay couldn't be grabbed otherwise.
-const MOVE_MIN_BACKGROUND_ALPHA: u8 = 110;
-
-/// A rectangle in pixels, `right` and `bottom` exclusive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PixelRect {
-    pub left: i32,
-    pub top: i32,
-    pub right: i32,
-    pub bottom: i32,
-}
-
-impl PixelRect {
-    pub fn width(&self) -> i32 {
-        self.right - self.left
-    }
-
-    pub fn height(&self) -> i32 {
-        self.bottom - self.top
-    }
-}
+pub(super) const MOVE_MIN_BACKGROUND_ALPHA: u8 = 110;
 
 /// One character's hold bar, as fractions of the bar's width (0.0 to 1.0).
 #[derive(Debug, Clone, PartialEq)]
@@ -264,7 +248,7 @@ fn paint_bar(
 }
 
 /// A 1 px dashed purple frame around the whole window (move mode).
-fn paint_dashed_frame(pixels: &mut [Color32], width: usize, height: usize) {
+pub(super) fn paint_dashed_frame(pixels: &mut [Color32], width: usize, height: usize) {
     // 4 px dash, 3 px gap.
     let dash = |i: usize| i % 7 < 4;
     for x in 0..width {
@@ -289,46 +273,6 @@ fn paint_dashed_frame(pixels: &mut [Color32], width: usize, height: usize) {
     }
 }
 
-/// Draws text into `pixels` (already in `0xAARRGGBB`). `coverage` holds one
-/// value per pixel, 0 where there is no text and 255 where it is solid, as
-/// Windows drew it. The text gets `color` at `alpha` opacity.
-pub fn apply_text(pixels: &mut [u32], coverage: &[u8], color: Color32, alpha: u8) {
-    for (pixel, &cover) in pixels.iter_mut().zip(coverage) {
-        if cover == 0 {
-            continue;
-        }
-        let text_alpha = ((cover as u32 * alpha as u32 + 127) / 255) as u8;
-        let below = from_premultiplied_argb(*pixel);
-        *pixel = premultiplied_argb(over(with_alpha(color, text_alpha), below));
-    }
-}
-
-/// `color` (taken as solid) at `alpha` opacity, premultiplied.
-fn with_alpha(color: Color32, alpha: u8) -> Color32 {
-    let [r, g, b, _] = color.to_array();
-    Color32::from_rgba_unmultiplied(r, g, b, alpha)
-}
-
-/// `top` drawn over `below`, both premultiplied ("source over").
-fn over(top: Color32, below: Color32) -> Color32 {
-    let [tr, tg, tb, ta] = top.to_array();
-    let [br, bg, bb, ba] = below.to_array();
-    let rest = 255 - ta as u32;
-    let mix = |t: u8, b: u8| (t as u32 + (b as u32 * rest + 127) / 255).min(255) as u8;
-    Color32::from_rgba_premultiplied(mix(tr, br), mix(tg, bg), mix(tb, bb), mix(ta, ba))
-}
-
-/// `Color32` (already premultiplied) as `0xAARRGGBB`.
-fn premultiplied_argb(color: Color32) -> u32 {
-    let [r, g, b, a] = color.to_array();
-    u32::from_be_bytes([a, r, g, b])
-}
-
-fn from_premultiplied_argb(pixel: u32) -> Color32 {
-    let [a, r, g, b] = pixel.to_be_bytes();
-    Color32::from_rgba_premultiplied(r, g, b, a)
-}
-
 /// The percent text shown under a bar, for example "64%".
 pub fn percent_text(bar: &HoldBar) -> Option<String> {
     bar.percent.map(|p| format!("{p}%"))
@@ -341,6 +285,7 @@ pub fn compressed_percent_text(bar: &HoldBar) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::pixels::apply_text;
     use super::*;
 
     fn bar(name: &str) -> HoldBar {

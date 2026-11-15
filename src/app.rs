@@ -5,7 +5,7 @@ use egui_dock::{DockArea, Style};
 
 use crate::layout::{Layout, Tab};
 use crate::modules::{self, Module, ModuleContext};
-use crate::overlay::MiningOverlay;
+use crate::overlay::{Content, OverlayWindow};
 use crate::settings::{FilePollRate, Settings};
 use crate::storage::{DataDir, Saver};
 use crate::updater::{StartupInfo, StripAction, Updater};
@@ -24,7 +24,9 @@ pub struct AthenaApp {
     saver: Saver,
     settings_panel: SettingsPanel,
     /// The Mining Supervisor's hold bars overlay.
-    mining_overlay: MiningOverlay,
+    mining_overlay: OverlayWindow,
+    /// The CIC Logi overlay.
+    logi_overlay: OverlayWindow,
     /// The layout text we last handed to the saver, so we only save when it changed.
     last_saved_layout: String,
     /// The auto-updater: its strip under the toggle bar and its Settings section.
@@ -94,7 +96,8 @@ impl AthenaApp {
         AthenaApp {
             updater,
             restart_to_install: false,
-            mining_overlay: MiningOverlay::new(egui_ctx),
+            mining_overlay: OverlayWindow::new(egui_ctx, "mining-overlay"),
+            logi_overlay: OverlayWindow::new(egui_ctx, "logi-overlay"),
             modules,
             layout,
             settings,
@@ -244,14 +247,21 @@ impl eframe::App for AthenaApp {
         }
         self.updater.update();
         // Here rather than in `ui`, because `logic` also runs while the main
-        // window is minimized, and the overlay must keep up then.
+        // window is minimized, and the overlays must keep up then.
         if let Some(place) = self.mining_overlay.take_moved() {
             for module in &mut self.modules {
                 module.bars_overlay_moved(place);
             }
         }
         let bars = self.modules.iter().find_map(|m| m.bars_overlay());
-        self.mining_overlay.show(bars);
+        self.mining_overlay.show(bars.map(Content::Bars));
+        if let Some(place) = self.logi_overlay.take_moved() {
+            for module in &mut self.modules {
+                module.logi_overlay_moved(place);
+            }
+        }
+        let logi = self.modules.iter().find_map(|m| m.logi_overlay());
+        self.logi_overlay.show(logi.map(Content::Logi));
     }
 
     /// The colour every window is cleared to before drawing. eframe uses one
