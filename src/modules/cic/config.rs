@@ -1,6 +1,7 @@
 //! The CIC module's own settings, saved as `cic.toml` in the data folder:
 //! which characters the Logi view follows, in which order and in which
-//! ship, the cap chain modules, and how long things stay on screen.
+//! ship, the cap chain modules, how long things stay on screen, and the
+//! Logi overlay.
 
 use std::path::{Path, PathBuf};
 
@@ -81,6 +82,38 @@ pub struct CicSettings {
     pub chain_secs: u32,
     /// After "You're jammed", the ship can't lock for this many seconds.
     pub ecm_secs: u32,
+    pub overlay: OverlaySettings,
+}
+
+/// The Logi overlay: one line per shown pilot, over EVE (Windows only).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverlaySettings {
+    pub enabled: bool,
+    pub show_names: bool,
+    /// Show only pilots who are hit, jammed, tackled or missing a cap
+    /// chain link.
+    pub only_busy: bool,
+    /// Opacity of the background, 0 to 100 percent.
+    pub background_opacity: f64,
+    /// The width the user pulled it to, in pixels.
+    pub width_px: i32,
+    /// The top-left corner on the screen, in pixels. `None` until moved.
+    pub position: Option<[i32; 2]>,
+}
+
+impl Default for OverlaySettings {
+    fn default() -> Self {
+        OverlaySettings {
+            // Off until switched on: no window over EVE nobody asked for.
+            enabled: false,
+            show_names: true,
+            only_busy: false,
+            background_opacity: 55.0,
+            width_px: 380,
+            position: None,
+        }
+    }
 }
 
 impl Default for CicSettings {
@@ -101,6 +134,7 @@ impl Default for CicSettings {
             keep_secs: 30,
             chain_secs: 12,
             ecm_secs: 20,
+            overlay: OverlaySettings::default(),
         }
     }
 }
@@ -144,6 +178,12 @@ impl CicSettings {
         self.keep_secs = self.keep_secs.clamp(KEEP_SECS.0, KEEP_SECS.1);
         self.chain_secs = self.chain_secs.clamp(CHAIN_SECS.0, CHAIN_SECS.1);
         self.ecm_secs = self.ecm_secs.clamp(ECM_SECS.0, ECM_SECS.1);
+        let opacity = self.overlay.background_opacity;
+        self.overlay.background_opacity = if opacity.is_finite() {
+            opacity.clamp(0.0, 100.0)
+        } else {
+            55.0
+        };
     }
 
     /// Adds characters that aren't in the list yet, at the end, not shown.

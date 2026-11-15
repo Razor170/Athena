@@ -1,12 +1,12 @@
-//! The mining bars overlay window (Windows only).
+//! An overlay window (Windows only): the Mining Supervisor's hold bars or
+//! the CIC Logi lines, each in its own window run by its own thread.
 //!
-//! One borderless, top-most, never-activated window that shows all hold
-//! bars. It is a "layered" window that gets its picture with
+//! One borderless, top-most, never-activated window. It is a "layered" window that gets its picture with
 //! `UpdateLayeredWindow`: Windows keeps that picture and shows it by itself,
-//! so Athena only draws it again when a hold, a setting or the size
-//! changes. Normally clicks go through it (`WS_EX_TRANSPARENT`).
+//! so Athena only draws it again when what it shows, a setting or the
+//! size changes. Normally clicks go through it (`WS_EX_TRANSPARENT`).
 //!
-//! In move mode (the "Move / resize overlay" button in Mining › Settings)
+//! In move mode (the "Move / resize overlay" button in the module's Settings)
 //! the window takes clicks: dragging it moves it, dragging its right edge
 //! changes its width. The window procedure does the dragging itself: on a
 //! press it "captures" the mouse (so it keeps getting mouse moves even off
@@ -31,9 +31,10 @@ use windows_sys::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
     BLENDFUNCTION, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection, CreateFontW,
     DEFAULT_CHARSET, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT,
-    DT_SINGLELINE, DT_TOP, DeleteDC, DeleteObject, DrawTextW, FF_SWISS, FW_NORMAL, GdiFlush, GetDC,
-    GetTextExtentPoint32W, MONITOR_DEFAULTTONULL, MonitorFromPoint, OUT_DEFAULT_PRECIS, ReleaseDC,
-    SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    DT_SINGLELINE, DT_TOP, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, FF_SWISS, FW_BOLD,
+    FW_NORMAL, GdiFlush, GetDC, GetTextExtentPoint32W, HDC, HFONT, MONITOR_DEFAULTTONULL,
+    MonitorFromPoint, OUT_DEFAULT_PRECIS, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
+    TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{GetCurrentThreadId, INFINITE};
@@ -50,25 +51,28 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_TRANSPARENT, WS_POPUP,
 };
 
+use super::Content;
+use super::logi_lines::{self, CHIP_TEXT_PX, LogiOverlay, NAME_TEXT_PX};
 use super::mining_bars::{
     BarsOverlay, DEFAULT_POSITION, MAX_WIDTH_PX, MIN_WIDTH_PX, OverlayPlace, Row, TEXT,
-    TEXT_HEIGHT_PX, apply_text, compressed_percent_text, layout, paint, percent_text,
+    TEXT_HEIGHT_PX, compressed_percent_text, layout, paint, percent_text,
 };
+use super::pixels::{apply_text, apply_text_in};
 
-/// The window's class name and title. Not shown anywhere.
-const CLASS_NAME: &str = "AthenaMiningOverlay";
+/// The windows' class name and title. Not shown anywhere.
+const CLASS_NAME: &str = "AthenaOverlay";
 /// Put the window back on top this often while it shows.
 const RAISE_EVERY: Duration = Duration::from_secs(1);
 /// How wide the grab area at the right edge is in move mode, in pixels.
 const RESIZE_GRIP_PX: i32 = 6;
-/// The font for names and percentages.
+/// The font for all overlay text.
 const FONT_NAME: &str = "Segoe UI";
 
 /// What the UI thread and the overlay thread share. `Arc` lets both hold
 /// it; the mutexes and atomics make it safe to use from both.
 struct Shared {
-    /// The newest overlay from the Mining Supervisor, `None` while it's off.
-    overlay: Mutex<Option<BarsOverlay>>,
+    /// The newest overlay from its module, `None` while it's off.
+    overlay: Mutex<Option<Content>>,
     /// Set when `overlay` changed, so the thread redraws.
     changed: AtomicBool,
     /// Where the user moved the overlay to, until the UI thread takes it.
@@ -77,14 +81,15 @@ struct Shared {
 }
 
 /// The UI thread's handle to the overlay thread.
-pub struct BarsWindow {
+pub struct OverlayThread {
     shared: Arc<Shared>,
     /// Windows' id of the overlay thread, 0 until it has a message queue.
     thread_id: Arc<AtomicU32>,
 }
 
-impl BarsWindow {
-    pub fn start(egui_ctx: &egui::Context) -> BarsWindow {
+impl OverlayThread {
+    /// Starts the thread. `name` names it, for crash reports.
+    pub fn start(egui_ctx: &egui::Context, name: &str) -> OverlayThread {
         let shared = Arc::new(Shared {
             overlay: Mutex::new(None),
             changed: AtomicBool::new(false),
@@ -94,18 +99,18 @@ impl BarsWindow {
         let thread_id = Arc::new(AtomicU32::new(0));
         let (shared_for_thread, id_for_thread) = (shared.clone(), thread_id.clone());
         let spawned = std::thread::Builder::new()
-            .name("mining-overlay".to_string())
+            .name(name.to_string())
             .spawn(move || run(shared_for_thread, &id_for_thread));
         if let Err(e) = spawned {
             // Not fatal: the overlay just never shows.
-            eprintln!("Can't start the mining overlay thread: {e}");
+            eprintln!("Can't start the overlay thread {name}: {e}");
         }
-        BarsWindow { shared, thread_id }
+        OverlayThread { shared, thread_id }
     }
 
     /// Hands the thread a new overlay. Only a real change wakes it, so this
     /// is cheap to call every frame.
-    pub fn set(&self, overlay: Option<BarsOverlay>) {
+    pub fn set(&self, overlay: Option<Content>) {
         let Ok(mut current) = self.shared.overlay.lock() else {
             return;
         };
@@ -138,9 +143,12 @@ impl BarsWindow {
 thread_local! {
     static SHARED: RefCell<Option<Arc<Shared>>> = const { RefCell::new(None) };
     /// The overlay as last applied, for redrawing while the width is pulled.
-    static CURRENT: RefCell<Option<BarsOverlay>> = const { RefCell::new(None) };
-    /// Where the window is and how wide.
+    static CURRENT: RefCell<Option<Content>> = const { RefCell::new(None) };
+    /// Where the window is, and how wide the user wants it.
     static PLACE: Cell<OverlayPlace> = const { Cell::new(OverlayPlace { x: 0, y: 0, width: 0 }) };
+    /// How wide the window really is. The Logi overlay can be wider than
+    /// asked (its chips need the room) or narrower (without names).
+    static DRAWN_WIDTH: Cell<i32> = const { Cell::new(0) };
     static MOVE_MODE: Cell<bool> = const { Cell::new(false) };
     /// The drag going on, if any.
     static DRAG: Cell<Option<Drag>> = const { Cell::new(None) };
@@ -164,7 +172,7 @@ struct Window {
     /// dragged it (the save may still be on its way).
     applied: Option<(Option<[i32; 2]>, i32)>,
     /// What the picture shows, so it is only drawn again on a change.
-    drawn: Option<(BarsOverlay, OverlayPlace)>,
+    drawn: Option<(Content, OverlayPlace)>,
     last_raise: Instant,
 }
 
@@ -212,16 +220,16 @@ impl Window {
     }
 
     /// Makes the window show `overlay`: made, moved, drawn, shown or hidden.
-    fn apply(&mut self, overlay: Option<BarsOverlay>) {
+    fn apply(&mut self, overlay: Option<Content>) {
         let Some(overlay) = overlay else {
             // Switched off: no window at all.
             self.destroy();
             CURRENT.set(None);
             return;
         };
-        MOVE_MODE.set(overlay.move_mode);
+        MOVE_MODE.set(overlay.move_mode());
         CURRENT.set(Some(overlay.clone()));
-        if overlay.bars.is_empty() && !overlay.move_mode {
+        if overlay.is_empty() && !overlay.move_mode() {
             // Nobody to show: hide, but keep the window for later.
             self.hide();
             return;
@@ -233,9 +241,9 @@ impl Window {
             }
         }
 
-        let wanted = (overlay.position, overlay.clamped_width());
+        let wanted = (overlay.position(), overlay.clamped_width());
         if self.applied != Some(wanted) {
-            let [x, y] = on_screen(overlay.position.unwrap_or(DEFAULT_POSITION));
+            let [x, y] = on_screen(overlay.position().unwrap_or(DEFAULT_POSITION));
             PLACE.set(OverlayPlace {
                 x,
                 y,
@@ -243,7 +251,7 @@ impl Window {
             });
             self.applied = Some(wanted);
         }
-        set_click_through(self.hwnd, !overlay.move_mode);
+        set_click_through(self.hwnd, !overlay.move_mode());
 
         let place = PLACE.get();
         let key = (overlay, place);
@@ -413,7 +421,11 @@ unsafe extern "system" fn window_proc(
             DRAG.set(Some(Drag {
                 resize: on_resize_edge(mouse, place),
                 start_mouse: mouse,
-                start_place: place,
+                // Pulling starts from the width as seen.
+                start_place: OverlayPlace {
+                    width: DRAWN_WIDTH.get(),
+                    ..place
+                },
             }));
             // SAFETY: our own window; keeps the mouse moves coming while
             // the button is held, even off the window.
@@ -500,7 +512,7 @@ fn follow_drag(hwnd: HWND, drag: Drag) {
 
 /// Whether the mouse is on the window's right edge, which pulls the width.
 fn on_resize_edge(mouse: POINT, place: OverlayPlace) -> bool {
-    mouse.x >= place.x + place.width - RESIZE_GRIP_PX
+    mouse.x >= place.x + DRAWN_WIDTH.get() - RESIZE_GRIP_PX
 }
 
 /// The mouse position on the screen, in pixels.
@@ -515,7 +527,20 @@ fn mouse_position() -> POINT {
 
 /// Gives the window its picture and puts it at `place`. Returns false if
 /// Windows refused (then it is tried again on the next change).
-fn draw(hwnd: HWND, place: OverlayPlace, overlay: &BarsOverlay) -> bool {
+fn draw(hwnd: HWND, place: OverlayPlace, content: &Content) -> bool {
+    let (width, height, pixels) = match content {
+        Content::Bars(overlay) => bars_picture(place, overlay),
+        Content::Logi(overlay) => match logi_picture(place, overlay) {
+            Some(picture) => picture,
+            None => return false,
+        },
+    };
+    DRAWN_WIDTH.set(width);
+    show_picture(hwnd, place, width, height, &pixels)
+}
+
+/// The hold bars, with their text.
+fn bars_picture(place: OverlayPlace, overlay: &BarsOverlay) -> (i32, i32, Vec<u32>) {
     let width = place.width.clamp(MIN_WIDTH_PX, MAX_WIDTH_PX);
     let (rows, height) = layout(overlay, width);
     let mut pixels = paint(overlay, &rows, width, height);
@@ -528,6 +553,12 @@ fn draw(hwnd: HWND, place: OverlayPlace, overlay: &BarsOverlay) -> bool {
             overlay.bar_alpha,
         );
     }
+    (width, height, pixels)
+}
+
+/// Hands Windows a finished picture, `width` × `height` pixels, shown at
+/// `place`.
+fn show_picture(hwnd: HWND, place: OverlayPlace, width: i32, height: i32, pixels: &[u32]) -> bool {
     // SAFETY: every GDI object made here is released before returning. The
     // bitmap's memory is exactly `width * height` 32-bit pixels, and that
     // is what is copied into it.
@@ -572,6 +603,175 @@ fn draw(hwnd: HWND, place: OverlayPlace, overlay: &BarsOverlay) -> bool {
         DeleteDC(memory);
         ReleaseDC(std::ptr::null_mut(), screen);
         ok
+    }
+}
+
+/// The Logi lines, with their text. `None` if Windows refused a drawing
+/// call.
+fn logi_picture(place: OverlayPlace, overlay: &LogiOverlay) -> Option<(i32, i32, Vec<u32>)> {
+    // The overlay's own width setting is only a wish; `place` holds the
+    // width the user is pulling to right now.
+    let overlay = LogiOverlay {
+        width_px: place.width,
+        ..overlay.clone()
+    };
+    let fonts = Fonts::new()?;
+    let measure = |text: &str| fonts.measure(text);
+    let picture = logi_lines::picture(&overlay, &measure);
+    let (width, height) = (picture.width, picture.height);
+    let mut pixels = picture.pixels;
+    // All text is drawn white on black once; each piece then takes its own
+    // colour inside its own box (the boxes never overlap).
+    let coverage = fonts.coverage(width, height, |memory| {
+        for run in &picture.texts {
+            let font = if run.bold { fonts.bold } else { fonts.normal };
+            let text: Vec<u16> = run.text.encode_utf16().collect();
+            let mut rect = RECT {
+                left: run.rect.left,
+                top: run.rect.top,
+                right: run.rect.right,
+                bottom: run.rect.bottom,
+            };
+            let mut flags = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
+            if run.ellipsis {
+                flags |= DT_END_ELLIPSIS;
+            }
+            // SAFETY: `memory` is the drawing surface `coverage` made, the
+            // font is alive (it belongs to `fonts`), and `text` and `rect`
+            // live until the calls return.
+            unsafe {
+                SelectObject(memory, font);
+                DrawTextW(memory, text.as_ptr(), text.len() as i32, &mut rect, flags);
+            }
+        }
+    })?;
+    for run in &picture.texts {
+        apply_text_in(&mut pixels, &coverage, width as usize, run.rect, run.color);
+    }
+    Some((width, height, pixels))
+}
+
+/// The Logi overlay's two fonts (bold for chips, normal for names) and a
+/// drawing surface to measure text with. Everything is released on drop.
+struct Fonts {
+    screen: HDC,
+    memory: HDC,
+    bold: HFONT,
+    normal: HFONT,
+    previous: *mut std::ffi::c_void,
+}
+
+impl Fonts {
+    fn new() -> Option<Fonts> {
+        let font = |height: i32, weight: i32| {
+            let name = wide(FONT_NAME);
+            // SAFETY: `name` lives until the call returns. Negative height:
+            // the letters' height in pixels. Grey-scale smoothing (not
+            // ClearType), so the coverage is the same in all colours.
+            unsafe {
+                CreateFontW(
+                    -height,
+                    0,
+                    0,
+                    0,
+                    weight,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET as u32,
+                    OUT_DEFAULT_PRECIS as u32,
+                    CLIP_DEFAULT_PRECIS as u32,
+                    ANTIALIASED_QUALITY as u32,
+                    FF_SWISS as u32,
+                    name.as_ptr(),
+                )
+            }
+        };
+        // SAFETY: plain GDI calls; what they make is released in `drop`.
+        unsafe {
+            let screen = GetDC(std::ptr::null_mut());
+            let memory = CreateCompatibleDC(screen);
+            // Built once and changed in place: copying it into a new
+            // `Fonts` would drop this one, and its `drop` would release the
+            // handles the copy still uses.
+            let mut fonts = Fonts {
+                screen,
+                memory,
+                bold: font(CHIP_TEXT_PX, FW_BOLD as i32),
+                normal: font(NAME_TEXT_PX, FW_NORMAL as i32),
+                previous: std::ptr::null_mut(),
+            };
+            if memory.is_null() || fonts.bold.is_null() || fonts.normal.is_null() {
+                return None;
+            }
+            fonts.previous = SelectObject(memory, fonts.bold);
+            Some(fonts)
+        }
+    }
+
+    /// The width of a chip text in pixels.
+    fn measure(&self, text: &str) -> i32 {
+        let text: Vec<u16> = text.encode_utf16().collect();
+        let mut size = SIZE { cx: 0, cy: 0 };
+        // SAFETY: our own surface with the bold font selected; `text` and
+        // `size` live until the call returns.
+        unsafe {
+            SelectObject(self.memory, self.bold);
+            GetTextExtentPoint32W(self.memory, text.as_ptr(), text.len() as i32, &mut size);
+        }
+        size.cx
+    }
+
+    /// Lets `draw` put white text on a black `width` × `height` bitmap,
+    /// and returns how much each pixel is covered (0 to 255).
+    fn coverage(&self, width: i32, height: i32, draw: impl FnOnce(HDC)) -> Option<Vec<u8>> {
+        // SAFETY: the bitmap's memory is exactly `width * height` 32-bit
+        // pixels; it is cleared before drawing and read only after
+        // `GdiFlush`. The bitmap is released before returning.
+        unsafe {
+            let info = bitmap_info(width, height);
+            let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+            let bitmap = CreateDIBSection(
+                self.memory,
+                &info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                std::ptr::null_mut(),
+                0,
+            );
+            if bitmap.is_null() || bits.is_null() {
+                return None;
+            }
+            let count = (width * height) as usize;
+            std::ptr::write_bytes(bits as *mut u32, 0, count);
+            let previous_bitmap = SelectObject(self.memory, bitmap);
+            SetTextColor(self.memory, WHITE_MARKER);
+            SetBkMode(self.memory, TRANSPARENT as i32);
+            draw(self.memory);
+            GdiFlush();
+            let drawn = std::slice::from_raw_parts(bits as *const u32, count);
+            // White text: any channel will do; blue is the lowest byte.
+            let coverage = drawn.iter().map(|pixel| pixel.to_be_bytes()[3]).collect();
+            SelectObject(self.memory, previous_bitmap);
+            DeleteObject(bitmap);
+            Some(coverage)
+        }
+    }
+}
+
+impl Drop for Fonts {
+    fn drop(&mut self) {
+        // SAFETY: releases exactly what `new` made, the fonts after they
+        // were swapped out of the surface.
+        unsafe {
+            if !self.previous.is_null() {
+                SelectObject(self.memory, self.previous);
+            }
+            DeleteObject(self.bold);
+            DeleteObject(self.normal);
+            DeleteDC(self.memory);
+            ReleaseDC(std::ptr::null_mut(), self.screen);
+        }
     }
 }
 

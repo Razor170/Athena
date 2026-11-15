@@ -62,6 +62,21 @@ pub fn show(module: &mut Cic, ui: &mut egui::Ui, now: f64) {
             // Right to left: Settings first, so Live ends up on its left.
             ui.selectable_value(&mut module.view, View::Settings, "Settings");
             ui.selectable_value(&mut module.view, View::Live, "Live");
+            if crate::overlay::is_supported() {
+                ui.separator();
+                let mut on = module.settings.overlay.enabled;
+                if ui
+                    .toggle_value(&mut on, small("Overlay"))
+                    .on_hover_text("Show the Logi overlay on top of the screen.")
+                    .changed()
+                {
+                    module.settings.overlay.enabled = on;
+                    if !on {
+                        module.overlay_move_mode = false;
+                    }
+                    module.settings_edited();
+                }
+            }
         });
     });
     ui.separator();
@@ -863,6 +878,11 @@ fn settings_view(module: &mut Cic, ui: &mut egui::Ui) {
                     settings_box(ui, 360.0, |ui| {
                         changed |= timing_box(&mut module.settings, ui);
                     });
+                    if crate::overlay::is_supported() {
+                        settings_box(ui, 360.0, |ui| {
+                            changed |= overlay_box(module, ui);
+                        });
+                    }
                 },
             );
         });
@@ -1078,6 +1098,70 @@ fn chain_box(module: &mut Cic, ui: &mut egui::Ui) -> bool {
             });
         }
     }
+    changed
+}
+
+/// The Logi overlay: on/off, what it shows, and moving it.
+fn overlay_box(module: &mut Cic, ui: &mut egui::Ui) -> bool {
+    box_title(
+        ui,
+        "Overlay",
+        "One line per shown pilot on top of the screen: cap chain, DMG, ECM and point/scram. Clicks go through it.",
+    );
+    let overlay = &mut module.settings.overlay;
+    let mut changed = false;
+    if ui
+        .checkbox(&mut overlay.enabled, "Show Logi overlay")
+        .changed()
+    {
+        if !overlay.enabled {
+            module.overlay_move_mode = false;
+        }
+        changed = true;
+    }
+    changed |= ui
+        .checkbox(&mut overlay.show_names, "Show pilot names")
+        .changed();
+    changed |= ui
+        .checkbox(
+            &mut overlay.only_busy,
+            "Only pilots with something going on",
+        )
+        .on_hover_text("Hit, jammed, pointed or scrammed, or a cap chain link missing.")
+        .changed();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Background opacity").color(TEXT));
+        changed |= ui
+            .add(
+                egui::Slider::new(&mut overlay.background_opacity, 0.0..=100.0)
+                    .suffix("%")
+                    .fixed_decimals(0),
+            )
+            .changed();
+    });
+    let enabled = overlay.enabled;
+    ui.horizontal(|ui| {
+        let moving = module.overlay_move_mode;
+        let label = if moving {
+            "Done"
+        } else {
+            "Move / resize overlay"
+        };
+        if ui
+            .add_enabled(enabled, egui::Button::new(label).selected(moving))
+            .clicked()
+        {
+            module.overlay_move_mode = !moving;
+            // Not a setting, but the overlay must change now.
+            module.egui_ctx.request_repaint();
+        }
+        let hint = if module.overlay_move_mode {
+            "Drag it to move it, its right edge to make room for names."
+        } else {
+            "Position and width are saved."
+        };
+        ui.label(RichText::new(hint).size(11.0).color(FAINT));
+    });
     changed
 }
 

@@ -261,7 +261,7 @@ impl PilotState {
     /// left to change. Used to ask for one repaint then, not every frame.
     pub fn next_change(&self, now: f64, settings: &CicSettings) -> Option<f64> {
         let keep = f64::from(settings.keep_secs);
-        let mut next: Option<f64> = None;
+        let mut next = self.next_badge_change(now, settings);
         let mut consider = |at: f64| {
             if at > now {
                 next = Some(next.map_or(at, |n: f64| n.min(at)));
@@ -282,6 +282,18 @@ impl PilotState {
                 consider(entry.at + half);
             }
         }
+        next
+    }
+
+    /// Like `next_change`, but only for the badges (DMG, chain, ECM,
+    /// point/scram), not the running log: what the overlay shows.
+    pub fn next_badge_change(&self, now: f64, settings: &CicSettings) -> Option<f64> {
+        let mut next: Option<f64> = None;
+        let mut consider = |at: f64| {
+            if at > now {
+                next = Some(next.map_or(at, |n: f64| n.min(at)));
+            }
+        };
         if self.hit(now).is_some() {
             // The DMG badge blinks every half second while it shows.
             consider(now + 0.5);
