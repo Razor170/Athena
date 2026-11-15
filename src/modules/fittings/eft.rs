@@ -95,6 +95,10 @@ pub struct Fit {
     pub name: String,
     /// Items per section, in the order they first appear in the text.
     pub sections: BTreeMap<Section, Vec<Line>>,
+    /// The fit had exactly one block of "xN" lines, so it was put in
+    /// Cargo without knowing if it really is cargo or drones. [`align`]
+    /// may move it to Drones.
+    pub lone_counted_block: bool,
 }
 
 impl Fit {
@@ -160,6 +164,7 @@ pub fn parse(text: &str) -> Fit {
     let has_counts = |b: &Vec<&str>| b.iter().any(|l| split_count(l).1.is_some());
     let first_counted = blocks.iter().position(has_counts);
     let last_counted = blocks.iter().rposition(has_counts);
+    fit.lone_counted_block = blocks.iter().filter(|b| has_counts(b)).count() == 1;
     let mut racks = Section::RACKS.iter();
     for (i, block) in blocks.iter().enumerate() {
         let section = match first_counted {
@@ -184,7 +189,8 @@ pub fn parse(text: &str) -> Fit {
 /// `[Thanatos, DPS - Thanatos]` gives `("Thanatos", "DPS - Thanatos")`.
 fn header(line: &str) -> Option<(&str, &str)> {
     let inner = line.strip_prefix('[')?.strip_suffix(']')?;
-    let (hull, name) = inner.split_once(',')?;
+    // EVE and Pyfa always write "Hull, Name"; a bare "[Hull]" works too.
+    let (hull, name) = inner.split_once(',').unwrap_or((inner, ""));
     let hull = hull.trim();
     if hull.is_empty() || hull.to_ascii_lowercase().starts_with("empty ") {
         return None;
@@ -268,6 +274,40 @@ impl Diff {
             .map(|(name, count)| format!("{name} {count}"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+/// Makes the drones/cargo guess of a fit with a single "xN" block match
+/// the other fit. If the other fit has both drones and cargo, the lone
+/// block goes to whichever of the two shares more item names with it
+/// (a tie keeps it as cargo). Without this, a doctrine fit with only drones
+/// compared with a ship that also has cargo would show the same drones as
+/// both missing and surplus.
+pub fn align(is: &mut Fit, should: &mut Fit) {
+    align_one(is, should);
+    align_one(should, is);
+}
+
+fn align_one(fit: &mut Fit, other: &Fit) {
+    if !fit.lone_counted_block
+        || other.lines(Section::Drones).is_empty()
+        || other.lines(Section::Cargo).is_empty()
+    {
+        return;
+    }
+    let shared = |section: Section| {
+        fit.lines(Section::Cargo)
+            .iter()
+            .filter(|l| other.count(section, &l.name) > 0)
+            .count()
+    };
+    if shared(Section::Drones) > shared(Section::Cargo)
+        && let Some(lines) = fit.sections.remove(&Section::Cargo)
+    {
+        // Pyfa's implants/boosters blocks also land in Cargo, but they
+        // only exist next to more than one "xN" block, so here Cargo is
+        // exactly the lone block.
+        fit.sections.insert(Section::Drones, lines);
     }
 }
 
@@ -503,6 +543,54 @@ Oxygen Isotopes x100000";
         assert!(parse("\n\n  \n").is_empty());
         let fit = parse("Damage Control II");
         assert_eq!(fit.hull, "");
+        assert_eq!(fit.count(Section::Low, "Damage Control II"), 1);
+    }
+
+    const VEXOR_RACKS: &str = "[Vexor, PvE]\n\nDrone Damage Amplifier II\n\n\
+                               10MN Afterburner II\n\nDrone Link Augmentor I\n\n\
+                               Medium Auxiliary Nano Pump I";
+
+    #[test]
+    fn drones_only_fit_lines_up_with_drones_and_cargo() {
+        let drones_only = format!("{VEXOR_RACKS}\n\n\nHammerhead II x5");
+        let with_cargo =
+            format!("{VEXOR_RACKS}\n\n\nHammerhead II x5\n\n\nNanite Repair Paste x50");
+        // Both directions: Should drones-only, then Is drones-only.
+        for (is_text, should_text) in [(&with_cargo, &drones_only), (&drones_only, &with_cargo)] {
+            let mut is = parse(is_text);
+            let mut should = parse(should_text);
+            align(&mut is, &mut should);
+            let diff = compare(&is, &should);
+            assert!(diff.lines(Section::Drones).iter().all(|l| l.change == 0));
+            assert_eq!(diff.lines(Section::Drones).len(), 1);
+            assert_eq!(diff.missing + diff.surplus, 1);
+            let cargo = diff.lines(Section::Cargo);
+            assert_eq!(cargo.len(), 1);
+            assert_eq!(cargo[0].name, "Nanite Repair Paste");
+            assert!(!diff.multibuy().contains("Hammerhead"));
+        }
+    }
+
+    #[test]
+    fn cargo_only_fit_stays_cargo() {
+        let cargo_only = format!("{VEXOR_RACKS}\n\n\nNanite Repair Paste x50");
+        let with_drones =
+            format!("{VEXOR_RACKS}\n\n\nHammerhead II x5\n\n\nNanite Repair Paste x50");
+        let mut is = parse(&cargo_only);
+        let mut should = parse(&with_drones);
+        align(&mut is, &mut should);
+        assert_eq!(is.count(Section::Cargo, "Nanite Repair Paste"), 50);
+        assert!(is.lines(Section::Drones).is_empty());
+        let diff = compare(&is, &should);
+        assert_eq!((diff.missing, diff.surplus), (1, 0));
+        assert_eq!(diff.multibuy(), "Hammerhead II 5");
+    }
+
+    #[test]
+    fn header_without_fit_name() {
+        let fit = parse("[Thanatos]\n\nDamage Control II");
+        assert_eq!(fit.hull, "Thanatos");
+        assert_eq!(fit.name, "");
         assert_eq!(fit.count(Section::Low, "Damage Control II"), 1);
     }
 

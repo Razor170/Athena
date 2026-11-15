@@ -244,6 +244,8 @@ fn input_column(
         };
         let subtitle = if fit.hull.is_empty() {
             hint.to_string()
+        } else if fit.name.is_empty() {
+            fit.hull.clone()
         } else {
             format!("{} · {}", fit.hull, fit.name)
         };

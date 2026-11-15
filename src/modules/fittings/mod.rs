@@ -120,6 +120,7 @@ impl Fittings {
     fn reparse(&mut self) {
         self.is_fit = eft::parse(&self.saved.is_text);
         self.should_fit = eft::parse(&self.saved.should_text);
+        eft::align(&mut self.is_fit, &mut self.should_fit);
         self.diff = eft::compare(&self.is_fit, &self.should_fit);
     }
 
