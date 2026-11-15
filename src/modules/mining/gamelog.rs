@@ -352,12 +352,22 @@ impl GameLogReader {
 
     /// Feeds newly read bytes and returns the mining events they completed.
     pub fn push(&mut self, new_bytes: &[u8]) -> Vec<TimedMiningEvent> {
+        self.push_lines(new_bytes)
+            .iter()
+            .filter_map(|line| parse_mining_line(line))
+            .collect()
+    }
+
+    /// Feeds newly read bytes and returns the event lines they completed
+    /// (everything after the header), for callers that look for other
+    /// events than mining, such as the CIC module's combat lines.
+    pub fn push_lines(&mut self, new_bytes: &[u8]) -> Vec<String> {
         self.partial_line.extend_from_slice(new_bytes);
-        let mut events = Vec::new();
+        let mut lines = Vec::new();
 
         // Everything up to the last '\n' is complete; the rest stays buffered.
         let Some(last_newline) = self.partial_line.iter().rposition(|&b| b == b'\n') else {
-            return events;
+            return lines;
         };
         let complete: Vec<u8> = self.partial_line.drain(..=last_newline).collect();
         // Game logs are UTF-8. A broken byte becomes a replacement character
@@ -370,11 +380,9 @@ impl GameLogReader {
             if !self.header_done && !self.push_header_line(line) {
                 continue;
             }
-            if let Some(event) = parse_mining_line(line) {
-                events.push(event);
-            }
+            lines.push(line.to_string());
         }
-        events
+        lines
     }
 
     /// Collects one line of the header block. Returns true if the line is

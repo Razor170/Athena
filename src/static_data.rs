@@ -4,7 +4,8 @@
 //! and ship names, in [`Universe`]. And NPC corporations with the stations
 //! of their loyalty point stores, for the Finance module. And planetary
 //! commodities, colony structures and factory schematics, for the
-//! Planetary module.
+//! Planetary module. And remote rep and cap transmitter modules plus
+//! structure type names, for the CIC module.
 //!
 //! The data comes from `static.sqlite`, which `cargo xtask sde` builds from
 //! the official SDE (see `xtask/src/main.rs`). CI builds it and puts it in the
@@ -26,7 +27,7 @@ use crate::universe::Universe;
 pub const FILE_NAME: &str = "static.sqlite";
 
 /// The `schema_version` this code can read. Must match the xtask.
-const SCHEMA_VERSION: &str = "4";
+const SCHEMA_VERSION: &str = "5";
 
 /// What kind of thing an item is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +134,14 @@ pub struct PiSchematic {
     pub output: Option<(i64, i64)>,
 }
 
+/// What a remote module repairs or sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteKind {
+    Shield,
+    Armor,
+    Cap,
+}
+
 /// All static data Athena uses, in memory.
 #[derive(Debug, Clone, Default)]
 pub struct StaticData {
@@ -156,6 +165,11 @@ pub struct StaticData {
     pi_structures: HashMap<i64, PiStructure>,
     /// Factory schematics by schematic id.
     pi_schematics: HashMap<i64, PiSchematic>,
+    /// Remote shield boosters, armor repairers and cap transmitters, sorted
+    /// by name.
+    remote_modules: Vec<(String, RemoteKind)>,
+    /// Names of structure types, such as "Metenox Moon Drill".
+    structure_types: std::collections::HashSet<String>,
 }
 
 impl StaticData {
@@ -290,6 +304,27 @@ impl StaticData {
 
         data.read_planetary(db).context("reading planetary data")?;
 
+        let mut query = db.prepare("SELECT name, kind FROM remote_modules ORDER BY name")?;
+        let rows = query.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (name, kind) = row?;
+            let kind = match kind.as_str() {
+                "shield" => RemoteKind::Shield,
+                "armor" => RemoteKind::Armor,
+                "cap" => RemoteKind::Cap,
+                other => bail!("unknown remote module kind {other} for {name}"),
+            };
+            data.remote_modules.push((name, kind));
+        }
+
+        let mut query = db.prepare("SELECT name FROM structure_types")?;
+        let rows = query.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            data.structure_types.insert(row?);
+        }
+
         if data.items.is_empty() {
             bail!("static data contains no items");
         }
@@ -398,6 +433,19 @@ impl StaticData {
         self.pi_schematics.get(&schematic_id)
     }
 
+    /// The names of the remote modules of one kind, sorted.
+    pub fn remote_modules(&self, kind: RemoteKind) -> impl Iterator<Item = &str> {
+        self.remote_modules
+            .iter()
+            .filter(move |(_, k)| *k == kind)
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// True if `name` is a structure type, such as "Metenox Moon Drill".
+    pub fn is_structure_type(&self, name: &str) -> bool {
+        self.structure_types.contains(name)
+    }
+
     /// Looks up an item by its English name, as written in the logs.
     pub fn item_by_name(&self, name: &str) -> Option<&Item> {
         self.items.get(self.id_by_name.get(name)?)
@@ -499,8 +547,17 @@ pub mod tests {
             CREATE TABLE pi_schematic_types (schematic_id INTEGER NOT NULL,
                 type_id INTEGER NOT NULL, quantity INTEGER NOT NULL, is_input INTEGER NOT NULL,
                 PRIMARY KEY (schematic_id, type_id));
+            CREATE TABLE remote_modules (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                kind TEXT NOT NULL);
+            CREATE TABLE structure_types (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL);
 
-            INSERT INTO meta VALUES ('schema_version', '4'), ('sde_build', '3670638');
+            INSERT INTO meta VALUES ('schema_version', '5'), ('sde_build', '3670638');
+            INSERT INTO remote_modules VALUES
+                (12102, 'Large Remote Capacitor Transmitter II', 'cap'),
+                (12221, 'Medium Remote Capacitor Transmitter II', 'cap'),
+                (3608, 'Large Remote Shield Booster II', 'shield'),
+                (26914, 'Large Remote Armor Repairer II', 'armor');
+            INSERT INTO structure_types VALUES (81826, 'Metenox Moon Drill');
             INSERT INTO pi_commodities VALUES
                 (2268, 'Aqueous Liquids', 0.005, 0),
                 (3645, 'Water', 0.19, 1),
@@ -613,6 +670,22 @@ pub mod tests {
         assert_eq!(schematic.cycle_secs, 3600);
         assert_eq!(schematic.inputs, vec![(2389, 40), (3645, 40)]);
         assert_eq!(schematic.output, Some((9838, 5)));
+    }
+
+    #[test]
+    fn loads_remote_modules_and_structures() {
+        let data = sample();
+        let caps: Vec<&str> = data.remote_modules(RemoteKind::Cap).collect();
+        assert_eq!(
+            caps,
+            [
+                "Large Remote Capacitor Transmitter II",
+                "Medium Remote Capacitor Transmitter II"
+            ]
+        );
+        assert_eq!(data.remote_modules(RemoteKind::Armor).count(), 1);
+        assert!(data.is_structure_type("Metenox Moon Drill"));
+        assert!(!data.is_structure_type("Basilisk"));
     }
 
     #[test]
