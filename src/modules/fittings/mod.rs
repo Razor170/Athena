@@ -15,12 +15,14 @@ pub mod eft;
 mod ui;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
 use self::eft::{Diff, Fit};
-use super::{Module, ModuleContext};
+use super::{Module, ModuleContext, SharedStaticData};
+use crate::static_data::StaticData;
 use crate::storage::Saver;
 
 const FILE_NAME: &str = "fittings.toml";
@@ -83,6 +85,8 @@ impl Saved {
 
 pub struct Fittings {
     data_dir: PathBuf,
+    /// Game data, to tell drones from cargo. `None` without static.sqlite.
+    static_data: Option<Arc<StaticData>>,
     saver: Saver,
     saved: Saved,
     submodule: Submodule,
@@ -98,10 +102,11 @@ pub struct Fittings {
 }
 
 impl Fittings {
-    pub fn new(data_dir: &Path) -> Fittings {
+    pub fn new(data_dir: &Path, static_data: &SharedStaticData) -> Fittings {
         let (saved, problem) = Saved::load(data_dir);
         let mut module = Fittings {
             data_dir: data_dir.to_path_buf(),
+            static_data: static_data.data.clone(),
             saver: Saver::start(),
             saved,
             submodule: Submodule::default(),
@@ -118,8 +123,18 @@ impl Fittings {
 
     /// Parses both texts again and compares them.
     fn reparse(&mut self) {
-        self.is_fit = eft::parse(&self.saved.is_text);
-        self.should_fit = eft::parse(&self.saved.should_text);
+        match &self.static_data {
+            Some(data) => {
+                let is_drone = |name: &str| data.is_drone_or_fighter(name);
+                self.is_fit = eft::parse_with_drones(&self.saved.is_text, &is_drone);
+                self.should_fit = eft::parse_with_drones(&self.saved.should_text, &is_drone);
+            }
+            // No static.sqlite: guess drones vs cargo from the block order.
+            None => {
+                self.is_fit = eft::parse(&self.saved.is_text);
+                self.should_fit = eft::parse(&self.saved.should_text);
+            }
+        }
         eft::align(&mut self.is_fit, &mut self.should_fit);
         self.diff = eft::compare(&self.is_fit, &self.should_fit);
     }

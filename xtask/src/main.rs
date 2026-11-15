@@ -51,7 +51,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 /// Bump when the tables change, so the app can refuse a file it can't read.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// The SDE category that holds all asteroid ore, ice and moon ore.
 const CATEGORY_ASTEROID: i64 = 25;
@@ -65,6 +65,9 @@ const CATEGORY_MODULE: i64 = 7;
 /// (POS), Sovereignty Structures, Orbitals (skyhooks), Structure (Upwell,
 /// including the Metenox Moon Drill).
 const STRUCTURE_CATEGORIES: [i64; 4] = [23, 40, 46, 65];
+/// The SDE categories of drones and fighters, so the Fittings module can
+/// tell a drone bay block from cargo.
+const DRONE_CATEGORIES: [i64; 2] = [18, 87];
 
 /// With Dotlan maps, at least this share of all systems must get their spot
 /// from them, or the build fails: a changed Dotlan format must not quietly
@@ -360,6 +363,8 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
     // Remote reps and cap transmitters, and structure type names, for CIC.
     let mut remote_modules: BTreeMap<i64, (String, &'static str)> = BTreeMap::new();
     let mut structure_types: BTreeMap<i64, String> = BTreeMap::new();
+    // Drone and fighter names, for Fittings.
+    let mut drone_types: BTreeMap<i64, String> = BTreeMap::new();
     for t in &types {
         let (Some((category, group_name)), Some(name)) =
             (groups.get(&t.group_id), english(&t.name))
@@ -375,6 +380,8 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
             }
         } else if STRUCTURE_CATEGORIES.contains(category) {
             structure_types.insert(t.id, name);
+        } else if DRONE_CATEGORIES.contains(category) {
+            drone_types.insert(t.id, name);
         }
     }
     // Planetary commodities and colony structures.
@@ -467,6 +474,11 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
     {
         bail!("structure Metenox Moon Drill not found; has the SDE format changed?");
     }
+    for must_have in ["Hammerhead II", "Einherji II"] {
+        if !drone_types.values().any(|name| name == must_have) {
+            bail!("drone or fighter {must_have} not found; has the SDE format changed?");
+        }
+    }
     for must_have in ["Jita", "X7R-JW", "Zarzakh"] {
         if !map.systems.values().any(|s| s.name == must_have) {
             bail!("system {must_have} not found; has the SDE format changed?");
@@ -492,13 +504,14 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         pi: &pi,
         remote_modules: &remote_modules,
         structure_types: &structure_types,
+        drone_types: &drone_types,
     };
     write_database(out, info, &tables)?;
     println!(
         "Wrote {}: {} items, {} reprocessing rows, {} compressible types, {} ships, \
          {} regions, {} systems, {} gates, {} map layout, {} NPC corporations, \
          {} stations with an LP store, {} planetary commodities, {} colony structures, \
-         {} schematics, {} remote modules, {} structure types",
+         {} schematics, {} remote modules, {} structure types, {} drones and fighters",
         out.display(),
         items.len(),
         reprocess.len(),
@@ -514,7 +527,8 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         pi.structures.len(),
         pi.schematics.len(),
         remote_modules.len(),
-        structure_types.len()
+        structure_types.len(),
+        drone_types.len()
     );
     Ok(())
 }
@@ -639,6 +653,11 @@ fn create_schema(db: &rusqlite::Connection) -> Result<()> {
             type_id INTEGER PRIMARY KEY,
             name    TEXT NOT NULL
         );
+        -- Drones and fighters, for the Fittings module.
+        CREATE TABLE drone_types (
+            type_id INTEGER PRIMARY KEY,
+            name    TEXT NOT NULL
+        );
 
         -- NPC corporations, for loyalty point names.
         CREATE TABLE npc_corporations (
@@ -700,6 +719,7 @@ struct Tables<'a> {
     pi: &'a planetary::PiData,
     remote_modules: &'a BTreeMap<i64, (String, &'static str)>,
     structure_types: &'a BTreeMap<i64, String>,
+    drone_types: &'a BTreeMap<i64, String>,
 }
 
 fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
@@ -714,6 +734,7 @@ fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
         pi,
         remote_modules,
         structure_types,
+        drone_types,
     } = *tables;
     // Write to a temporary file first, so a failed run never leaves a
     // half-written static.sqlite behind.
@@ -818,6 +839,11 @@ fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
         let mut insert =
             tx.prepare("INSERT INTO structure_types (type_id, name) VALUES (?1, ?2)")?;
         for (id, name) in structure_types {
+            insert.execute((id, name))?;
+        }
+
+        let mut insert = tx.prepare("INSERT INTO drone_types (type_id, name) VALUES (?1, ?2)")?;
+        for (id, name) in drone_types {
             insert.execute((id, name))?;
         }
 
