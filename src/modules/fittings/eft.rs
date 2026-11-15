@@ -26,10 +26,16 @@
 //!
 //! Blank lines split the text into blocks. The blocks before the first one
 //! with "xN" lines are the slot racks, in the order low, med, high, rigs,
-//! subsystems. Of the blocks with "xN" lines, the last is the cargo and the
-//! ones before it are drones and fighters. With only one such block we can't
-//! tell which it is, so it counts as cargo (in both fits alike, so the
-//! compare still lines up).
+//! subsystems.
+//!
+//! The "xN" blocks are the drone bay (with fighters) and the cargo. Their
+//! order differs: Pyfa and EVE's saved fittings put drones first, while
+//! "Copy to clipboard" on a ship in EVE puts the cargo first. So with the
+//! game data loaded ([`parse_with_drones`]) a block counts as drones when
+//! most of its items are drones or fighters, whatever its place. Without
+//! game data ([`parse`]) the last "xN" block is the cargo and the ones
+//! before it are drones; a single one counts as cargo until [`align`]
+//! compares it with the other fit.
 
 use std::collections::BTreeMap;
 
@@ -131,9 +137,23 @@ impl Fit {
     }
 }
 
-/// Reads an EFT fit. Never fails: lines it doesn't understand are read as
-/// item names, so a typo shows up in the compare instead of vanishing.
+/// Reads an EFT fit without game data: drones and cargo are told apart by
+/// block order (see the top of this file). Never fails: lines it doesn't
+/// understand are read as item names, so a typo shows up in the compare
+/// instead of vanishing.
 pub fn parse(text: &str) -> Fit {
+    parse_blocks(text, None)
+}
+
+/// Reads an EFT fit, using `is_drone` (true for drone and fighter names,
+/// from the SDE) to tell the drone bay from the cargo.
+pub fn parse_with_drones(text: &str, is_drone: &dyn Fn(&str) -> bool) -> Fit {
+    parse_blocks(text, Some(is_drone))
+}
+
+// `&dyn Fn(&str) -> bool` is "any function that takes a name and answers
+// yes or no", so the tests can pass a short list instead of the SDE.
+fn parse_blocks(text: &str, is_drone: Option<&dyn Fn(&str) -> bool>) -> Fit {
     let mut fit = Fit::default();
     let mut blocks: Vec<Vec<&str>> = Vec::new();
     let mut block: Vec<&str> = Vec::new();
@@ -164,7 +184,9 @@ pub fn parse(text: &str) -> Fit {
     let has_counts = |b: &Vec<&str>| b.iter().any(|l| split_count(l).1.is_some());
     let first_counted = blocks.iter().position(has_counts);
     let last_counted = blocks.iter().rposition(has_counts);
-    fit.lone_counted_block = blocks.iter().filter(|b| has_counts(b)).count() == 1;
+    // Only a guess without game data; `align` may fix it up.
+    fit.lone_counted_block =
+        is_drone.is_none() && blocks.iter().filter(|b| has_counts(b)).count() == 1;
     let mut racks = Section::RACKS.iter();
     for (i, block) in blocks.iter().enumerate() {
         let section = match first_counted {
@@ -174,7 +196,11 @@ pub fn parse(text: &str) -> Fit {
             // Counted blocks before the last are drones and fighters.
             // Uncounted blocks after the racks (Pyfa's implants and
             // boosters) go to cargo.
-            Some(_) if has_counts(block) && Some(i) != last_counted => Section::Drones,
+            Some(_) if !has_counts(block) => Section::Cargo,
+            // With game data: drones when most items are drones/fighters.
+            Some(_) if is_drone.is_some_and(|f| mostly_drones(block, f)) => Section::Drones,
+            Some(_) if is_drone.is_some() => Section::Cargo,
+            Some(_) if Some(i) != last_counted => Section::Drones,
             Some(_) => Section::Cargo,
         };
         for line in block {
@@ -184,6 +210,17 @@ pub fn parse(text: &str) -> Fit {
         }
     }
     fit
+}
+
+/// More than half of the block's items are drones or fighters.
+fn mostly_drones(block: &[&str], is_drone: &dyn Fn(&str) -> bool) -> bool {
+    let names: Vec<&str> = block
+        .iter()
+        .filter_map(|l| item(l))
+        .map(|(n, _)| n)
+        .collect();
+    let drones = names.iter().filter(|n| is_drone(n)).count();
+    drones * 2 > names.len()
 }
 
 /// `[Thanatos, DPS - Thanatos]` gives `("Thanatos", "DPS - Thanatos")`.
@@ -584,6 +621,106 @@ Oxygen Isotopes x100000";
         let diff = compare(&is, &should);
         assert_eq!((diff.missing, diff.surplus), (1, 0));
         assert_eq!(diff.multibuy(), "Hammerhead II 5");
+    }
+
+    /// Kevin's in-game "Copy to clipboard" of a ship: no blank line after
+    /// the header, and the cargo comes before the drones.
+    const SALVATION_IN_GAME: &str = "[Salvation, Kearsarge]
+Syndicate Damage Control
+25000mm Steel Plates II
+
+Capital Micro Jump Drive
+
+Armor Command Burst II
+Heavy Energy Neutralizer II
+
+Capital Trimark Armor Pump I
+Capital Trimark Armor Pump I
+
+
+
+
+Tracking Speed Script x1
+Mobile Depot x2
+
+Gram I x36
+Siren I x1
+Dromi I x1
+Templar I x8";
+
+    const SALVATION_EFT: &str = "[Salvation, Links - Salvation]
+
+Syndicate Damage Control
+25000mm Steel Plates II
+
+Capital Micro Jump Drive
+
+Armor Command Burst II
+Heavy Energy Neutralizer II
+
+Capital Trimark Armor Pump I
+Capital Trimark Armor Pump I
+
+
+
+Gram I x12
+Gram I x12
+Gram I x12
+Templar I x6
+Templar I x6
+Templar I x6
+Dromi I x3
+Siren I x3
+
+
+
+
+Mid-grade Amulet Alpha x1
+Tracking Speed Script x1
+Mobile Depot x2";
+
+    fn salvation_drone(name: &str) -> bool {
+        ["Gram I", "Siren I", "Dromi I", "Templar I"].contains(&name)
+    }
+
+    #[test]
+    fn in_game_copy_puts_cargo_first() {
+        let is = parse_with_drones(SALVATION_IN_GAME, &salvation_drone);
+        assert_eq!(is.hull, "Salvation");
+        assert_eq!(is.count(Section::Low, "Syndicate Damage Control"), 1);
+        assert_eq!(is.count(Section::Rigs, "Capital Trimark Armor Pump I"), 2);
+        assert_eq!(is.count(Section::Cargo, "Mobile Depot"), 2);
+        assert_eq!(is.count(Section::Drones, "Templar I"), 8);
+        assert_eq!(is.lines(Section::Cargo).len(), 2);
+
+        let should = parse_with_drones(SALVATION_EFT, &salvation_drone);
+        assert_eq!(should.count(Section::Drones, "Templar I"), 18);
+        assert_eq!(should.lines(Section::Cargo).len(), 3);
+
+        let diff = compare(&is, &should);
+        // Drones only differ in numbers, never as missing + surplus pairs.
+        let drones = diff.lines(Section::Drones);
+        assert_eq!(drones.len(), 4);
+        assert!(drones.iter().all(|l| l.change >= 0));
+        let gram = drones.iter().find(|l| l.name == "Gram I").unwrap();
+        assert_eq!(gram.change, 0);
+        let templar = drones.iter().find(|l| l.name == "Templar I").unwrap();
+        assert_eq!(templar.change, 10);
+        let cargo = diff.lines(Section::Cargo);
+        assert_eq!(cargo.len(), 3);
+        assert_eq!(cargo[0].name, "Mid-grade Amulet Alpha");
+        assert_eq!(cargo[0].change, 1);
+        assert_eq!(diff.surplus, 0);
+    }
+
+    #[test]
+    fn game_data_decides_a_lone_block() {
+        let fit = parse_with_drones(
+            "[Vexor, X]\n\nDrone Damage Amplifier II\n\n\nHammerhead II x5",
+            &|n| n == "Hammerhead II",
+        );
+        assert_eq!(fit.count(Section::Drones, "Hammerhead II"), 5);
+        assert!(!fit.lone_counted_block);
     }
 
     #[test]

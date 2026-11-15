@@ -27,7 +27,7 @@ use crate::universe::Universe;
 pub const FILE_NAME: &str = "static.sqlite";
 
 /// The `schema_version` this code can read. Must match the xtask.
-const SCHEMA_VERSION: &str = "5";
+const SCHEMA_VERSION: &str = "6";
 
 /// What kind of thing an item is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +170,8 @@ pub struct StaticData {
     remote_modules: Vec<(String, RemoteKind)>,
     /// Names of structure types, such as "Metenox Moon Drill".
     structure_types: std::collections::HashSet<String>,
+    /// Names of drone and fighter types, such as "Hammerhead II".
+    drone_types: std::collections::HashSet<String>,
 }
 
 impl StaticData {
@@ -325,6 +327,12 @@ impl StaticData {
             data.structure_types.insert(row?);
         }
 
+        let mut query = db.prepare("SELECT name FROM drone_types")?;
+        let rows = query.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            data.drone_types.insert(row?);
+        }
+
         if data.items.is_empty() {
             bail!("static data contains no items");
         }
@@ -446,6 +454,11 @@ impl StaticData {
         self.structure_types.contains(name)
     }
 
+    /// Whether `name` is a drone or a fighter (Fittings: drone bay or cargo).
+    pub fn is_drone_or_fighter(&self, name: &str) -> bool {
+        self.drone_types.contains(name)
+    }
+
     /// Looks up an item by its English name, as written in the logs.
     pub fn item_by_name(&self, name: &str) -> Option<&Item> {
         self.items.get(self.id_by_name.get(name)?)
@@ -550,14 +563,16 @@ pub mod tests {
             CREATE TABLE remote_modules (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
                 kind TEXT NOT NULL);
             CREATE TABLE structure_types (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+            CREATE TABLE drone_types (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL);
 
-            INSERT INTO meta VALUES ('schema_version', '5'), ('sde_build', '3670638');
+            INSERT INTO meta VALUES ('schema_version', '6'), ('sde_build', '3670638');
             INSERT INTO remote_modules VALUES
                 (12102, 'Large Remote Capacitor Transmitter II', 'cap'),
                 (12221, 'Medium Remote Capacitor Transmitter II', 'cap'),
                 (3608, 'Large Remote Shield Booster II', 'shield'),
                 (26914, 'Large Remote Armor Repairer II', 'armor');
             INSERT INTO structure_types VALUES (81826, 'Metenox Moon Drill');
+            INSERT INTO drone_types VALUES (2185, 'Hammerhead II'), (40556, 'Einherji II');
             INSERT INTO pi_commodities VALUES
                 (2268, 'Aqueous Liquids', 0.005, 0),
                 (3645, 'Water', 0.19, 1),
@@ -686,6 +701,8 @@ pub mod tests {
         assert_eq!(data.remote_modules(RemoteKind::Armor).count(), 1);
         assert!(data.is_structure_type("Metenox Moon Drill"));
         assert!(!data.is_structure_type("Basilisk"));
+        assert!(data.is_drone_or_fighter("Hammerhead II"));
+        assert!(!data.is_drone_or_fighter("Nanite Repair Paste"));
     }
 
     #[test]
