@@ -79,6 +79,10 @@ pub struct EsiClient {
     /// How long until ESI has new data for the last request: its `Expires`
     /// header minus its `Date` header. `None` if either was missing.
     pub last_expires_in: Option<Duration>,
+    /// How old the data of the last answer was when ESI sent it: its
+    /// `Date` header minus its `Last-Modified` header. `None` if either was
+    /// missing.
+    pub last_data_age: Option<Duration>,
 }
 
 impl EsiClient {
@@ -93,6 +97,7 @@ impl EsiClient {
             error_limit_remain: None,
             error_limit_reset_secs: None,
             last_expires_in: None,
+            last_data_age: None,
         })
     }
 
@@ -162,6 +167,23 @@ impl EsiClient {
             .with_context(|| format!("reading the answer from {url}"))
     }
 
+    /// Like [`EsiClient::post_json`], for a character's own data (such as
+    /// `/characters/{id}/assets/names`). The token only goes in the header.
+    pub fn post_json_authed<B: Serialize, T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        access_token: &str,
+        body: &B,
+    ) -> Result<T> {
+        let url = format!("{BASE_URL}{path}");
+        let response = self.send(&url, |http| {
+            http.post(&url).bearer_auth(access_token).json(body)
+        })?;
+        response
+            .json::<T>()
+            .with_context(|| format!("reading the answer from {url}"))
+    }
+
     /// Sends a request made by `build`, with the headers ESI wants, and
     /// retries network hiccups, rate limits and server errors. Returns a
     /// successful (or 304 "not modified") response.
@@ -185,6 +207,7 @@ impl EsiClient {
             };
             self.read_limits(&response);
             self.last_expires_in = expires_in(&response);
+            self.last_data_age = data_age(&response);
 
             let status = response.status();
             if status.is_success() || status == StatusCode::NOT_MODIFIED {
@@ -240,6 +263,14 @@ fn expires_in(response: &Response) -> Option<Duration> {
     let expires = http_date_seconds(&header_text(response, "expires")?)?;
     let date = http_date_seconds(&header_text(response, "date")?)?;
     u64::try_from(expires - date).ok().map(Duration::from_secs)
+}
+
+/// `Date` minus `Last-Modified`: how old ESI's data was when it answered.
+/// Both come from ESI's clock.
+fn data_age(response: &Response) -> Option<Duration> {
+    let modified = http_date_seconds(&header_text(response, "last-modified")?)?;
+    let date = http_date_seconds(&header_text(response, "date")?)?;
+    u64::try_from(date - modified).ok().map(Duration::from_secs)
 }
 
 /// An HTTP date such as "Sun, 08 Nov 2026 16:49:14 GMT" as seconds since

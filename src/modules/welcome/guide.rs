@@ -161,6 +161,10 @@ pub const SECTIONS: &[Section] = &[
              In EVE's fitting window use \"Copy to clipboard\", then click [Paste] on the \
              column. [Text] shows the fit as text to edit, [List] as a list with duplicate \
              lines added up.",
+            "[Open ship…] loads one of your ships from ESI assets: pick a station on the \
+             left, then the ship on the right. ESI keeps assets for up to an hour, so the \
+             window shows how old each character's data is and when [Refresh] has newer \
+             data.",
             "**Diff** shows what is missing in green (+) and what is too much in red (−), by \
              rigs, high, med and low slots, drones and fighters, and cargo. A module in cargo \
              only counts against cargo.",
