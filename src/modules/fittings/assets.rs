@@ -132,9 +132,13 @@ fn is_slot(section: Section) -> bool {
     )
 }
 
-/// Finds every assembled ship in `assets`. `is_ship` says if a type id is
-/// a ship (from the SDE).
-pub fn find_ships(assets: &[EsiAsset], is_ship: &dyn Fn(i64) -> bool) -> Vec<Ship> {
+/// Finds every assembled ship in `assets`. `is_ship` and `is_charge` say
+/// if a type id is a ship or a charge (ammo, script, crystal), from the SDE.
+pub fn find_ships(
+    assets: &[EsiAsset],
+    is_ship: &dyn Fn(i64) -> bool,
+    is_charge: &dyn Fn(i64) -> bool,
+) -> Vec<Ship> {
     let by_id: HashMap<i64, &EsiAsset> = assets.iter().map(|a| (a.item_id, a)).collect();
     // Items inside each item, so a ship's contents are found without
     // going through the whole list for every ship.
@@ -160,7 +164,7 @@ pub fn find_ships(assets: &[EsiAsset], is_ship: &dyn Fn(i64) -> bool) -> Vec<Shi
             type_id: asset.type_id,
             place,
             inside: carrier,
-            contents: contents(items),
+            contents: contents(items, is_charge),
         });
     }
     ships.sort_by_key(|s| s.item_id);
@@ -178,6 +182,10 @@ fn place_of(
     let mut carrier = None;
     // A depth limit, so a broken list can never loop forever.
     for _ in 0..10 {
+        // Asset safety wraps aren't ships you can open; skip what is in one.
+        if current.location_flag == "AssetSafety" {
+            return None;
+        }
         match current.location_type.as_str() {
             "station" => return Some((Place::Station(current.location_id), carrier)),
             "solar_system" => return Some((Place::InSpace(current.location_id), carrier)),
@@ -197,10 +205,16 @@ fn place_of(
     None
 }
 
-/// Sorts a ship's items into sections. In a slot only the module counts:
-/// a loaded charge or script shares the slot's flag but is never a
-/// singleton, while a fitted module always is.
-fn contents(items: &[&EsiAsset]) -> BTreeMap<Section, Vec<(i64, u64)>> {
+/// Sorts a ship's items into sections. A slot holds exactly one module, and
+/// a loaded charge, script or crystal shares the slot's flag. So per slot
+/// only one item is kept: a singleton (a fitted module always is) that is
+/// not a charge. A used crystal can't stack, so it is a
+/// singleton too: that is why charges are told apart by type, not by
+/// `is_singleton`.
+fn contents(
+    items: &[&EsiAsset],
+    is_charge: &dyn Fn(i64) -> bool,
+) -> BTreeMap<Section, Vec<(i64, u64)>> {
     let mut by_flag: BTreeMap<&str, Vec<&EsiAsset>> = BTreeMap::new();
     for item in items {
         by_flag
@@ -214,13 +228,12 @@ fn contents(items: &[&EsiAsset]) -> BTreeMap<Section, Vec<(i64, u64)>> {
             continue;
         };
         let kept: Vec<&EsiAsset> = if is_slot(section) {
-            let modules: Vec<&EsiAsset> =
-                items.iter().copied().filter(|a| a.is_singleton).collect();
-            if modules.is_empty() {
-                items.into_iter().take(1).collect()
-            } else {
-                modules
-            }
+            items
+                .iter()
+                .copied()
+                .find(|a| a.is_singleton && !is_charge(a.type_id))
+                .into_iter()
+                .collect()
         } else {
             items
         };
@@ -322,6 +335,14 @@ mod tests {
         type_id == SALVATION || type_id == THANATOS
     }
 
+    fn is_charge(type_id: i64) -> bool {
+        type_id == 5 || type_id == 9
+    }
+
+    fn ships() -> Vec<Ship> {
+        find_ships(&sample(), &is_ship, &is_charge)
+    }
+
     fn names(type_id: i64) -> Option<String> {
         let name = match type_id {
             1 => "Damage Control II",
@@ -332,6 +353,7 @@ mod tests {
             6 => "Capital Trimark Armor Pump I",
             7 => "Templar I",
             8 => "Mobile Depot",
+            9 => "Multifrequency L",
             _ => return None,
         };
         Some(name.to_string())
@@ -348,6 +370,9 @@ mod tests {
             asset(104, 3, 100, "MedSlot0", "item", 1, true),
             asset(105, 4, 100, "HiSlot0", "item", 1, true),
             asset(106, 5, 100, "HiSlot0", "item", 1, false),
+            // A used crystal can't stack, so ESI lists it as a singleton.
+            asset(112, 4, 100, "HiSlot1", "item", 1, true),
+            asset(113, 9, 100, "HiSlot1", "item", 1, true),
             asset(107, 6, 100, "RigSlot0", "item", 1, true),
             asset(108, 7, 100, "FighterBay", "item", 6, false),
             asset(109, 7, 100, "FighterBay", "item", 2, true),
@@ -358,12 +383,15 @@ mod tests {
             asset(200, THANATOS, 60003760, "Hangar", "station", 1, false),
             asset(300, THANATOS, 30000142, "Hangar", "solar_system", 1, true),
             asset(301, SALVATION, 300, "ShipHangar", "item", 1, true),
+            // A Salvation in an asset safety wrap is not listed.
+            asset(400, 10, 60003760, "AssetSafety", "station", 1, true),
+            asset(401, SALVATION, 400, "AssetSafety", "item", 1, true),
         ]
     }
 
     #[test]
     fn finds_assembled_ships_and_where_they_are() {
-        let ships = find_ships(&sample(), &is_ship);
+        let ships = ships();
         let found: Vec<(i64, Place, Option<i64>)> = ships
             .iter()
             .map(|s| (s.item_id, s.place, s.inside))
@@ -380,20 +408,35 @@ mod tests {
 
     #[test]
     fn contents_skip_loaded_charges_and_sum_drones() {
-        let ships = find_ships(&sample(), &is_ship);
+        let ships = ships();
         let salvation = &ships[0];
-        assert_eq!(salvation.contents[&Section::High], vec![(4, 1)]);
+        // Two neuts; neither the cap charge nor the used crystal counts.
+        assert_eq!(salvation.contents[&Section::High], vec![(4, 2)]);
         assert_eq!(salvation.contents[&Section::Low], vec![(1, 1), (2, 2)]);
         assert_eq!(salvation.contents[&Section::Drones], vec![(7, 8)]);
         assert_eq!(salvation.contents[&Section::Cargo], vec![(8, 2), (5, 60)]);
-        assert_eq!(salvation.summary(), "6 modules · 8 drones · 2 cargo");
+        assert_eq!(salvation.summary(), "7 modules · 8 drones · 2 cargo");
         // The Thanatos's SMB is not part of its fit.
         assert_eq!(ships[1].summary(), "unfitted");
     }
 
     #[test]
+    fn one_module_per_slot_even_with_two_singletons() {
+        // Two singletons in one slot that are both not charges (should
+        // not happen, but ESI is not ours): still only one module.
+        let mut list = sample();
+        list.push(asset(114, 3, 100, "HiSlot1", "item", 1, true));
+        let ships = find_ships(&list, &is_ship, &is_charge);
+        let high: u64 = ships[0].contents[&Section::High]
+            .iter()
+            .map(|(_, n)| n)
+            .sum();
+        assert_eq!(high, 2);
+    }
+
+    #[test]
     fn eft_text_reads_back_the_same() {
-        let ships = find_ships(&sample(), &is_ship);
+        let ships = ships();
         let text = to_eft(&ships[0], "Salvation", "Kearsarge", &names);
         let is_drone = |n: &str| n == "Templar I";
         let fit = eft::parse_with_drones(&text, &is_drone);
@@ -401,8 +444,9 @@ mod tests {
         assert_eq!(fit.name, "Kearsarge");
         assert_eq!(fit.count(Section::Low, "25000mm Steel Plates II"), 2);
         assert_eq!(fit.count(Section::Med, "Capital Micro Jump Drive"), 1);
-        assert_eq!(fit.count(Section::High, "Heavy Energy Neutralizer II"), 1);
+        assert_eq!(fit.count(Section::High, "Heavy Energy Neutralizer II"), 2);
         assert_eq!(fit.count(Section::High, "Navy Cap Booster 3200"), 0);
+        assert_eq!(fit.count(Section::High, "Multifrequency L"), 0);
         assert_eq!(fit.count(Section::Rigs, "Capital Trimark Armor Pump I"), 1);
         assert_eq!(fit.count(Section::Drones, "Templar I"), 8);
         assert_eq!(fit.count(Section::Cargo, "Navy Cap Booster 3200"), 60);
@@ -414,20 +458,20 @@ mod tests {
 
     #[test]
     fn empty_racks_keep_their_place() {
-        let mut ship = find_ships(&sample(), &is_ship).remove(0);
+        let mut ship = ships().remove(0);
         ship.contents.remove(&Section::Med);
         ship.contents.remove(&Section::Low);
         let text = to_eft(&ship, "Salvation", "Kearsarge", &names);
         assert!(text.contains("[Empty Low slot]"));
         let fit = eft::parse(&text);
-        assert_eq!(fit.count(Section::High, "Heavy Energy Neutralizer II"), 1);
+        assert_eq!(fit.count(Section::High, "Heavy Energy Neutralizer II"), 2);
         assert_eq!(fit.count(Section::Rigs, "Capital Trimark Armor Pump I"), 1);
         assert!(fit.lines(Section::Low).is_empty());
     }
 
     #[test]
     fn unknown_names_still_show() {
-        let ships = find_ships(&sample(), &is_ship);
+        let ships = ships();
         let text = to_eft(&ships[0], "Salvation", "Kearsarge", &|_| None);
         assert!(text.contains("Type 4\n"));
     }

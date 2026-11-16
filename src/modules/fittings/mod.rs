@@ -102,9 +102,19 @@ pub struct Picker {
     /// The column the ship goes into.
     pub target: Side,
     pub search: String,
-    /// Only this character's ships; `None` for all.
-    pub character: Option<u64>,
+    /// Whose ships are listed.
+    pub who: Who,
     pub place: Option<Place>,
+}
+
+/// The character filter of the "Open ship" window.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum Who {
+    #[default]
+    All,
+    Character(u64),
+    /// Every character with this tag (from the Characters tab).
+    Tag(String),
 }
 
 impl Saved {
@@ -189,7 +199,7 @@ impl Fittings {
                 open: false,
                 target: Side::Is,
                 search: String::new(),
-                character: None,
+                who: Who::All,
                 place: None,
             },
         };
@@ -321,6 +331,9 @@ impl Fittings {
                 retry_at,
             } => {
                 if character_id == 0 {
+                    // The worker couldn't start and has ended: drop it, so
+                    // the next click starts a new one.
+                    self.worker = None;
                     self.message = Some(text);
                     return;
                 }
@@ -329,6 +342,19 @@ impl Fittings {
                 entry.problem = Some(text);
                 entry.next_at = retry_at;
             }
+        }
+    }
+
+    /// Whether the "Open ship" filter lists this character's ships. A
+    /// character no longer on the Characters tab is never listed.
+    pub fn picker_lists(&self, character_id: u64) -> bool {
+        let Some(character) = self.characters.iter().find(|c| c.id == character_id) else {
+            return false;
+        };
+        match &self.picker.who {
+            Who::All => true,
+            Who::Character(id) => *id == character_id,
+            Who::Tag(tag) => character.tags.contains(tag),
         }
     }
 

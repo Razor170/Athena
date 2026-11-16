@@ -9,9 +9,9 @@ use std::time::Duration;
 use eframe::egui::{self, Color32, FontId, RichText, text::LayoutJob, text::TextFormat, vec2};
 
 use super::Fittings;
-use super::Side;
 use super::assets::{Place, Ship};
 use super::ui::{ACCENT, ago_text, hour_minute};
+use super::{Side, Who};
 use crate::auth::now_unix;
 
 const TEXT: Color32 = Color32::from_rgb(0xdc, 0xdc, 0xdc);
@@ -93,16 +93,29 @@ fn body(module: &mut Fittings, ui: &mut egui::Ui, clicks: &mut Clicks) {
                 .hint_text("Search station, ship or type")
                 .desired_width(240.0),
         );
-        let selected = match module.picker.character {
-            Some(id) => module.character_name(id),
-            None => "All characters".to_string(),
+        let selected = match &module.picker.who {
+            Who::All => "All characters".to_string(),
+            Who::Character(id) => module.character_name(*id),
+            Who::Tag(tag) => format!("Tag: {tag}"),
         };
+        let mut tags: Vec<String> = module
+            .characters
+            .iter()
+            .flat_map(|c| c.tags.iter().cloned())
+            .collect();
+        tags.sort();
+        tags.dedup();
         egui::ComboBox::from_id_salt("fittings_open_ship_character")
             .selected_text(selected)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut module.picker.character, None, "All characters");
+                let who = &mut module.picker.who;
+                ui.selectable_value(who, Who::All, "All characters");
+                for tag in tags {
+                    let label = format!("Tag: {tag}");
+                    ui.selectable_value(who, Who::Tag(tag), label);
+                }
                 for c in &module.characters {
-                    ui.selectable_value(&mut module.picker.character, Some(c.id), &c.name);
+                    ui.selectable_value(who, Who::Character(c.id), &c.name);
                 }
             });
     });
@@ -112,11 +125,7 @@ fn body(module: &mut Fittings, ui: &mut egui::Ui, clicks: &mut Clicks) {
     let search = module.picker.search.trim().to_lowercase();
     let mut by_place: BTreeMap<Place, Vec<Listed>> = BTreeMap::new();
     for (character_id, entry) in &module.assets {
-        if module.picker.character.is_some_and(|c| c != *character_id) {
-            continue;
-        }
-        // A character removed on the Characters tab keeps no ships here.
-        if !module.characters.iter().any(|c| c.id == *character_id) {
+        if !module.picker_lists(*character_id) {
             continue;
         }
         for (ship, name) in &entry.ships {
@@ -293,8 +302,9 @@ fn footer(module: &Fittings, ui: &mut egui::Ui, clicks: &mut Clicks) {
                 None => {
                     ui.label(small("not fetched yet").color(DIM));
                 }
+                // A plain label, not a spinner: a spinner repaints every
+                // frame, and a fetch can take a while.
                 Some(a) if a.loading => {
-                    ui.spinner();
                     ui.label(small("loading…").color(DIM));
                 }
                 Some(a) => {
@@ -312,7 +322,10 @@ fn footer(module: &Fittings, ui: &mut egui::Ui, clicks: &mut Clicks) {
                     }
                     match &a.problem {
                         Some(problem) => {
-                            ui.label(small(format!("· {problem}")).color(YELLOW));
+                            ui.label(
+                                small(format!("· {problem} · retry {}", hour_minute(a.next_at)))
+                                    .color(YELLOW),
+                            );
                         }
                         None => {
                             ui.label(

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::assets::{self, EsiAsset, Place, Ship};
 use crate::auth::{RefreshError, TokenStore, now_unix};
-use crate::esi::{EsiClient, Fetched};
+use crate::esi::{EsiClient, Fetched, HttpError};
 use crate::static_data::StaticData;
 
 /// `/universe/names` and `/assets/names` take at most this many ids.
@@ -115,8 +115,12 @@ struct Fetcher {
     static_data: Arc<StaticData>,
     /// Character -> when ESI has newer assets.
     next_at: HashMap<u64, i64>,
-    /// Ids already named (or tried), so they are looked up once.
+    /// Ids already named (or that ESI doesn't know), so they are looked
+    /// up once.
     named: HashSet<i64>,
+    /// Structures a character may not look up (no docking access), so a
+    /// different character can still try.
+    structure_denied: HashSet<(i64, u64)>,
 }
 
 impl Fetcher {
@@ -128,6 +132,7 @@ impl Fetcher {
             static_data,
             next_at: HashMap::new(),
             named: HashSet::new(),
+            structure_denied: HashSet::new(),
         })
     }
 
@@ -203,7 +208,8 @@ impl Fetcher {
         let static_data = self.static_data.clone();
         let universe = &static_data.universe;
         let is_ship = |type_id: i64| universe.ship_by_id(type_id).is_some();
-        let ships = assets::find_ships(&list, &is_ship);
+        let is_charge = |type_id: i64| static_data.is_charge(type_id);
+        let ships = assets::find_ships(&list, &is_ship, &is_charge);
         drop(list);
 
         let ship_names = self.ship_names(id, token, &ships);
@@ -219,7 +225,7 @@ impl Fetcher {
             })
             .collect::<Vec<_>>();
 
-        let names = self.look_up_names(token, &named_ships);
+        let names = self.look_up_names(id, token, &named_ships);
         if !names.is_empty() {
             send(Event::Names(names));
         }
@@ -264,7 +270,12 @@ impl Fetcher {
 
     /// Names of the item types in the ships and of their stations and
     /// structures, the ones not looked up yet.
-    fn look_up_names(&mut self, token: &str, ships: &[(Ship, String)]) -> Vec<(i64, String)> {
+    fn look_up_names(
+        &mut self,
+        character_id: u64,
+        token: &str,
+        ships: &[(Ship, String)],
+    ) -> Vec<(i64, String)> {
         let mut wanted: Vec<i64> = Vec::new();
         let mut structures: Vec<i64> = Vec::new();
         for (ship, _) in ships {
@@ -280,7 +291,9 @@ impl Fetcher {
         wanted.retain(|i| !self.named.contains(i));
         wanted.sort_unstable();
         wanted.dedup();
-        structures.retain(|i| !self.named.contains(i));
+        structures.retain(|i| {
+            !self.named.contains(i) && !self.structure_denied.contains(&(*i, character_id))
+        });
         structures.sort_unstable();
         structures.dedup();
 
@@ -289,16 +302,27 @@ impl Fetcher {
             self.names_for(chunk, &mut found);
         }
         for structure_id in structures {
-            if let Some(name) = self.structure_name(structure_id, token) {
-                found.push((structure_id, name));
+            match self.structure_name(structure_id, token) {
+                Ok(Some(name)) => {
+                    found.push((structure_id, name));
+                    self.named.insert(structure_id);
+                }
+                // No docking access (403) or gone (404): this character
+                // won't get the name.
+                Ok(None) => {
+                    self.structure_denied.insert((structure_id, character_id));
+                }
+                // ESI trouble: try again on the next fetch.
+                Err(()) => {}
             }
-            self.named.insert(structure_id);
         }
         found
     }
 
     /// `/universe/names`. ESI refuses the whole list (404) if any id is
-    /// unknown to it, so then the list is split in halves.
+    /// unknown to it, so then the list is split in halves. Any other error
+    /// (ESI down, rate limit) ends the lookup; the ids are tried again on
+    /// the next fetch.
     fn names_for(&mut self, ids: &[i64], found: &mut Vec<(i64, String)>) {
         #[derive(Deserialize)]
         struct Named {
@@ -318,31 +342,41 @@ impl Fetcher {
                 self.named.extend(ids.iter().copied());
                 found.extend(names.into_iter().map(|n| (n.id, n.name)));
             }
-            Err(_) if ids.len() > 1 => {
-                let (a, b) = ids.split_at(ids.len() / 2);
-                self.names_for(a, found);
-                self.names_for(b, found);
+            Err(e) if is_status(&e, 404) => {
+                if ids.len() > 1 {
+                    let (a, b) = ids.split_at(ids.len() / 2);
+                    self.names_for(a, found);
+                    self.names_for(b, found);
+                } else {
+                    // ESI doesn't know this id: don't ask again.
+                    self.named.insert(ids[0]);
+                }
             }
-            Err(_) => {
-                self.named.insert(ids[0]);
-            }
+            Err(_) => {}
         }
     }
 
-    /// A player structure's name, if the character has docking access.
-    fn structure_name(&mut self, structure_id: i64, token: &str) -> Option<String> {
+    /// A player structure's name. `Ok(None)` when the character may not
+    /// see it (no docking access, 403) or it is gone (404); `Err` when ESI
+    /// had trouble and it is worth trying again later.
+    fn structure_name(&mut self, structure_id: i64, token: &str) -> Result<Option<String>, ()> {
         #[derive(Deserialize)]
         struct Structure {
             name: String,
         }
         let path = format!("/universe/structures/{structure_id}");
-        match self
-            .esi
-            .get_json_authed::<Structure>(&path, token, None)
-            .ok()?
-        {
-            Fetched::Data { value, .. } => Some(value.name),
-            Fetched::NotModified => None,
+        match self.esi.get_json_authed::<Structure>(&path, token, None) {
+            Ok(Fetched::Data { value, .. }) => Ok(Some(value.name)),
+            Ok(Fetched::NotModified) => Err(()),
+            Err(e) if is_status(&e, 403) || is_status(&e, 404) => Ok(None),
+            Err(_) => Err(()),
         }
     }
+}
+
+/// Whether `error` is ESI answering with this HTTP status.
+fn is_status(error: &anyhow::Error, status: u16) -> bool {
+    error
+        .downcast_ref::<HttpError>()
+        .is_some_and(|e| e.status == status)
 }

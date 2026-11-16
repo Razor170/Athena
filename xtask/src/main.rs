@@ -51,7 +51,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 /// Bump when the tables change, so the app can refuse a file it can't read.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// The SDE category that holds all asteroid ore, ice and moon ore.
 const CATEGORY_ASTEROID: i64 = 25;
@@ -68,6 +68,9 @@ const STRUCTURE_CATEGORIES: [i64; 4] = [23, 40, 46, 65];
 /// The SDE categories of drones and fighters, so the Fittings module can
 /// tell a drone bay block from cargo.
 const DRONE_CATEGORIES: [i64; 2] = [18, 87];
+/// The SDE category of charges (ammo, scripts, crystals), so the Fittings
+/// module can leave a loaded charge out of a ship's slots.
+const CATEGORY_CHARGE: i64 = 8;
 
 /// With Dotlan maps, at least this share of all systems must get their spot
 /// from them, or the build fails: a changed Dotlan format must not quietly
@@ -365,12 +368,20 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
     let mut structure_types: BTreeMap<i64, String> = BTreeMap::new();
     // Drone and fighter names, for Fittings.
     let mut drone_types: BTreeMap<i64, String> = BTreeMap::new();
+    // Charges, so a loaded (or used, unstackable) crystal isn't a module.
+    let mut charge_types: BTreeMap<i64, String> = BTreeMap::new();
     for t in &types {
         let (Some((category, group_name)), Some(name)) =
             (groups.get(&t.group_id), english(&t.name))
         else {
             continue;
         };
+        // Unpublished charges too: old crystal types can still sit in a
+        // ship's slots.
+        if *category == CATEGORY_CHARGE {
+            charge_types.insert(t.id, name);
+            continue;
+        }
         if !t.published {
             continue;
         }
@@ -479,6 +490,11 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
             bail!("drone or fighter {must_have} not found; has the SDE format changed?");
         }
     }
+    for must_have in ["Multifrequency L", "Scordite Mining Crystal II"] {
+        if !charge_types.values().any(|name| name == must_have) {
+            bail!("charge {must_have} not found; has the SDE format changed?");
+        }
+    }
     for must_have in ["Jita", "X7R-JW", "Zarzakh"] {
         if !map.systems.values().any(|s| s.name == must_have) {
             bail!("system {must_have} not found; has the SDE format changed?");
@@ -505,13 +521,15 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         remote_modules: &remote_modules,
         structure_types: &structure_types,
         drone_types: &drone_types,
+        charge_types: &charge_types,
     };
     write_database(out, info, &tables)?;
     println!(
         "Wrote {}: {} items, {} reprocessing rows, {} compressible types, {} ships, \
          {} regions, {} systems, {} gates, {} map layout, {} NPC corporations, \
          {} stations with an LP store, {} planetary commodities, {} colony structures, \
-         {} schematics, {} remote modules, {} structure types, {} drones and fighters",
+         {} schematics, {} remote modules, {} structure types, {} drones and fighters, \
+         {} charges",
         out.display(),
         items.len(),
         reprocess.len(),
@@ -528,7 +546,8 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         pi.schematics.len(),
         remote_modules.len(),
         structure_types.len(),
-        drone_types.len()
+        drone_types.len(),
+        charge_types.len()
     );
     Ok(())
 }
@@ -658,6 +677,11 @@ fn create_schema(db: &rusqlite::Connection) -> Result<()> {
             type_id INTEGER PRIMARY KEY,
             name    TEXT NOT NULL
         );
+        -- Charges (ammo, scripts, crystals), for the Fittings module.
+        CREATE TABLE charge_types (
+            type_id INTEGER PRIMARY KEY,
+            name    TEXT NOT NULL
+        );
 
         -- NPC corporations, for loyalty point names.
         CREATE TABLE npc_corporations (
@@ -720,6 +744,7 @@ struct Tables<'a> {
     remote_modules: &'a BTreeMap<i64, (String, &'static str)>,
     structure_types: &'a BTreeMap<i64, String>,
     drone_types: &'a BTreeMap<i64, String>,
+    charge_types: &'a BTreeMap<i64, String>,
 }
 
 fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
@@ -735,6 +760,7 @@ fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
         remote_modules,
         structure_types,
         drone_types,
+        charge_types,
     } = *tables;
     // Write to a temporary file first, so a failed run never leaves a
     // half-written static.sqlite behind.
@@ -844,6 +870,11 @@ fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
 
         let mut insert = tx.prepare("INSERT INTO drone_types (type_id, name) VALUES (?1, ?2)")?;
         for (id, name) in drone_types {
+            insert.execute((id, name))?;
+        }
+
+        let mut insert = tx.prepare("INSERT INTO charge_types (type_id, name) VALUES (?1, ?2)")?;
+        for (id, name) in charge_types {
             insert.execute((id, name))?;
         }
 
