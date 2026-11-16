@@ -8,13 +8,18 @@
 //! - [`eft`]: reads EFT text and compares two fits.
 //! - [`assets`]: finds ships and their fits in ESI assets ("Open ship…").
 //! - `worker`: fetches the assets on a background thread.
-//! - `ui` and `picker`: draw the panel and the "Open ship" window.
+//! - [`library`]: the saved fits ("Save…" and "Saved…").
+//! - `ui`, `picker` and `library_ui`: draw the panel, the "Open ship"
+//!   window and the saved fits windows.
 //!
 //! Both fits and the "Show matching" switch are saved in `fittings.toml`
-//! in the data folder, so they are still there after a restart.
+//! in the data folder, so they are still there after a restart. Saved fits
+//! go to `fittings_saved.toml`.
 
 pub mod assets;
 pub mod eft;
+pub mod library;
+mod library_ui;
 mod picker;
 mod ui;
 mod worker;
@@ -28,6 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use self::assets::{Place, Ship};
 use self::eft::{Diff, Fit};
+use self::library::{Library, SortBy};
 use self::worker::{Command, Event, Worker};
 use super::shared::{RosterCharacter, SharedRoster, roster_if_changed};
 use super::{Module, ModuleContext, SharedStaticData};
@@ -73,6 +79,45 @@ pub struct Saved {
     /// text is edited or pasted over.
     pub is_source: Option<EsiSource>,
     pub should_source: Option<EsiSource>,
+    /// The saved fit a column was loaded from or saved as. Kept when the
+    /// text is edited (the column then shows "changed, not saved").
+    pub is_saved: Option<SavedRef>,
+    pub should_saved: Option<SavedRef>,
+}
+
+/// Which saved fit a column holds: name and ship type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedRef {
+    pub name: String,
+    pub hull: String,
+}
+
+/// The "Save fit" window: the column and the name typed so far.
+pub struct SaveDialog {
+    pub side: Side,
+    pub name: String,
+    /// True on the first frame, to put the cursor in the name field.
+    pub focus: bool,
+}
+
+/// The "Saved fits" window.
+#[derive(Default)]
+pub struct LibraryWindow {
+    pub open: bool,
+    /// The column a fit is loaded into.
+    pub target: Option<Side>,
+    pub search: String,
+    /// Only fits of this ship type.
+    pub hull: Option<String>,
+    pub sort: SortBy,
+    /// The fit being renamed and the name typed so far.
+    pub renaming: Option<(usize, String)>,
+    /// True on the rename field's first frame, to put the cursor in it.
+    pub rename_focus: bool,
+    /// The fit whose Delete was clicked once and waits for "Delete?".
+    pub confirm_delete: Option<usize>,
+    /// Why the last rename didn't work.
+    pub problem: Option<String>,
 }
 
 /// A fit loaded from ESI assets: whose ship, where, and how old the data.
@@ -166,6 +211,10 @@ pub struct Fittings {
     /// Names of item types, stations and structures, from ESI.
     names: HashMap<i64, String>,
     picker: Picker,
+    /// The saved fits.
+    library: Library,
+    save_dialog: Option<SaveDialog>,
+    library_window: LibraryWindow,
 }
 
 impl Fittings {
@@ -176,6 +225,8 @@ impl Fittings {
         roster: SharedRoster,
     ) -> Fittings {
         let (saved, problem) = Saved::load(data_dir);
+        // Read once at startup, like `fittings.toml` above.
+        let (library, library_problem) = Library::load(data_dir, now_unix());
         let mut module = Fittings {
             data_dir: data_dir.to_path_buf(),
             static_data: static_data.data.clone(),
@@ -187,7 +238,7 @@ impl Fittings {
             is_fit: Fit::default(),
             should_fit: Fit::default(),
             diff: Diff::default(),
-            message: problem,
+            message: problem.or(library_problem),
             tokens,
             roster,
             roster_version: 0,
@@ -202,6 +253,9 @@ impl Fittings {
                 who: Who::All,
                 place: None,
             },
+            library,
+            save_dialog: None,
+            library_window: LibraryWindow::default(),
         };
         module.reparse();
         module
@@ -260,8 +314,154 @@ impl Fittings {
         };
         *self.text_mut(side) = text;
         *self.source_mut(side) = None;
+        *self.saved_ref_mut(side) = None;
         self.message = None;
         self.texts_changed();
+    }
+
+    fn saved_ref_mut(&mut self, side: Side) -> &mut Option<SavedRef> {
+        match side {
+            Side::Is => &mut self.saved.is_saved,
+            Side::Should => &mut self.saved.should_saved,
+        }
+    }
+
+    fn text(&self, side: Side) -> &str {
+        match side {
+            Side::Is => &self.saved.is_text,
+            Side::Should => &self.saved.should_text,
+        }
+    }
+
+    fn fit(&self, side: Side) -> &Fit {
+        match side {
+            Side::Is => &self.is_fit,
+            Side::Should => &self.should_fit,
+        }
+    }
+
+    /// The saved fit a column holds, if it still exists, and whether the
+    /// column's text differs from it.
+    pub fn saved_state(&self, side: Side) -> Option<(&library::SavedFit, bool)> {
+        let saved_ref = match side {
+            Side::Is => self.saved.is_saved.as_ref()?,
+            Side::Should => self.saved.should_saved.as_ref()?,
+        };
+        let index = self.library.find(&saved_ref.name, &saved_ref.hull)?;
+        let fit = &self.library.fits[index];
+        Some((fit, fit.text.trim() != self.text(side).trim()))
+    }
+
+    fn save_library(&mut self) {
+        if self.library.read_only {
+            return;
+        }
+        if let Ok(text) = toml::to_string(&self.library) {
+            self.saver.save(Library::file_path(&self.data_dir), text);
+        }
+    }
+
+    /// "Save…": asks for a name. The column's saved fit name comes first
+    /// (so one click replaces it), then the fit's own name, then the hull.
+    fn open_save_dialog(&mut self, side: Side) {
+        let fit = self.fit(side);
+        if fit.hull.is_empty() {
+            return;
+        }
+        let name = match self.saved_state(side) {
+            Some((saved, _)) if saved.hull == fit.hull => saved.name.clone(),
+            _ if !fit.name.is_empty() => fit.name.clone(),
+            _ => fit.hull.clone(),
+        };
+        self.save_dialog = Some(SaveDialog {
+            side,
+            name,
+            focus: true,
+        });
+    }
+
+    /// Stores the column's fit under `name` (replacing a fit with the same
+    /// name and ship type).
+    fn save_fit(&mut self, side: Side, name: &str) {
+        let hull = self.fit(side).hull.clone();
+        if hull.is_empty() || name.trim().is_empty() {
+            return;
+        }
+        if self.library.read_only {
+            self.message = Some(
+                "Not saved: fittings_saved.toml couldn't be read. Restart Athena after \
+                 fixing or moving it."
+                    .to_string(),
+            );
+            return;
+        }
+        let text = self.text(side).to_string();
+        let index = self.library.save(name, &hull, &text, now_unix());
+        let name = self.library.fits[index].name.clone();
+        self.message = Some(format!("Saved \"{name}\"."));
+        *self.saved_ref_mut(side) = Some(SavedRef { name, hull });
+        self.save_library();
+        self.save();
+    }
+
+    /// "Load" in the saved fits list: the fit goes into the window's
+    /// column.
+    fn load_saved(&mut self, index: usize) {
+        let Some(side) = self.library_window.target else {
+            return;
+        };
+        let Some(fit) = self.library.fits.get(index) else {
+            return;
+        };
+        let (text, saved_ref) = (
+            fit.text.clone(),
+            SavedRef {
+                name: fit.name.clone(),
+                hull: fit.hull.clone(),
+            },
+        );
+        *self.text_mut(side) = text;
+        *self.source_mut(side) = None;
+        *self.saved_ref_mut(side) = Some(saved_ref);
+        match side {
+            Side::Is => self.is_mode = ColumnMode::List,
+            Side::Should => self.should_mode = ColumnMode::List,
+        }
+        self.library_window.open = false;
+        self.message = None;
+        self.texts_changed();
+    }
+
+    /// Renames a saved fit, and the columns that hold it follow.
+    fn rename_saved(&mut self, index: usize, new_name: &str) {
+        let Some(old) = self.library.fits.get(index).cloned() else {
+            return;
+        };
+        match self.library.rename(index, new_name, now_unix()) {
+            Ok(()) => {
+                let new_name = self.library.fits[index].name.clone();
+                for side in [Side::Is, Side::Should] {
+                    if let Some(saved_ref) = self.saved_ref_mut(side)
+                        && saved_ref.name.to_lowercase() == old.name.to_lowercase()
+                        && saved_ref.hull == old.hull
+                    {
+                        saved_ref.name = new_name.clone();
+                    }
+                }
+                self.library_window.renaming = None;
+                self.library_window.problem = None;
+                self.save_library();
+                self.save();
+            }
+            Err(problem) => self.library_window.problem = Some(problem),
+        }
+    }
+
+    fn delete_saved(&mut self, index: usize) {
+        self.library.delete(index);
+        self.library_window.confirm_delete = None;
+        self.library_window.renaming = None;
+        self.save_library();
     }
 
     fn source_mut(&mut self, side: Side) -> &mut Option<EsiSource> {
@@ -414,6 +614,7 @@ impl Fittings {
         let side = self.picker.target;
         *self.text_mut(side) = text;
         *self.source_mut(side) = Some(source);
+        *self.saved_ref_mut(side) = None;
         match side {
             Side::Is => self.is_mode = ColumnMode::List,
             Side::Should => self.should_mode = ColumnMode::List,
@@ -426,6 +627,7 @@ impl Fittings {
     fn swap(&mut self) {
         std::mem::swap(&mut self.saved.is_text, &mut self.saved.should_text);
         std::mem::swap(&mut self.saved.is_source, &mut self.saved.should_source);
+        std::mem::swap(&mut self.saved.is_saved, &mut self.saved.should_saved);
         std::mem::swap(&mut self.is_mode, &mut self.should_mode);
         self.texts_changed();
     }
@@ -469,6 +671,7 @@ impl Module for Fittings {
     fn ui(&mut self, ui: &mut egui::Ui, _ctx: &ModuleContext) {
         ui::show(self, ui);
         picker::show(self, ui.ctx());
+        library_ui::show(self, ui.ctx());
     }
 
     fn on_exit(&mut self) {
@@ -492,6 +695,11 @@ mod tests {
                 data_from: 1_763_000_000,
             }),
             should_source: None,
+            is_saved: Some(SavedRef {
+                name: "PvE".to_string(),
+                hull: "Drake".to_string(),
+            }),
+            should_saved: None,
         };
         let text = toml::to_string(&saved).unwrap();
         let back: Saved = toml::from_str(&text).unwrap();

@@ -165,6 +165,9 @@ pub const SECTIONS: &[Section] = &[
              left, then the ship on the right. ESI keeps assets for up to an hour, so the \
              window shows how old each character's data is and when [Refresh] has newer \
              data.",
+            "[Save…] keeps a column's fit under a name, [Saved…] loads one again. The \
+             list can be searched by name, filtered by ship type and sorted by when a fit \
+             was last changed.",
             "**Diff** shows what is missing in green (+) and what is too much in red (−), by \
              rigs, high, med and low slots, drones and fighters, and cargo. A module in cargo \
              only counts against cargo.",
