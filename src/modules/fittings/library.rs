@@ -40,6 +40,10 @@ pub enum SortBy {
 #[serde(default)]
 pub struct Library {
     pub fits: Vec<SavedFit>,
+    /// True when the file couldn't be read *and* couldn't be backed up:
+    /// then nothing may be written, or the old fits would be lost.
+    #[serde(skip)]
+    pub read_only: bool,
 }
 
 impl Library {
@@ -47,18 +51,43 @@ impl Library {
         data_dir.join(FILE_NAME)
     }
 
-    /// Reads the saved fits. A missing file is normal (nothing saved yet);
-    /// a broken one gives an empty list and a message. The broken file is
-    /// only replaced once a fit is saved again.
-    pub fn load(data_dir: &Path) -> (Library, Option<String>) {
-        let Ok(text) = std::fs::read_to_string(Library::file_path(data_dir)) else {
-            return (Library::default(), None);
+    /// Reads the saved fits. A missing file is normal (nothing saved yet).
+    /// Any other problem (unreadable or broken file) gives an empty list
+    /// and a message, and the file is first copied aside to
+    /// `fittings_saved.broken-<unix>.toml`, so the next save can't wipe
+    /// fits made by hand. If even that copy fails, the list stays
+    /// read-only until Athena restarts.
+    pub fn load(data_dir: &Path, now: i64) -> (Library, Option<String>) {
+        let path = Library::file_path(data_dir);
+        let problem = match std::fs::read_to_string(&path) {
+            Ok(text) => match toml::from_str::<Library>(&text) {
+                Ok(library) => return (library, None),
+                Err(err) => err.to_string(),
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return (Library::default(), None);
+            }
+            Err(err) => err.to_string(),
         };
-        match toml::from_str::<Library>(&text) {
-            Ok(library) => (library, None),
-            Err(err) => (
+        let backup = data_dir.join(format!("fittings_saved.broken-{now}.toml"));
+        match std::fs::copy(&path, &backup) {
+            Ok(_) => (
                 Library::default(),
-                Some(format!("Couldn't read {FILE_NAME}: {err}")),
+                Some(format!(
+                    "Couldn't read {FILE_NAME} ({problem}). It was copied to {} and \
+                     the saved fits start empty.",
+                    backup.display()
+                )),
+            ),
+            Err(copy_err) => (
+                Library {
+                    fits: Vec::new(),
+                    read_only: true,
+                },
+                Some(format!(
+                    "Couldn't read {FILE_NAME} ({problem}) or copy it aside ({copy_err}). \
+                     Saving fits is off until Athena restarts, so the file isn't lost."
+                )),
             ),
         }
     }
@@ -66,9 +95,10 @@ impl Library {
     /// The position of the fit with this name and ship type. Names are
     /// compared without case, so "PvE" and "pve" are the same fit.
     pub fn find(&self, name: &str, hull: &str) -> Option<usize> {
+        let name = name.trim().to_lowercase();
         self.fits
             .iter()
-            .position(|f| f.name.eq_ignore_ascii_case(name.trim()) && f.hull == hull)
+            .position(|f| f.name.to_lowercase() == name && f.hull == hull)
     }
 
     /// Saves a fit, replacing one with the same name and ship type.
@@ -195,6 +225,10 @@ mod tests {
         // The same name on another ship type is a new fit.
         library.save("DPS", "Nidhoggur", "[Nidhoggur, DPS]", 500);
         assert_eq!(library.fits.len(), 5);
+        // Case is ignored beyond ASCII too.
+        library.save("Ölfass", "Hulk", "[Hulk, Ölfass]", 600);
+        library.save("ölfass", "Hulk", "[Hulk, ölfass]", 700);
+        assert_eq!(library.fits.len(), 6);
     }
 
     #[test]
@@ -247,6 +281,39 @@ mod tests {
         assert_eq!(back, library);
         let empty: Library = toml::from_str("").unwrap();
         assert!(empty.fits.is_empty());
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("athena-lib-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn missing_file_is_empty_and_writable() {
+        let dir = temp_dir("missing");
+        let (library, problem) = Library::load(&dir, 1);
+        assert!(library.fits.is_empty() && !library.read_only);
+        assert!(problem.is_none());
+    }
+
+    #[test]
+    fn broken_file_is_copied_aside() {
+        let dir = temp_dir("broken");
+        let path = Library::file_path(&dir);
+        std::fs::write(&path, "[[fits]]\nname = \"half a fi").unwrap();
+        let (library, problem) = Library::load(&dir, 1234);
+        assert!(library.fits.is_empty() && !library.read_only);
+        assert!(problem.unwrap().contains("fittings_saved.broken-1234.toml"));
+        let backup = std::fs::read_to_string(dir.join("fittings_saved.broken-1234.toml")).unwrap();
+        assert_eq!(backup, "[[fits]]\nname = \"half a fi");
+        // A file that isn't UTF-8 is not "missing" either.
+        std::fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
+        let (_, problem) = Library::load(&dir, 1235);
+        assert!(problem.is_some());
+        assert!(dir.join("fittings_saved.broken-1235.toml").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

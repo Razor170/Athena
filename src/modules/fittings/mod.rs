@@ -112,6 +112,8 @@ pub struct LibraryWindow {
     pub sort: SortBy,
     /// The fit being renamed and the name typed so far.
     pub renaming: Option<(usize, String)>,
+    /// True on the rename field's first frame, to put the cursor in it.
+    pub rename_focus: bool,
     /// The fit whose Delete was clicked once and waits for "Delete?".
     pub confirm_delete: Option<usize>,
     /// Why the last rename didn't work.
@@ -223,7 +225,8 @@ impl Fittings {
         roster: SharedRoster,
     ) -> Fittings {
         let (saved, problem) = Saved::load(data_dir);
-        let (library, library_problem) = Library::load(data_dir);
+        // Read once at startup, like `fittings.toml` above.
+        let (library, library_problem) = Library::load(data_dir, now_unix());
         let mut module = Fittings {
             data_dir: data_dir.to_path_buf(),
             static_data: static_data.data.clone(),
@@ -350,6 +353,9 @@ impl Fittings {
     }
 
     fn save_library(&mut self) {
+        if self.library.read_only {
+            return;
+        }
         if let Ok(text) = toml::to_string(&self.library) {
             self.saver.save(Library::file_path(&self.data_dir), text);
         }
@@ -379,6 +385,14 @@ impl Fittings {
     fn save_fit(&mut self, side: Side, name: &str) {
         let hull = self.fit(side).hull.clone();
         if hull.is_empty() || name.trim().is_empty() {
+            return;
+        }
+        if self.library.read_only {
+            self.message = Some(
+                "Not saved: fittings_saved.toml couldn't be read. Restart Athena after \
+                 fixing or moving it."
+                    .to_string(),
+            );
             return;
         }
         let text = self.text(side).to_string();
@@ -428,7 +442,7 @@ impl Fittings {
                 let new_name = self.library.fits[index].name.clone();
                 for side in [Side::Is, Side::Should] {
                     if let Some(saved_ref) = self.saved_ref_mut(side)
-                        && saved_ref.name.eq_ignore_ascii_case(&old.name)
+                        && saved_ref.name.to_lowercase() == old.name.to_lowercase()
                         && saved_ref.hull == old.hull
                     {
                         saved_ref.name = new_name.clone();

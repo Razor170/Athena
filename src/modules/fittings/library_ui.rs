@@ -277,10 +277,9 @@ fn list_body(module: &mut Fittings, ui: &mut egui::Ui) -> ListClick {
                         Some((i, name)) if *i == index => {
                             let response = ui
                                 .add(egui::TextEdit::singleline(name).desired_width(name_w - 8.0));
-                            // The field is new this frame when nothing has
-                            // focus yet: put the cursor in it.
-                            if ui.memory(|m| m.focused().is_none()) {
+                            if window.rename_focus {
                                 response.request_focus();
+                                window.rename_focus = false;
                             }
                             if response.lost_focus()
                                 && ui.input(|i| i.key_pressed(egui::Key::Enter))
@@ -368,6 +367,7 @@ fn actions(
         .clicked()
     {
         window.renaming = Some((index, fit_name.to_string()));
+        window.rename_focus = true;
         window.confirm_delete = None;
         window.problem = None;
     }
