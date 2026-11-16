@@ -200,10 +200,11 @@ fn body(module: &mut Fittings, ui: &mut egui::Ui, clicks: &mut Clicks) {
                         };
                         let job = two_lines(name, &format!("{count} · {}", owners.join(", ")));
                         let selected = picked == Some(*place);
-                        if ui
-                            .add_sized([pane, 0.0], egui::Button::selectable(selected, job))
-                            .clicked()
-                        {
+                        // Full pane width. The text follows the layout's
+                        // alignment (left here); `add_sized` would center it.
+                        let button =
+                            egui::Button::selectable(selected, job).min_size(vec2(pane, 0.0));
+                        if ui.add(button).clicked() {
                             picked = Some(*place);
                         }
                     }
@@ -251,16 +252,26 @@ fn ship_row(module: &Fittings, ui: &mut egui::Ui, listed: &Listed, clicks: &mut 
         second.push_str(&format!(" · in {carrier_name}"));
     }
     ui.horizontal(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Load").clicked() {
-                clicks.load = Some((listed.character_id, listed.ship.item_id));
-            }
-            ui.add(
-                egui::Label::new(two_lines(&format!("{hull} · {}", listed.name), &second))
-                    .truncate(),
-            );
-        });
+        // The two text lines take the width left of the Load button, each
+        // cut with "…" when too long. (One label with both lines can't be
+        // truncated: truncating keeps only its first line.)
+        let text_width = (ui.available_width() - 56.0).max(80.0);
+        ui.allocate_ui_with_layout(
+            vec2(text_width, 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_width(text_width);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let first = format!("{hull} · {}", listed.name);
+                ui.add(egui::Label::new(RichText::new(first).size(13.0).color(TEXT)).truncate());
+                ui.add(egui::Label::new(small(second).size(11.5).color(DIM)).truncate());
+            },
+        );
+        if ui.button("Load").clicked() {
+            clicks.load = Some((listed.character_id, listed.ship.item_id));
+        }
     });
+    ui.add_space(2.0);
 }
 
 /// Per character: when ESI made the data and when it has more. Plus
