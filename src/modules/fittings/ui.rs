@@ -16,6 +16,7 @@ const GREEN_EDGE: Color32 = Color32::from_rgb(0x2f, 0x6b, 0x38);
 const RED: Color32 = Color32::from_rgb(0xe5, 0x53, 0x4b);
 const RED_BG: Color32 = Color32::from_rgb(0x33, 0x1b, 0x1a);
 const RED_EDGE: Color32 = Color32::from_rgb(0x7a, 0x2c, 0x28);
+pub const ACCENT: Color32 = Color32::from_rgb(0x4f, 0xa3, 0xcc);
 const YELLOW: Color32 = Color32::from_rgb(0xe0, 0xb0, 0x40);
 const BRIGHT: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
 const TEXT: Color32 = Color32::from_rgb(0xdc, 0xdc, 0xdc);
@@ -41,7 +42,9 @@ const QTY_W: f32 = 64.0;
 #[derive(Default)]
 struct Actions {
     paste: Option<Side>,
-    text_changed: bool,
+    open_ship: Option<Side>,
+    /// The column whose text was edited.
+    text_changed: Option<Side>,
 }
 
 /// The panel.
@@ -100,8 +103,13 @@ fn compare(module: &mut Fittings, ui: &mut egui::Ui) {
 
     if let Some(side) = actions.paste {
         module.paste(side);
-    } else if actions.text_changed {
+    } else if let Some(side) = actions.text_changed {
+        // An edited fit is no longer what ESI said.
+        *module.source_mut(side) = None;
         module.texts_changed();
+    }
+    if let Some(side) = actions.open_ship {
+        module.open_picker(side, ui.ctx());
     }
 }
 
@@ -207,6 +215,7 @@ fn input_column(
         Side::Should => ("Should", "the fit you want"),
     };
     column_frame(ui, width, |ui| {
+        let source = module.source(side).cloned();
         let mode = match side {
             Side::Is => &mut module.is_mode,
             Side::Should => &mut module.should_mode,
@@ -226,6 +235,13 @@ fn input_column(
                     .clicked()
                 {
                     actions.paste = Some(side);
+                }
+                if ui
+                    .button(small("Open ship…"))
+                    .on_hover_text("Load the fit of one of your ships, from ESI assets.")
+                    .clicked()
+                {
+                    actions.open_ship = Some(side);
                 }
             });
         });
@@ -250,6 +266,9 @@ fn input_column(
             format!("{} · {}", fit.hull, fit.name)
         };
         ui.add(egui::Label::new(small(subtitle).color(FAINT)).truncate());
+        if let Some(source) = source {
+            esi_line(ui, &source);
+        }
         ui.add_space(4.0);
         match mode {
             ColumnMode::Text => {
@@ -259,7 +278,7 @@ fn input_column(
                     .desired_rows(28)
                     .hint_text("Paste an EFT fit here (Ctrl+V).");
                 if ui.add(edit).changed() {
-                    actions.text_changed = true;
+                    actions.text_changed = Some(side);
                 }
             }
             ColumnMode::List => fit_list(ui, fit, other, side),
@@ -358,6 +377,47 @@ fn diff_column(ui: &mut egui::Ui, module: &Fittings, width: f32) {
     });
 }
 
+/// "ESI · Char A · Jita IV - Moon 4 · data from 07:12 (23 min ago)",
+/// yellow when the data is more than an hour old.
+fn esi_line(ui: &mut egui::Ui, source: &super::EsiSource) {
+    let age = crate::auth::now_unix() - source.data_from;
+    let color = if age > 3600 { YELLOW } else { DIM };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(RichText::new("ESI").size(10.5).strong().color(ACCENT));
+        ui.label(small(format!("{} · {}", source.character, source.place)).color(DIM));
+        ui.label(
+            small(format!(
+                "data from {} ({})",
+                hour_minute(source.data_from),
+                ago_text(age)
+            ))
+            .color(color),
+        );
+    });
+}
+
+/// "07:12" in local time.
+pub fn hour_minute(unix: i64) -> String {
+    let mut text = crate::localtime::clock_text(unix);
+    text.truncate(5);
+    text
+}
+
+/// "just now", "23 min ago", "1 h 15 min ago".
+pub fn ago_text(seconds: i64) -> String {
+    let minutes = seconds.max(0) / 60;
+    if minutes < 1 {
+        "just now".to_string()
+    } else if minutes < 60 {
+        format!("{minutes} min ago")
+    } else if minutes % 60 == 0 || minutes >= 600 {
+        format!("{} h ago", minutes / 60)
+    } else {
+        format!("{} h {} min ago", minutes / 60, minutes % 60)
+    }
+}
+
 fn section_title(ui: &mut egui::Ui, section: Section, first: bool) {
     if !first {
         ui.add_space(8.0);
@@ -446,6 +506,15 @@ fn group_digits(value: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ago_texts() {
+        assert_eq!(ago_text(30), "just now");
+        assert_eq!(ago_text(23 * 60), "23 min ago");
+        assert_eq!(ago_text(75 * 60), "1 h 15 min ago");
+        assert_eq!(ago_text(120 * 60), "2 h ago");
+        assert_eq!(ago_text(-5), "just now");
+    }
 
     #[test]
     fn digits_are_grouped() {

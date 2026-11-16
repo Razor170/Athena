@@ -146,7 +146,12 @@ pub fn create_all(
             roster.clone(),
             &static_data,
         )),
-        Box::new(fittings::Fittings::new(data_dir, &static_data)),
+        Box::new(fittings::Fittings::new(
+            data_dir,
+            &static_data,
+            tokens.clone(),
+            roster.clone(),
+        )),
         Box::new(finance::Finance::new(
             egui_ctx,
             data_dir,

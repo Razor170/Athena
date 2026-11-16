@@ -115,6 +115,8 @@ pub struct Universe {
     regions: BTreeMap<i64, Region>,
     /// Lowercase name -> ship type.
     ship_by_name: HashMap<String, ShipType>,
+    /// Type id -> lowercase name (the key of `ship_by_name`).
+    ship_key_by_id: HashMap<i64, String>,
 }
 
 impl Universe {
@@ -214,7 +216,9 @@ impl Universe {
         })?;
         for row in rows {
             let ship = row?;
-            universe.ship_by_name.insert(ship.name.to_lowercase(), ship);
+            let key = ship.name.to_lowercase();
+            universe.ship_key_by_id.insert(ship.type_id, key.clone());
+            universe.ship_by_name.insert(key, ship);
         }
 
         // Regions without any systems can't be drawn; leave them out.
@@ -270,6 +274,11 @@ impl Universe {
         ids.sort_unstable();
         ids.dedup();
         ids
+    }
+
+    /// The ship type with this type id, if it is a ship.
+    pub fn ship_by_id(&self, type_id: i64) -> Option<&ShipType> {
+        self.ship_by_name.get(self.ship_key_by_id.get(&type_id)?)
     }
 
     /// Finds a ship type by its exact name, ignoring upper/lower case.
@@ -412,6 +421,8 @@ pub mod tests {
         assert!(universe.system_by_name("A3").is_none());
         assert_eq!(universe.ship_by_name("LOKI").unwrap().type_id, 29990);
         assert!(universe.ship_by_name("Titan").is_none());
+        assert_eq!(universe.ship_by_id(29990).unwrap().name, "Loki");
+        assert!(universe.ship_by_id(34).is_none());
     }
 
     #[test]
