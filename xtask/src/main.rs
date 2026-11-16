@@ -490,7 +490,10 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
             bail!("drone or fighter {must_have} not found; has the SDE format changed?");
         }
     }
-    for must_have in ["Multifrequency L", "Scordite Mining Crystal II"] {
+    for must_have in [
+        "Multifrequency L",
+        "Simple Asteroid Mining Crystal Type A II",
+    ] {
         if !charge_types.values().any(|name| name == must_have) {
             bail!("charge {must_have} not found; has the SDE format changed?");
         }
