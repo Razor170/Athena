@@ -8,6 +8,7 @@ use eframe::egui::{
 };
 
 use super::eft::{Fit, Section};
+use super::library;
 use super::{ColumnMode, Fittings, Side, Submodule};
 
 const GREEN: Color32 = Color32::from_rgb(0x5c, 0xbf, 0x6a);
@@ -17,6 +18,8 @@ const RED: Color32 = Color32::from_rgb(0xe5, 0x53, 0x4b);
 const RED_BG: Color32 = Color32::from_rgb(0x33, 0x1b, 0x1a);
 const RED_EDGE: Color32 = Color32::from_rgb(0x7a, 0x2c, 0x28);
 pub const ACCENT: Color32 = Color32::from_rgb(0x4f, 0xa3, 0xcc);
+/// The "SAVED" tag on a column that holds a saved fit.
+const PURPLE: Color32 = Color32::from_rgb(0xc9, 0xa0, 0xff);
 const YELLOW: Color32 = Color32::from_rgb(0xe0, 0xb0, 0x40);
 const BRIGHT: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
 const TEXT: Color32 = Color32::from_rgb(0xdc, 0xdc, 0xdc);
@@ -43,6 +46,8 @@ const QTY_W: f32 = 64.0;
 struct Actions {
     paste: Option<Side>,
     open_ship: Option<Side>,
+    save: Option<Side>,
+    open_saved: Option<Side>,
     /// The column whose text was edited.
     text_changed: Option<Side>,
 }
@@ -110,6 +115,15 @@ fn compare(module: &mut Fittings, ui: &mut egui::Ui) {
     }
     if let Some(side) = actions.open_ship {
         module.open_picker(side, ui.ctx());
+    }
+    if let Some(side) = actions.save {
+        module.open_save_dialog(side);
+    }
+    if let Some(side) = actions.open_saved {
+        module.library_window.open = true;
+        module.library_window.target = Some(side);
+        module.library_window.renaming = None;
+        module.library_window.confirm_delete = None;
     }
 }
 
@@ -216,6 +230,15 @@ fn input_column(
     };
     column_frame(ui, width, |ui| {
         let source = module.source(side).cloned();
+        // (name, changed text, edited since) of the saved fit it holds.
+        let saved = module.saved_state(side).map(|(fit, edited)| {
+            (
+                fit.name.clone(),
+                library::changed_text(fit.changed, crate::auth::now_unix()),
+                edited,
+            )
+        });
+        let has_fit = !module.fit(side).hull.is_empty();
         let mode = match side {
             Side::Is => &mut module.is_mode,
             Side::Should => &mut module.should_mode,
@@ -223,27 +246,46 @@ fn input_column(
         ui.horizontal(|ui| {
             ui.label(RichText::new(title).size(14.0).strong().color(BRIGHT));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Right to left: Text, List, then Paste on their left.
+                // Right to left: Text, then List on its left.
                 ui.selectable_value(mode, ColumnMode::Text, small("Text"));
                 ui.selectable_value(mode, ColumnMode::List, small("List"));
-                if ui
-                    .button(small("Paste"))
-                    .on_hover_text(
-                        "Replaces this fit with the one on the clipboard. In EVE's fitting \
-                         window use \"Copy to clipboard\" first.",
-                    )
-                    .clicked()
-                {
-                    actions.paste = Some(side);
-                }
-                if ui
-                    .button(small("Open ship…"))
-                    .on_hover_text("Load the fit of one of your ships, from ESI assets.")
-                    .clicked()
-                {
-                    actions.open_ship = Some(side);
-                }
             });
+        });
+        // The buttons get their own row, so they fit in a narrow column.
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            if ui
+                .button(small("Paste"))
+                .on_hover_text(
+                    "Replaces this fit with the one on the clipboard. In EVE's fitting \
+                     window use \"Copy to clipboard\" first.",
+                )
+                .clicked()
+            {
+                actions.paste = Some(side);
+            }
+            if ui
+                .button(small("Open ship…"))
+                .on_hover_text("Load the fit of one of your ships, from ESI assets.")
+                .clicked()
+            {
+                actions.open_ship = Some(side);
+            }
+            if ui
+                .button(small("Saved…"))
+                .on_hover_text("Load one of your saved fits.")
+                .clicked()
+            {
+                actions.open_saved = Some(side);
+            }
+            if ui
+                .add_enabled(has_fit, egui::Button::new(small("Save…")))
+                .on_hover_text("Save this fit under a name.")
+                .on_disabled_hover_text("Nothing to save yet: this column has no fit.")
+                .clicked()
+            {
+                actions.save = Some(side);
+            }
         });
         let mode = *mode;
         let (fit, other, text) = match side {
@@ -268,6 +310,9 @@ fn input_column(
         ui.add(egui::Label::new(small(subtitle).color(FAINT)).truncate());
         if let Some(source) = source {
             esi_line(ui, &source);
+        }
+        if let Some((name, changed, edited)) = saved {
+            saved_line(ui, &name, &changed, edited);
         }
         ui.add_space(4.0);
         match mode {
@@ -394,6 +439,19 @@ fn esi_line(ui: &mut egui::Ui, source: &super::EsiSource) {
             ))
             .color(color),
         );
+    });
+}
+
+/// "SAVED · DPS - Thanatos · changed today 07:41", plus "changed, not
+/// saved" in yellow once the column's text differs from the saved fit.
+fn saved_line(ui: &mut egui::Ui, name: &str, changed: &str, edited: bool) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(RichText::new("SAVED").size(10.5).strong().color(PURPLE));
+        ui.label(small(format!("{name} · changed {changed}")).color(DIM));
+        if edited {
+            ui.label(small("· changed, not saved").color(YELLOW));
+        }
     });
 }
 
