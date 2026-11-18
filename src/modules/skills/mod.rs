@@ -37,7 +37,7 @@ const REFRESH_COOLDOWN_SECS: i64 = 60;
 
 /// How a character's training looks, for the card colour and the badge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Training {
+pub enum Status {
     /// Not training: empty or paused queue, or no data (login expired).
     Stopped,
     /// Training, but the queue ends within the "soon" hours.
@@ -65,7 +65,7 @@ pub struct Skills {
     character_problems: HashMap<u64, String>,
     /// Problems to show on top of the panel.
     problems: Vec<String>,
-    view: ui::View,
+    ui: ui::UiState,
     last_refresh: Option<i64>,
 }
 
@@ -102,7 +102,7 @@ impl Skills {
             checked: None,
             character_problems: HashMap::new(),
             problems,
-            view: ui::View::default(),
+            ui: ui::UiState::default(),
             last_refresh: None,
         };
         module.read_roster();
@@ -125,7 +125,8 @@ impl Skills {
 
     fn save_settings(&mut self) {
         if let Ok(text) = toml::to_string(&self.settings) {
-            self.saver.save(SkillsSettings::file_path(&self.data_dir), text);
+            self.saver
+                .save(SkillsSettings::file_path(&self.data_dir), text);
         }
     }
 
@@ -158,16 +159,16 @@ impl Skills {
     }
 
     /// How one character's training looks at `now`.
-    pub fn training(&self, character_id: u64, now: i64) -> Training {
+    pub fn training(&self, character_id: u64, now: i64) -> Status {
         match self.queue_now(character_id, now).map(|q| q.state) {
             Some(QueueState::Training { ends }) => {
                 if ends - now <= i64::from(self.settings.soon_hours) * 3600 {
-                    Training::EndsSoon
+                    Status::EndsSoon
                 } else {
-                    Training::Training
+                    Status::Training
                 }
             }
-            _ => Training::Stopped,
+            _ => Status::Stopped,
         }
     }
 
@@ -250,7 +251,7 @@ impl Module for Skills {
         let count = self
             .characters
             .iter()
-            .filter(|c| self.training(c.id, now) == Training::Stopped)
+            .filter(|c| self.training(c.id, now) == Status::Stopped)
             .count();
         (count > 0).then(|| count.to_string())
     }

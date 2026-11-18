@@ -973,8 +973,7 @@ fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
             }
         }
 
-        let mut insert =
-            tx.prepare("INSERT INTO skill_groups (group_id, name) VALUES (?1, ?2)")?;
+        let mut insert = tx.prepare("INSERT INTO skill_groups (group_id, name) VALUES (?1, ?2)")?;
         for (id, name) in &skills.groups {
             insert.execute((id, name))?;
         }

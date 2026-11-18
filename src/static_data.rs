@@ -787,8 +787,15 @@ pub mod tests {
     #[test]
     fn loads_skills_by_group() {
         let data = sample();
-        let names: Vec<&str> = data.skill_groups().iter().map(|g| g.name.as_str()).collect();
-        assert_eq!(names, ["Gunnery", "Resource Processing", "Spaceship Command"]);
+        let names: Vec<&str> = data
+            .skill_groups()
+            .iter()
+            .map(|g| g.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["Gunnery", "Resource Processing", "Spaceship Command"]
+        );
         let gunnery = &data.skill_groups()[0];
         assert_eq!(gunnery.skill_ids, [3300, 3304, 3301]);
         let carrier = data.skill(24311).unwrap();

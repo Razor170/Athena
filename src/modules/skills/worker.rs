@@ -176,7 +176,9 @@ impl Fetcher {
                 Ok(Command::SetPollSecs(secs)) => {
                     // Shorter than before: don't wait out the old interval.
                     let latest = now_unix() + secs;
-                    self.due.values_mut().for_each(|due| *due = (*due).min(latest));
+                    self.due
+                        .values_mut()
+                        .for_each(|due| *due = (*due).min(latest));
                     self.poll_secs = secs;
                 }
                 Err(RecvTimeoutError::Timeout) => {}

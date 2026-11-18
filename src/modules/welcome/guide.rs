@@ -24,8 +24,8 @@ the ESI web API. It never reads from or sends anything to the game client.";
 pub const GETTING_STARTED: &[&str] = &[
     "**Settings** › EVE logs: check that the log folder is right. The default is \
      Documents\\EVE\\logs.",
-    "**Characters**: click [+ Add character] and log in with EVE. Finance, Planetary and \
-     Contracts need this. Mining and Intel work without it.",
+    "**Characters**: click [+ Add character] and log in with EVE. Finance, Planetary, \
+     Contracts and Skills need this. Mining and Intel work without it.",
     "**Intel** › Settings: tick the intel channels you want watched.",
     "**Mining** needs no setup. Start mining and a card shows up for each character.",
 ];
@@ -101,6 +101,28 @@ pub const SECTIONS: &[Section] = &[
              [Log in again].",
         ],
         note: "",
+    },
+    Section {
+        title: "Skills",
+        subtitle: "what every character trains and when the queue ends",
+        paragraphs: &[
+            "**Overview** shows a card per logged-in character: the skill in training with \
+             its time left, and when the whole queue ends. Red means not training (empty or \
+             paused queue, or no data), yellow means the queue ends within 24 h. Click a \
+             card to open the character.",
+            "[Queue end], [Name] and [SP] sort the cards, tag chips show only characters \
+             with that tag. The number on the Skills button counts the characters that \
+             aren't training.",
+            "**Character** looks like EVE's skill window: the skill groups on top, the \
+             picked group's skills below and the training queue on the right. White squares \
+             are trained levels, blue ones are queued, grey ones are trained but limited by \
+             an Alpha clone. The search box looks through all groups, **Show not injected** \
+             also lists skills you don't have.",
+            "Under the queue: the total training time, when it ends, and how many large and \
+             small skill injectors would finish it right now (unallocated SP counts first).",
+        ],
+        note: "Settings: the \"ends soon\" hours, the badge, and how often ESI is asked \
+               (every 15 minutes by default; [Refresh] asks now).",
     },
     Section {
         title: "Finance",
