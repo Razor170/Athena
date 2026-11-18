@@ -10,7 +10,7 @@
 //! an hour. Everything is saved in `assets-cache.json`, so the list shows
 //! right after a restart.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -47,6 +47,79 @@ pub struct Prices {
     /// When they were fetched, Unix seconds.
     pub fetched_at: i64,
     pub by_type: HashMap<i64, f64>,
+    /// For Jita: every type asked for, also those without an order on that
+    /// side, so they aren't asked again until the prices get old.
+    #[serde(default)]
+    pub asked: BTreeSet<i64>,
+}
+
+/// Which prices `prices_if_due` fetches.
+#[derive(Debug, PartialEq)]
+enum PricePlan {
+    /// The cached ones are fine.
+    Nothing,
+    /// All of them: old, from another source, or none yet.
+    All,
+    /// Only these Jita types, the rest stay.
+    Missing(Vec<i64>),
+}
+
+/// Puts fetched prices into the cache. `fetched` is `None` when ESI said
+/// the average list didn't change. With `all` false only the `asked` types
+/// were fetched: they join the old prices, which keep their age.
+fn merge_prices(
+    old: Option<Prices>,
+    source: PriceSource,
+    now: i64,
+    all: bool,
+    asked: &[i64],
+    fetched: Option<HashMap<i64, f64>>,
+) -> Prices {
+    let old = old.filter(|p| p.source == source);
+    let Some(fetched) = fetched else {
+        // Not modified: the old list is still right.
+        let mut prices = old.unwrap_or_default();
+        prices.source = source;
+        prices.fetched_at = now;
+        return prices;
+    };
+    match old {
+        Some(mut prices) if !all => {
+            prices.by_type.extend(fetched);
+            prices.asked.extend(asked.iter().copied());
+            prices
+        }
+        _ => Prices {
+            source,
+            fetched_at: now,
+            by_type: fetched,
+            asked: asked.iter().copied().collect(),
+        },
+    }
+}
+
+/// Decides which prices to fetch. `wanted` is every market type the
+/// characters own (only used for Jita; the average list has them all).
+fn price_plan(prices: Option<&Prices>, source: PriceSource, now: i64, wanted: &[i64]) -> PricePlan {
+    let Some(p) = prices else {
+        return PricePlan::All;
+    };
+    if p.source != source || now - p.fetched_at >= PRICES_EVERY_SECS {
+        return PricePlan::All;
+    }
+    if source == PriceSource::Average {
+        return PricePlan::Nothing;
+    }
+    let missing: Vec<i64> = wanted
+        .iter()
+        .copied()
+        .filter(|id| !p.asked.contains(id))
+        .collect();
+    if missing.is_empty() {
+        PricePlan::Nothing
+    } else {
+        PricePlan::Missing(missing)
+    }
 }
 
 /// What `assets-cache.json` holds.
@@ -566,29 +639,29 @@ impl Fetcher {
             ids.sort_unstable();
             ids
         };
-        let fresh = self.cache.prices.as_ref().is_some_and(|p| {
-            p.source == self.price_source
-                && now - p.fetched_at < PRICES_EVERY_SECS
-                && (p.source == PriceSource::Average
-                    || wanted.iter().all(|id| p.by_type.contains_key(id)))
-        });
-        if fresh {
-            return;
-        }
+        let plan = price_plan(self.cache.prices.as_ref(), self.price_source, now, &wanted);
+        let (all, ask) = match plan {
+            PricePlan::Nothing => return,
+            PricePlan::All => (true, wanted),
+            PricePlan::Missing(ids) => (false, ids),
+        };
         send(Event::PricesBusy(true));
         let result = match self.price_source {
             PriceSource::Average => self.average_prices(),
-            PriceSource::JitaSell => self.jita_prices(&wanted, PriceSide::Sell),
-            PriceSource::JitaBuy => self.jita_prices(&wanted, PriceSide::Buy),
+            PriceSource::JitaSell => self.jita_prices(&ask, PriceSide::Sell).map(Some),
+            PriceSource::JitaBuy => self.jita_prices(&ask, PriceSide::Buy).map(Some),
         };
         send(Event::PricesBusy(false));
         match result {
             Ok(by_type) => {
-                let prices = Prices {
-                    source: self.price_source,
-                    fetched_at: now,
+                let prices = merge_prices(
+                    self.cache.prices.take(),
+                    self.price_source,
+                    now,
+                    all,
+                    &ask,
                     by_type,
-                };
+                );
                 self.cache.prices = Some(prices.clone());
                 let _ = self.cache.save(&self.cache_path);
                 send(Event::Prices(Box::new(prices)));
@@ -601,7 +674,8 @@ impl Fetcher {
     }
 
     /// EVE's average price of every item, in one request.
-    fn average_prices(&mut self) -> Result<HashMap<i64, f64>> {
+    /// `None` when ESI says the list didn't change since the last fetch.
+    fn average_prices(&mut self) -> Result<Option<HashMap<i64, f64>>> {
         #[derive(Deserialize)]
         struct MarketPrice {
             type_id: i64,
@@ -613,12 +687,13 @@ impl Fetcher {
             .get_json::<Vec<MarketPrice>>("/markets/prices", None)?
         {
             Fetched::Data { value, .. } => value,
-            Fetched::NotModified => Vec::new(),
+            Fetched::NotModified => return Ok(None),
         };
-        Ok(list
-            .into_iter()
-            .filter_map(|p| Some((p.type_id, p.average_price.or(p.adjusted_price)?)))
-            .collect())
+        Ok(Some(
+            list.into_iter()
+                .filter_map(|p| Some((p.type_id, p.average_price.or(p.adjusted_price)?)))
+                .collect(),
+        ))
     }
 
     /// Jita 4-4 prices, one type at a time (the Mining module's code).
@@ -676,6 +751,7 @@ mod tests {
             source: PriceSource::JitaSell,
             fetched_at: 1_700_000_000,
             by_type: HashMap::from([(34, 4.5)]),
+            asked: BTreeSet::from([34, 35]),
         });
         cache.characters.insert(
             90000001,
@@ -688,5 +764,89 @@ mod tests {
         );
         let text = serde_json::to_string(&cache).unwrap();
         assert_eq!(serde_json::from_str::<Cache>(&text).unwrap(), cache);
+    }
+
+    fn jita(fetched_at: i64, priced: &[i64], asked: &[i64]) -> Prices {
+        Prices {
+            source: PriceSource::JitaSell,
+            fetched_at,
+            by_type: priced.iter().map(|id| (*id, 1.0)).collect(),
+            asked: asked.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn a_type_without_orders_is_not_asked_again() {
+        // 99 had no sell order: it has no price, but it was asked.
+        let p = jita(1000, &[34], &[34, 99]);
+        let plan = price_plan(Some(&p), PriceSource::JitaSell, 1100, &[34, 99]);
+        assert_eq!(plan, PricePlan::Nothing);
+    }
+
+    #[test]
+    fn only_new_types_are_fetched_while_prices_are_fresh() {
+        let p = jita(1000, &[34], &[34, 99]);
+        let plan = price_plan(Some(&p), PriceSource::JitaSell, 1100, &[34, 99, 587]);
+        assert_eq!(plan, PricePlan::Missing(vec![587]));
+    }
+
+    #[test]
+    fn old_prices_or_another_source_fetch_everything() {
+        let p = jita(1000, &[34], &[34]);
+        let later = 1000 + PRICES_EVERY_SECS;
+        assert_eq!(
+            price_plan(Some(&p), PriceSource::JitaSell, later, &[34]),
+            PricePlan::All
+        );
+        assert_eq!(
+            price_plan(Some(&p), PriceSource::JitaBuy, 1100, &[34]),
+            PricePlan::All
+        );
+        assert_eq!(
+            price_plan(None, PriceSource::Average, 1100, &[]),
+            PricePlan::All
+        );
+        let avg = Prices {
+            source: PriceSource::Average,
+            fetched_at: 1000,
+            ..Prices::default()
+        };
+        assert_eq!(
+            price_plan(Some(&avg), PriceSource::Average, 1100, &[34]),
+            PricePlan::Nothing
+        );
+    }
+
+    #[test]
+    fn missing_types_join_the_old_prices_and_keep_their_age() {
+        let old = jita(1000, &[34], &[34]);
+        let fetched = HashMap::from([(587, 2.0)]);
+        let merged = merge_prices(
+            Some(old),
+            PriceSource::JitaSell,
+            1100,
+            false,
+            &[587, 99],
+            Some(fetched),
+        );
+        assert_eq!(merged.fetched_at, 1000);
+        assert_eq!(merged.by_type.len(), 2);
+        assert_eq!(merged.asked, BTreeSet::from([34, 99, 587]));
+        // Then nothing is due until the hour is over.
+        let plan = price_plan(Some(&merged), PriceSource::JitaSell, 1200, &[34, 99, 587]);
+        assert_eq!(plan, PricePlan::Nothing);
+    }
+
+    #[test]
+    fn unchanged_average_list_keeps_the_old_prices() {
+        let old = Prices {
+            source: PriceSource::Average,
+            fetched_at: 1000,
+            by_type: HashMap::from([(34, 4.0)]),
+            asked: BTreeSet::new(),
+        };
+        let merged = merge_prices(Some(old), PriceSource::Average, 5000, true, &[], None);
+        assert_eq!(merged.fetched_at, 5000);
+        assert_eq!(merged.by_type.get(&34), Some(&4.0));
     }
 }

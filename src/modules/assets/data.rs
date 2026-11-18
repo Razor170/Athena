@@ -178,10 +178,11 @@ fn location_name(
     match key {
         LocationKey::Station(id) | LocationKey::Structure(id) => match places.get(&id) {
             Some(place) => (place.name.clone(), place.system_id),
+            // A structure's name needs docking access; without it ESI says no.
             None if matches!(key, LocationKey::Structure(_)) => {
-                ("Structure (name not known yet)".to_string(), None)
+                (format!("Structure {id} (no docking access?)"), None)
             }
-            None => ("Station (name not known yet)".to_string(), None),
+            None => (format!("Station {id} (name not known yet)"), None),
         },
         LocationKey::Space(system) => ("In space".to_string(), Some(system)),
         LocationKey::AssetSafety(system) => ("Asset safety".to_string(), Some(system)),
