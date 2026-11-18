@@ -26,38 +26,38 @@ use crate::localtime;
 use crate::static_data::StaticData;
 
 // Colours from the mockup (the same family as Planetary and Finance).
-const GREEN: Color32 = Color32::from_rgb(0x7c, 0xc4, 0x7c);
-const RED: Color32 = Color32::from_rgb(0xef, 0x6b, 0x6b);
-const YELLOW: Color32 = Color32::from_rgb(0xe0, 0xb0, 0x40);
-const BRIGHT: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
-const TEXT: Color32 = Color32::from_rgb(0xc8, 0xc8, 0xc8);
-const DIM: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x8a);
-const FAINT: Color32 = Color32::from_rgb(0x6a, 0x6a, 0x6a);
-const QUEUE_BLUE: Color32 = Color32::from_rgb(0x4f, 0xa3, 0xd9);
-const INJECTOR: Color32 = Color32::from_rgb(0xc9, 0xa0, 0xff);
-const CARD_FILL: Color32 = Color32::from_rgb(0x23, 0x23, 0x23);
-const CARD_BORDER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+pub(super) const GREEN: Color32 = Color32::from_rgb(0x7c, 0xc4, 0x7c);
+pub(super) const RED: Color32 = Color32::from_rgb(0xef, 0x6b, 0x6b);
+pub(super) const YELLOW: Color32 = Color32::from_rgb(0xe0, 0xb0, 0x40);
+pub(super) const BRIGHT: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
+pub(super) const TEXT: Color32 = Color32::from_rgb(0xc8, 0xc8, 0xc8);
+pub(super) const DIM: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x8a);
+pub(super) const FAINT: Color32 = Color32::from_rgb(0x6a, 0x6a, 0x6a);
+pub(super) const QUEUE_BLUE: Color32 = Color32::from_rgb(0x4f, 0xa3, 0xd9);
+pub(super) const INJECTOR: Color32 = Color32::from_rgb(0xc9, 0xa0, 0xff);
+pub(super) const CARD_FILL: Color32 = Color32::from_rgb(0x23, 0x23, 0x23);
+pub(super) const CARD_BORDER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 const CARD_RED: Color32 = Color32::from_rgb(0x7a, 0x2c, 0x28);
 const CARD_YELLOW: Color32 = Color32::from_rgb(0x6b, 0x5c, 0x1f);
-const CURRENT_FILL: Color32 = Color32::from_rgb(0x1f, 0x2a, 0x33);
+pub(super) const CURRENT_FILL: Color32 = Color32::from_rgb(0x1f, 0x2a, 0x33);
 const BAR_BACK: Color32 = Color32::from_rgb(0x2b, 0x2b, 0x2b);
 const QUEUE_BAR: Color32 = Color32::from_rgb(0x3a, 0x5f, 0x80);
-const GROUP_FILL: Color32 = Color32::from_rgb(0x2b, 0x3a, 0x48);
-const GROUP_PICKED: Color32 = Color32::from_rgb(0x1c, 0x4a, 0x63);
-const GROUP_EDGE: Color32 = Color32::from_rgb(0x2c, 0x7d, 0xa3);
-const ROW_LINE: Color32 = Color32::from_rgb(0x2f, 0x2f, 0x2f);
-const LEVEL_EMPTY: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
-const LEVEL_TRAINED: Color32 = Color32::from_rgb(0xd8, 0xd8, 0xd8);
+pub(super) const GROUP_FILL: Color32 = Color32::from_rgb(0x2b, 0x3a, 0x48);
+pub(super) const GROUP_PICKED: Color32 = Color32::from_rgb(0x1c, 0x4a, 0x63);
+pub(super) const GROUP_EDGE: Color32 = Color32::from_rgb(0x2c, 0x7d, 0xa3);
+pub(super) const ROW_LINE: Color32 = Color32::from_rgb(0x2f, 0x2f, 0x2f);
+pub(super) const LEVEL_EMPTY: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+pub(super) const LEVEL_TRAINED: Color32 = Color32::from_rgb(0xd8, 0xd8, 0xd8);
 /// Trained, but an Alpha clone can't use it.
 const LEVEL_LIMITED: Color32 = Color32::from_rgb(0x80, 0x80, 0x80);
-const CHIP_FILL: Color32 = Color32::from_rgb(0x2e, 0x3a, 0x44);
-const CHIP_TEXT: Color32 = Color32::from_rgb(0xa9, 0xc4, 0xd8);
+pub(super) const CHIP_FILL: Color32 = Color32::from_rgb(0x2e, 0x3a, 0x44);
+pub(super) const CHIP_TEXT: Color32 = Color32::from_rgb(0xa9, 0xc4, 0xd8);
 
 /// Overview cards are at least this wide, and at most `CARD_MAX_WIDTH`
 /// (Kevin's "at most 480 px per column").
 const CARD_MIN_WIDTH: f32 = 340.0;
-const CARD_MAX_WIDTH: f32 = 480.0;
-const GAP: f32 = 10.0;
+pub(super) const CARD_MAX_WIDTH: f32 = 480.0;
+pub(super) const GAP: f32 = 10.0;
 /// The Character view: the queue column, and the groups + skills part
 /// left of it (room for two skill columns of at most 480 px).
 const QUEUE_WIDTH: f32 = 480.0;
@@ -69,6 +69,7 @@ pub enum View {
     #[default]
     Overview,
     Character,
+    Plans,
     Settings,
 }
 
@@ -93,7 +94,7 @@ enum CardAction {
     Hide(bool),
 }
 
-fn small(text: impl Into<String>) -> RichText {
+pub(super) fn small(text: impl Into<String>) -> RichText {
     RichText::new(text).size(12.0)
 }
 
@@ -106,6 +107,15 @@ pub fn show(module: &mut Skills, ui: &mut egui::Ui, now: i64) {
     }
     if module.ui.view == View::Settings {
         settings_view(module, ui);
+        return;
+    }
+    if module.ui.view == View::Plans {
+        match module.static_data.clone() {
+            Some(static_data) => super::plans_ui::show(module, ui, &static_data, now),
+            None => {
+                ui.colored_label(YELLOW, "Skill plans need static.sqlite.");
+            }
+        }
         return;
     }
     if !crate::auth::is_configured() {
@@ -125,7 +135,7 @@ pub fn show(module: &mut Skills, ui: &mut egui::Ui, now: i64) {
     match module.ui.view {
         View::Overview => overview(module, ui, now),
         View::Character => character_view(module, ui, &static_data, now),
-        View::Settings => {}
+        View::Plans | View::Settings => {}
     }
 }
 
@@ -134,6 +144,7 @@ fn view_tabs(module: &mut Skills, ui: &mut egui::Ui, now: i64) {
         let view = &mut module.ui.view;
         ui.selectable_value(view, View::Overview, "Overview");
         ui.selectable_value(view, View::Character, "Character");
+        ui.selectable_value(view, View::Plans, "Plans");
         ui.selectable_value(view, View::Settings, "Settings");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
@@ -1351,7 +1362,7 @@ fn hidden_list(module: &mut Skills, ui: &mut egui::Ui) {
 // ---------------------------------------------------------------------------
 // Small helpers
 
-fn panel(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn panel(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(CARD_FILL)
         .stroke(Stroke::new(1.0, CARD_BORDER))
@@ -1364,7 +1375,7 @@ fn panel(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
-fn panel_head(ui: &mut egui::Ui, title: &str, sub: &str) {
+pub(super) fn panel_head(ui: &mut egui::Ui, title: &str, sub: &str) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(title).size(14.0).color(BRIGHT).strong());
         ui.label(small(sub).color(FAINT));
@@ -1372,12 +1383,12 @@ fn panel_head(ui: &mut egui::Ui, title: &str, sub: &str) {
     line(ui);
 }
 
-fn line(ui: &mut egui::Ui) {
+pub(super) fn line(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
     ui.painter().rect_filled(rect, 0.0, ROW_LINE);
 }
 
-fn banner(ui: &mut egui::Ui, color: Color32, text: &str) {
+pub(super) fn banner(ui: &mut egui::Ui, color: Color32, text: &str) {
     egui::Frame::new()
         .stroke(Stroke::new(1.0, color))
         .corner_radius(CornerRadius::same(4))
@@ -1403,7 +1414,7 @@ fn bar(ui: &mut egui::Ui, width: f32, height: f32, share: f32, color: Color32) {
     }
 }
 
-fn chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
+pub(super) fn chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
     egui::Frame::new()
         .fill(CHIP_FILL)
         .corner_radius(CornerRadius::same(8))
@@ -1430,7 +1441,7 @@ fn dot_label(ui: &mut egui::Ui, color: Color32, text: String) {
 }
 
 /// A label cut with "…" to `width`.
-fn elided_label(ui: &mut egui::Ui, text: &str, width: f32, color: Color32, size: f32) {
+pub(super) fn elided_label(ui: &mut egui::Ui, text: &str, width: f32, color: Color32, size: f32) {
     let galley = one_line(ui.painter(), text, size, color, width);
     let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::hover());
     let elided = galley.elided;
@@ -1440,7 +1451,7 @@ fn elided_label(ui: &mut egui::Ui, text: &str, width: f32, color: Color32, size:
     }
 }
 
-fn text_width(ui: &egui::Ui, text: &str, size: f32) -> f32 {
+pub(super) fn text_width(ui: &egui::Ui, text: &str, size: f32) -> f32 {
     ui.painter()
         .layout_no_wrap(text.to_string(), FontId::proportional(size), DIM)
         .size()
@@ -1448,7 +1459,7 @@ fn text_width(ui: &egui::Ui, text: &str, size: f32) -> f32 {
 }
 
 /// One line of text that ends in "…" if it doesn't fit in `width`.
-fn one_line(
+pub(super) fn one_line(
     painter: &egui::Painter,
     text: &str,
     size: f32,
@@ -1479,7 +1490,7 @@ fn short_sp(sp: i64) -> String {
 }
 
 /// "124,779,397".
-fn group_digits(value: i64) -> String {
+pub(super) fn group_digits(value: i64) -> String {
     let digits = value.unsigned_abs().to_string();
     let mut out = String::new();
     for (index, c) in digits.chars().enumerate() {
@@ -1495,7 +1506,7 @@ fn group_digits(value: i64) -> String {
 }
 
 /// "just now", "4 min ago", "5 h ago", "2 d ago".
-fn ago(seconds: i64) -> String {
+pub(super) fn ago(seconds: i64) -> String {
     let minutes = seconds.max(0) / 60;
     if minutes < 1 {
         "just now".to_string()
@@ -1509,7 +1520,7 @@ fn ago(seconds: i64) -> String {
 }
 
 /// "today 18:48", "tomorrow 02:20" or "Sat 28 Nov 19:08", in local time.
-fn when_text(unix: i64, now: i64) -> String {
+pub(super) fn when_text(unix: i64, now: i64) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];

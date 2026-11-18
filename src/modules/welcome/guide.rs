@@ -122,6 +122,11 @@ pub const SECTIONS: &[Section] = &[
             "Under the queue: the total training time, when it ends, and how many large and \
              small skill injectors would finish it right now (unallocated SP counts first), \
              and what they cost at the lowest Jita sell price.",
+            "**Plans** holds skill plans for all characters. Click level squares on the left \
+             or type a name to add skills (prerequisites come along), drag to reorder, and \
+             [Save]. Import reads a pasted list, Copy for EVE puts the plan on the clipboard \
+             for EVE's skill plan import. Check times the plan for a character with each \
+             implant set and their clones, and shows the best remap and the time it saves.",
         ],
         note: "Settings: the \"ends soon\" hours, the badge, and how often ESI is asked \
                (every 15 minutes by default; [Refresh] asks now).",
