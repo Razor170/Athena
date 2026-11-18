@@ -32,7 +32,8 @@
 //!   names of structure types (so a rep on a Metenox Moon Drill shows the
 //!   type instead of the structure's own name).
 //! - for the Skills module: skill groups and every skill with its group,
-//!   rank and attributes (see `skills.rs`).
+//!   rank, attributes and prerequisites, and the attribute implants
+//!   (see `skills.rs`).
 //!
 //! With `--dotlan <folder>`, the Intel map's layout comes from DOTLAN
 //! EveMaps' region maps in that folder (see `dotlan.rs`). `cargo xtask
@@ -54,7 +55,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 /// Bump when the tables change, so the app can refuse a file it can't read.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// The SDE category that holds all asteroid ore, ice and moon ore.
 const CATEGORY_ASTEROID: i64 = 25;
@@ -430,11 +431,28 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
             })
         })
         .collect();
+    // Implants, for the skill plans' implant sets.
+    let implant_types: Vec<skills::ImplantType> = types
+        .iter()
+        .filter(|t| {
+            t.published
+                && groups
+                    .get(&t.group_id)
+                    .is_some_and(|(category, _)| *category == skills::CATEGORY_IMPLANT)
+        })
+        .filter_map(|t| {
+            Some(skills::ImplantType {
+                id: t.id,
+                name: english(&t.name)?,
+            })
+        })
+        .collect();
     drop(types);
     println!("Reading skills...");
     let skills = skills::build(
         skill_groups,
         skill_types,
+        implant_types,
         read_jsonl(&mut archive, "typeDogma.jsonl")?,
     )?;
     println!("Reading planetary schematics...");
@@ -561,7 +579,7 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
          {} regions, {} systems, {} gates, {} map layout, {} NPC corporations, \
          {} stations with an LP store, {} planetary commodities, {} colony structures, \
          {} schematics, {} remote modules, {} structure types, {} drones and fighters, \
-         {} charges, {} skill groups, {} skills",
+         {} charges, {} skill groups, {} skills, {} attribute implants",
         out.display(),
         items.len(),
         reprocess.len(),
@@ -581,7 +599,8 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         drone_types.len(),
         charge_types.len(),
         skills.groups.len(),
-        skills.skills.len()
+        skills.skills.len(),
+        skills.implants.len()
     );
     Ok(())
 }
@@ -776,6 +795,23 @@ fn create_schema(db: &rusqlite::Connection) -> Result<()> {
             rank                INTEGER NOT NULL,
             primary_attribute   INTEGER NOT NULL,
             secondary_attribute INTEGER NOT NULL
+        );
+        -- Skill prerequisites: type_id needs required_id at level.
+        CREATE TABLE skill_requirements (
+            type_id     INTEGER NOT NULL,
+            required_id INTEGER NOT NULL,
+            level       INTEGER NOT NULL,
+            PRIMARY KEY (type_id, required_id)
+        );
+        -- Implants that raise attributes, with the bonus to each.
+        CREATE TABLE implant_attributes (
+            type_id      INTEGER PRIMARY KEY,
+            name         TEXT NOT NULL,
+            perception   INTEGER NOT NULL,
+            memory       INTEGER NOT NULL,
+            willpower    INTEGER NOT NULL,
+            intelligence INTEGER NOT NULL,
+            charisma     INTEGER NOT NULL
         );
         ",
     )?;
@@ -991,6 +1027,26 @@ fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
                 s.primary_attribute,
                 s.secondary_attribute,
             ))?;
+        }
+        // OR IGNORE: a skill listing the same prerequisite twice keeps
+        // the first.
+        let mut insert = tx.prepare(
+            "INSERT OR IGNORE INTO skill_requirements (type_id, required_id, level)
+             VALUES (?1, ?2, ?3)",
+        )?;
+        for (id, s) in &skills.skills {
+            for (required, level) in &s.requirements {
+                insert.execute((id, required, level))?;
+            }
+        }
+        let mut insert = tx.prepare(
+            "INSERT INTO implant_attributes
+                (type_id, name, perception, memory, willpower, intelligence, charisma)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for (id, i) in &skills.implants {
+            let [per, mem, wil, int, cha] = i.bonuses;
+            insert.execute((id, &i.name, per, mem, wil, int, cha))?;
         }
     }
     tx.commit()?;

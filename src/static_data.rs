@@ -27,7 +27,7 @@ use crate::universe::Universe;
 pub const FILE_NAME: &str = "static.sqlite";
 
 /// The `schema_version` this code can read. Must match the xtask.
-const SCHEMA_VERSION: &str = "8";
+const SCHEMA_VERSION: &str = "9";
 
 /// What kind of thing an item is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +154,16 @@ pub struct SkillType {
     /// 167 perception, 168 willpower).
     pub primary_attribute: i64,
     pub secondary_attribute: i64,
+    /// Prerequisites: (skill type id, level).
+    pub requirements: Vec<(i64, u8)>,
+}
+
+/// An implant that raises attributes, for the skill plans.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttributeImplant {
+    pub name: String,
+    /// Bonus to perception, memory, willpower, intelligence, charisma.
+    pub bonuses: [i64; 5],
 }
 
 /// A skill group, such as "Gunnery", with its skills sorted by name.
@@ -200,6 +210,10 @@ pub struct StaticData {
     skills: HashMap<i64, SkillType>,
     /// Skill groups, sorted by name.
     skill_groups: Vec<SkillGroup>,
+    /// Lower-case skill name -> type id, for importing plans.
+    skill_by_name: HashMap<String, i64>,
+    /// Implants that raise attributes, by type id.
+    implants: HashMap<i64, AttributeImplant>,
 }
 
 impl StaticData {
@@ -401,6 +415,7 @@ impl StaticData {
                 rank: row.get(3)?,
                 primary_attribute: row.get(4)?,
                 secondary_attribute: row.get(5)?,
+                requirements: Vec::new(),
             })
         })?;
         for row in rows {
@@ -413,9 +428,62 @@ impl StaticData {
             {
                 group.skill_ids.push(skill.type_id);
             }
+            self.skill_by_name
+                .insert(skill.name.to_lowercase(), skill.type_id);
             self.skills.insert(skill.type_id, skill);
         }
+        let mut query = db.prepare(
+            "SELECT type_id, required_id, level FROM skill_requirements
+             ORDER BY type_id, rowid",
+        )?;
+        let rows = query.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (skill, required, level) = row?;
+            if let Some(skill) = self.skills.get_mut(&skill) {
+                skill.requirements.push((required, level.clamp(1, 5) as u8));
+            }
+        }
+        let mut query = db.prepare(
+            "SELECT type_id, name, perception, memory, willpower, intelligence, charisma
+             FROM implant_attributes",
+        )?;
+        let rows = query.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                AttributeImplant {
+                    name: row.get(1)?,
+                    bonuses: [
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ],
+                },
+            ))
+        })?;
+        for row in rows {
+            let (id, implant) = row?;
+            self.implants.insert(id, implant);
+        }
         Ok(())
+    }
+
+    /// A skill by its name, any case ("mining barge").
+    pub fn skill_id_by_name(&self, name: &str) -> Option<i64> {
+        self.skill_by_name.get(&name.trim().to_lowercase()).copied()
+    }
+
+    /// An implant that raises attributes, by type id. Other implants
+    /// give `None`.
+    pub fn attribute_implant(&self, type_id: i64) -> Option<&AttributeImplant> {
+        self.implants.get(&type_id)
     }
 
     /// A skill by type id.
@@ -663,8 +731,14 @@ pub mod tests {
             CREATE TABLE skill_types (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
                 group_id INTEGER NOT NULL, rank INTEGER NOT NULL,
                 primary_attribute INTEGER NOT NULL, secondary_attribute INTEGER NOT NULL);
+            CREATE TABLE skill_requirements (type_id INTEGER NOT NULL,
+                required_id INTEGER NOT NULL, level INTEGER NOT NULL,
+                PRIMARY KEY (type_id, required_id));
+            CREATE TABLE implant_attributes (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                perception INTEGER NOT NULL, memory INTEGER NOT NULL, willpower INTEGER NOT NULL,
+                intelligence INTEGER NOT NULL, charisma INTEGER NOT NULL);
 
-            INSERT INTO meta VALUES ('schema_version', '8'), ('sde_build', '3670638');
+            INSERT INTO meta VALUES ('schema_version', '9'), ('sde_build', '3670638');
             INSERT INTO skill_groups VALUES (255, 'Gunnery'), (257, 'Spaceship Command'),
                 (1218, 'Resource Processing');
             INSERT INTO skill_types VALUES
@@ -675,6 +749,11 @@ pub mod tests {
                 (24311, 'Amarr Carrier', 257, 14, 167, 168),
                 (3386, 'Mining', 1218, 1, 166, 165),
                 (22578, 'Mining Upgrades', 1218, 4, 166, 165);
+            INSERT INTO skill_requirements VALUES
+                (3301, 3300, 1), (3304, 3300, 3), (3304, 3301, 3), (22578, 3386, 4);
+            INSERT INTO implant_attributes VALUES
+                (9899, 'Ocular Filter - Basic', 3, 0, 0, 0, 0),
+                (10209, 'Memory Augmentation - Improved', 0, 5, 0, 0, 0);
             INSERT INTO remote_modules VALUES
                 (12102, 'Large Remote Capacitor Transmitter II', 'cap'),
                 (12221, 'Medium Remote Capacitor Transmitter II', 'cap'),
@@ -801,6 +880,16 @@ pub mod tests {
         let carrier = data.skill(24311).unwrap();
         assert_eq!(carrier.rank, 14);
         assert_eq!(carrier.group_id, 257);
+        assert_eq!(
+            data.skill(3304).unwrap().requirements,
+            [(3300, 3), (3301, 3)]
+        );
+        assert_eq!(data.skill_id_by_name(" mining upgrades "), Some(22578));
+        assert_eq!(
+            data.attribute_implant(10209).unwrap().bonuses,
+            [0, 5, 0, 0, 0]
+        );
+        assert!(data.attribute_implant(3300).is_none());
     }
 
     #[test]

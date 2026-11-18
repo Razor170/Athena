@@ -68,7 +68,103 @@ pub struct EsiQueueEntry {
     pub level_end_sp: Option<i64>,
 }
 
-/// `GET /characters/{id}/attributes`.
+/// `GET /characters/{id}/attributes`: the attributes (implants included)
+/// and the remap state.
+#[derive(Debug, Deserialize)]
+pub struct EsiAttributes {
+    #[serde(flatten)]
+    pub attributes: Attributes,
+    #[serde(default)]
+    pub bonus_remaps: Option<i64>,
+    /// The yearly remap can be used again from this date.
+    #[serde(default)]
+    pub accrued_remap_cooldown_date: Option<String>,
+}
+
+impl EsiAttributes {
+    pub fn remap(&self) -> Remap {
+        Remap {
+            bonus_remaps: self.bonus_remaps.unwrap_or(0),
+            cooldown_until: self
+                .accrued_remap_cooldown_date
+                .as_deref()
+                .and_then(parse_esi_date),
+        }
+    }
+}
+
+/// Whether a character can remap its attributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Remap {
+    pub bonus_remaps: i64,
+    /// Unix seconds; the yearly remap is ready after this (or now when
+    /// `None`).
+    pub cooldown_until: Option<i64>,
+}
+
+impl Remap {
+    /// True when a remap can be used at `now`.
+    pub fn available(&self, now: i64) -> bool {
+        self.bonus_remaps > 0 || self.cooldown_until.is_none_or(|until| until <= now)
+    }
+}
+
+/// `GET /characters/{id}/clones`.
+#[derive(Debug, Deserialize)]
+pub struct EsiClones {
+    #[serde(default)]
+    pub jump_clones: Vec<EsiJumpClone>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EsiJumpClone {
+    pub jump_clone_id: i64,
+    pub location_id: i64,
+    #[serde(default)]
+    pub implants: Vec<i64>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// The character's clones: the active one and the jump clones, each with
+/// its implants (type ids).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Clones {
+    /// `GET /characters/{id}/implants`.
+    pub active_implants: Vec<i64>,
+    pub jump_clones: Vec<JumpClone>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JumpClone {
+    pub id: i64,
+    /// The name the player gave it, if any.
+    pub name: Option<String>,
+    /// Station or structure id.
+    pub location_id: i64,
+    pub implants: Vec<i64>,
+}
+
+impl Clones {
+    pub fn from_esi(active_implants: Vec<i64>, clones: EsiClones) -> Clones {
+        Clones {
+            active_implants,
+            jump_clones: clones
+                .jump_clones
+                .into_iter()
+                .map(|c| JumpClone {
+                    id: c.jump_clone_id,
+                    name: c.name.filter(|n| !n.trim().is_empty()),
+                    location_id: c.location_id,
+                    implants: c.implants,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The five attributes. ESI's numbers include the active implants.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Attributes {
     pub charisma: i64,
@@ -135,6 +231,10 @@ pub struct CharacterSkills {
     /// Sorted by queue position.
     pub queue: Vec<QueueEntry>,
     pub attributes: Option<Attributes>,
+    /// Whether a remap is available (from `/attributes`).
+    pub remap: Option<Remap>,
+    /// Active and jump clones with their implants.
+    pub clones: Option<Clones>,
     /// When ESI sent this, Unix seconds.
     pub fetched_at: i64,
 }
@@ -174,6 +274,8 @@ impl CharacterSkills {
                 })
                 .collect(),
             attributes,
+            remap: None,
+            clones: None,
             fetched_at: now,
         }
     }

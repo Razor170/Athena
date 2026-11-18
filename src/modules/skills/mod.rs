@@ -8,12 +8,15 @@
 //!   background thread and keeps a copy in `skills-cache.json`.
 //! - [`data`]: what ESI sends, what Athena keeps, and the queue maths.
 //! - [`config`]: settings and filters, saved in `skills.toml`.
-//! - `ui`: draws the panel.
+//! - [`plans`]: skill plans, their file and the plan maths.
+//! - `ui` and `plans_ui`: draw the panel.
 //!
 //! Skill names, groups and ranks come from `static.sqlite`.
 
 pub mod config;
 pub mod data;
+pub mod plans;
+mod plans_ui;
 mod ui;
 pub mod worker;
 
@@ -61,6 +64,8 @@ pub struct Skills {
     skills: BTreeMap<u64, CharacterSkills>,
     /// Jita prices of skill injectors, for the queue footer.
     injector_prices: Option<worker::InjectorPrices>,
+    /// Station and structure names, for jump clones.
+    location_names: BTreeMap<i64, String>,
     /// When ESI was last asked.
     checked: Option<i64>,
     /// Problems per character, shown on their card.
@@ -68,6 +73,9 @@ pub struct Skills {
     /// Problems to show on top of the panel.
     problems: Vec<String>,
     ui: ui::UiState,
+    /// The Plans view: saved plans, the open plan and what it's checked
+    /// against.
+    plans: plans_ui::PlansState,
     last_refresh: Option<i64>,
 }
 
@@ -87,6 +95,8 @@ impl Skills {
             settings.poll_secs(),
         );
         let mut problems: Vec<String> = problem.into_iter().collect();
+        let (plans, plans_problem) = plans_ui::PlansState::load(data_dir, crate::auth::now_unix());
+        problems.extend(plans_problem);
         if let Some(problem) = &static_data.problem {
             problems.push(problem.clone());
         }
@@ -102,10 +112,12 @@ impl Skills {
             loaded: false,
             skills: BTreeMap::new(),
             injector_prices: None,
+            location_names: BTreeMap::new(),
             checked: None,
             character_problems: HashMap::new(),
             problems,
             ui: ui::UiState::default(),
+            plans,
             last_refresh: None,
         };
         module.read_roster();
@@ -240,6 +252,9 @@ impl Skills {
                 if self.injector_prices.is_none() {
                     self.injector_prices = cache.injector_prices;
                 }
+                for (id, name) in cache.location_names {
+                    self.location_names.entry(id).or_insert(name);
+                }
             }
             Event::Skills {
                 character_id,
@@ -260,6 +275,7 @@ impl Skills {
                 }
             },
             Event::Prices(prices) => self.injector_prices = Some(prices),
+            Event::LocationNames(names) => self.location_names.extend(names),
             Event::Problem(text) => self.problems.push(text),
         }
     }
@@ -307,6 +323,7 @@ impl Module for Skills {
     }
 
     fn on_exit(&mut self) {
+        plans_ui::on_exit(self);
         self.saver.finish();
     }
 }

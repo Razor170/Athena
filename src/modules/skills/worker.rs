@@ -26,9 +26,9 @@ use eframe::egui;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
-use super::data::{Attributes, CharacterSkills, EsiQueueEntry, EsiSkills};
+use super::data::{CharacterSkills, Clones, EsiAttributes, EsiClones, EsiQueueEntry, EsiSkills};
 use crate::auth::{RefreshError, TokenStore, now_unix};
-use crate::esi::{EsiClient, Fetched};
+use crate::esi::{EsiClient, Fetched, HttpError};
 use crate::modules::mining::prices::{Order, best_jita_prices};
 
 /// The longest the thread sleeps before looking at the schedule again.
@@ -43,6 +43,8 @@ const THE_FORGE: i64 = 10_000_002;
 /// Skill injector type ids (SDE).
 pub const LARGE_INJECTOR: i64 = 40_520;
 pub const SMALL_INJECTOR: i64 = 45_635;
+/// Location ids from here up are player structures, below are stations.
+const FIRST_STRUCTURE_ID: i64 = 1_000_000_000_000;
 
 /// The lowest Jita 4-4 sell price of each injector: what buying one costs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -75,6 +77,8 @@ pub enum Event {
     },
     /// New injector prices.
     Prices(InjectorPrices),
+    /// Names of stations and structures where jump clones are.
+    LocationNames(Vec<(i64, String)>),
     /// A round of fetching ended at this time.
     Checked(i64),
     /// Something went wrong for one character (`None`: it works again).
@@ -93,6 +97,8 @@ pub struct Cache {
     /// Character id -> their skills.
     pub characters: BTreeMap<u64, CharacterSkills>,
     pub injector_prices: Option<InjectorPrices>,
+    /// Station and structure id -> name, for jump clones.
+    pub location_names: BTreeMap<i64, String>,
 }
 
 impl Cache {
@@ -265,6 +271,12 @@ impl Fetcher {
                 Ok(token) => match self.fetch(id, &token, now) {
                     Ok((skills, expires_in)) => {
                         next = next.max(now + expires_in);
+                        let names = self.look_up_locations(&skills, &token);
+                        if !names.is_empty() {
+                            self.cache.location_names.extend(names.iter().cloned());
+                            changed = true;
+                            send(Event::LocationNames(names));
+                        }
                         if self.cache.characters.get(&id) != Some(&skills) {
                             self.cache.characters.insert(id, skills.clone());
                             changed = true;
@@ -300,15 +312,97 @@ impl Fetcher {
         let mut expires = self.expires_in_secs();
         let queue: Vec<EsiQueueEntry> = self.get(&format!("/characters/{id}/skillqueue"), token)?;
         expires = expires.max(self.expires_in_secs());
-        // Only needed for the time of a paused queue: not worth failing
-        // the rest for.
-        let attributes: Option<Attributes> = self
+        // Attributes and clones are only needed for paused queues and
+        // skill plans: not worth failing the rest for.
+        let attributes: Option<EsiAttributes> = self
             .get(&format!("/characters/{id}/attributes"), token)
             .ok();
-        Ok((
-            CharacterSkills::from_esi(skills, queue, attributes, now),
-            expires,
-        ))
+        let clones = self.fetch_clones(id, token);
+        let mut skills = CharacterSkills::from_esi(
+            skills,
+            queue,
+            attributes.as_ref().map(|a| a.attributes),
+            now,
+        );
+        skills.remap = attributes.as_ref().map(EsiAttributes::remap);
+        // Keep the last known clones if ESI didn't answer this time.
+        skills.clones = clones.or_else(|| {
+            self.cache
+                .characters
+                .get(&id)
+                .and_then(|c| c.clones.clone())
+        });
+        Ok((skills, expires))
+    }
+
+    /// The active clone's implants and the jump clones.
+    fn fetch_clones(&mut self, id: u64, token: &str) -> Option<Clones> {
+        let implants: Vec<i64> = self
+            .get(&format!("/characters/{id}/implants"), token)
+            .ok()?;
+        let clones: EsiClones = self.get(&format!("/characters/{id}/clones"), token).ok()?;
+        Some(Clones::from_esi(implants, clones))
+    }
+
+    /// Names of the stations and structures of the jump clones that
+    /// aren't known yet. Stations come from `/universe/names`; a
+    /// structure needs the character's token and docking access. Ids that
+    /// fail are tried again on the next fetch.
+    fn look_up_locations(&mut self, skills: &CharacterSkills, token: &str) -> Vec<(i64, String)> {
+        let Some(clones) = &skills.clones else {
+            return Vec::new();
+        };
+        let mut ids: Vec<i64> = clones
+            .jump_clones
+            .iter()
+            .map(|c| c.location_id)
+            .filter(|id| !self.cache.location_names.contains_key(id))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut found = Vec::new();
+        for id in ids {
+            let name = if id >= FIRST_STRUCTURE_ID {
+                self.structure_name(id, token)
+            } else {
+                self.station_name(id)
+            };
+            if let Some(name) = name {
+                found.push((id, name));
+            }
+        }
+        found
+    }
+
+    fn station_name(&mut self, id: i64) -> Option<String> {
+        #[derive(Deserialize)]
+        struct Named {
+            name: String,
+        }
+        let names: Vec<Named> = self.esi.post_json("/universe/names", &[id]).ok()?;
+        names.into_iter().next().map(|n| n.name)
+    }
+
+    fn structure_name(&mut self, id: i64, token: &str) -> Option<String> {
+        #[derive(Deserialize)]
+        struct Structure {
+            name: String,
+        }
+        match self.esi.get_json_authed::<Structure>(
+            &format!("/universe/structures/{id}"),
+            token,
+            None,
+        ) {
+            Ok(Fetched::Data { value, .. }) => Some(value.name),
+            // No docking access: remember that, so it isn't asked again.
+            Err(e)
+                if e.downcast_ref::<HttpError>()
+                    .is_some_and(|e| e.status == 403 || e.status == 404) =>
+            {
+                Some("Structure (no access)".to_string())
+            }
+            _ => None,
+        }
     }
 
     /// The lowest Jita 4-4 sell order of each injector, from every page
@@ -387,6 +481,16 @@ mod tests {
                     level_end_sp: Some(1415),
                 }],
                 attributes: None,
+                remap: None,
+                clones: Some(Clones {
+                    active_implants: vec![9899],
+                    jump_clones: vec![crate::modules::skills::data::JumpClone {
+                        id: 5,
+                        name: Some("Mining".into()),
+                        location_id: 60003760,
+                        implants: vec![10209],
+                    }],
+                }),
                 fetched_at: 1_794_960_000,
             },
         );
@@ -395,6 +499,10 @@ mod tests {
             small: None,
             fetched_at: 1_794_960_000,
         });
+        cache.location_names.insert(
+            60003760,
+            "Jita IV - Moon 4 - Caldari Navy Assembly Plant".into(),
+        );
         let dir = std::env::temp_dir().join(format!("athena-skills-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = Cache::file_path(&dir);
