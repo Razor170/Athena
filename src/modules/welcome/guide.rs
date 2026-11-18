@@ -25,7 +25,7 @@ pub const GETTING_STARTED: &[&str] = &[
     "**Settings** › EVE logs: check that the log folder is right. The default is \
      Documents\\EVE\\logs.",
     "**Characters**: click [+ Add character] and log in with EVE. Finance, Planetary, \
-     Contracts and Skills need this. Mining and Intel work without it.",
+     Contracts, Skills and Assets need this. Mining and Intel work without it.",
     "**Intel** › Settings: tick the intel channels you want watched.",
     "**Mining** needs no setup. Start mining and a card shows up for each character.",
 ];
@@ -204,6 +204,30 @@ pub const SECTIONS: &[Section] = &[
              two fits. **Show matching** also lists what both fits have.",
         ],
         note: "Both fits are kept when Athena restarts.",
+    },
+    Section {
+        title: "Assets",
+        subtitle: "everything your characters own, by location",
+        paragraphs: &[
+            "Each row is a station, structure or \"In space\": security, system, place, item \
+             count, value, m³ and jumps. Click a row to open it: ships and containers come \
+             first with the owner's name, then the loose items. Click a ship to see it by \
+             slot and bay.",
+            "**Sort by** Distance, Name, Asset count or Total price; the arrow next to it \
+             reverses the order. Distance counts gate jumps from the **Route from** \
+             character's system (from the Local chat log, or ESI) or a system you type. \
+             Wormholes and unreachable places show \"–\" and come last.",
+            "The search box looks through item types, ship and container names, systems \
+             and stations. Places with a hit open by themselves; click to close them.",
+            "**Filters** are saved chips such as Ships and Caps. Click a chip to turn it \
+             on, the gear to edit it, [+ New filter] to make one. A filter can pick \
+             categories or groups, a name, a minimum value and the security of the place. \
+             With several chips on, an item may match any of them. The totals line always \
+             counts only what is shown.",
+        ],
+        note: "Assets are fetched only while the tab is open, and again when ESI's copy \
+               (one hour) runs out. Settings: the price, EVE's average price by default or \
+               Jita 4-4.",
     },
     Section {
         title: "Settings and updates",

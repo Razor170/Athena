@@ -34,12 +34,16 @@
 //! - for the Skills module: skill groups and every skill with its group,
 //!   rank, attributes and prerequisites, and the attribute implants
 //!   (see `skills.rs`).
+//! - for the Assets module: every item type with its group, category,
+//!   volume and packaged volume, the names of all groups and categories,
+//!   and the names of all NPC stations (see `assets.rs`).
 //!
 //! With `--dotlan <folder>`, the Intel map's layout comes from DOTLAN
 //! EveMaps' region maps in that folder (see `dotlan.rs`). `cargo xtask
 //! regions` prints the file name of every region map to fetch, one per line;
 //! `xtask/dotlan.ps1` uses it to download them.
 
+mod assets;
 mod dotlan;
 mod map;
 mod planetary;
@@ -55,7 +59,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 /// Bump when the tables change, so the app can refuse a file it can't read.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// The SDE category that holds all asteroid ore, ice and moon ore.
 const CATEGORY_ASTEROID: i64 = 25;
@@ -156,6 +160,12 @@ struct SdeType {
     portion_size: Option<i64>,
     #[serde(default)]
     published: bool,
+    /// m³ when packaged (ships and containers are bigger assembled).
+    #[serde(rename = "packagedVolume")]
+    packaged_volume: Option<f64>,
+    /// Set when the type is sold on the market.
+    #[serde(rename = "marketGroupID")]
+    market_group_id: Option<i64>,
 }
 
 /// One line of `groups.jsonl`.
@@ -280,6 +290,12 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         .iter()
         .filter(|g| g.category_id == skills::CATEGORY_SKILL && g.published)
         .filter_map(|g| Some((g.id, english(&g.name)?)))
+        .collect();
+    // Published groups, for the Assets module's filter editor.
+    let published_groups: BTreeSet<i64> = groups
+        .iter()
+        .filter(|g| g.published)
+        .map(|g| g.id)
         .collect();
     // Group id -> (category id, English name).
     let groups: BTreeMap<i64, (i64, String)> = groups
@@ -447,7 +463,27 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
             })
         })
         .collect();
+    // Every type, for the Assets module.
+    let asset_types: Vec<assets::TypeIn> = types
+        .iter()
+        .map(|t| {
+            assets::type_in(
+                t.id,
+                t.group_id,
+                &t.name,
+                t.volume,
+                t.packaged_volume,
+                t.market_group_id,
+            )
+        })
+        .collect();
     drop(types);
+    let asset_data = assets::build(
+        asset_types,
+        &groups,
+        &published_groups,
+        read_jsonl(&mut archive, "categories.jsonl")?,
+    )?;
     println!("Reading skills...");
     let skills = skills::build(
         skill_groups,
@@ -483,12 +519,14 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         .iter()
         .map(|(id, s)| (*id, s.name.clone()))
         .collect();
-    let (corporations, lp_stations) = stations::build(
+    let station_data = stations::build(
         read_jsonl(&mut archive, "npcCorporations.jsonl")?,
         read_jsonl(&mut archive, "stationOperations.jsonl")?,
         read_jsonl(&mut archive, "npcStations.jsonl")?,
         &system_names,
     )?;
+    let corporations = &station_data.corporations;
+    let lp_stations = &station_data.lp_stations;
 
     let compressed: Vec<(i64, i64)> = compressible
         .iter()
@@ -564,8 +602,10 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         compressed: &compressed,
         ships: &ships,
         map: &map,
-        corporations: &corporations,
-        lp_stations: &lp_stations,
+        corporations,
+        lp_stations,
+        all_stations: &station_data.all,
+        assets: &asset_data,
         pi: &pi,
         remote_modules: &remote_modules,
         structure_types: &structure_types,
@@ -579,7 +619,8 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
          {} regions, {} systems, {} gates, {} map layout, {} NPC corporations, \
          {} stations with an LP store, {} planetary commodities, {} colony structures, \
          {} schematics, {} remote modules, {} structure types, {} drones and fighters, \
-         {} charges, {} skill groups, {} skills, {} attribute implants",
+         {} charges, {} skill groups, {} skills, {} attribute implants, \
+         {} item types, {} groups, {} categories, {} NPC stations",
         out.display(),
         items.len(),
         reprocess.len(),
@@ -600,7 +641,11 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         charge_types.len(),
         skills.groups.len(),
         skills.skills.len(),
-        skills.implants.len()
+        skills.implants.len(),
+        asset_data.types.len(),
+        asset_data.groups.len(),
+        asset_data.categories.len(),
+        station_data.all.len()
     );
     Ok(())
 }
@@ -803,6 +848,33 @@ fn create_schema(db: &rusqlite::Connection) -> Result<()> {
             level       INTEGER NOT NULL,
             PRIMARY KEY (type_id, required_id)
         );
+        -- For the Assets module: every item type (published or not) with
+        -- its volume as it is and packaged, and whether it is on the market.
+        CREATE TABLE types (
+            type_id         INTEGER PRIMARY KEY,
+            name            TEXT NOT NULL,
+            group_id        INTEGER NOT NULL,
+            volume          REAL NOT NULL,
+            packaged_volume REAL NOT NULL,
+            market          INTEGER NOT NULL
+        );
+        -- published = 0 for groups players never see (NPC ships, ...).
+        CREATE TABLE type_groups (
+            group_id    INTEGER PRIMARY KEY,
+            category_id INTEGER NOT NULL,
+            name        TEXT NOT NULL,
+            published   INTEGER NOT NULL
+        );
+        CREATE TABLE type_categories (
+            category_id INTEGER PRIMARY KEY,
+            name        TEXT NOT NULL
+        );
+        -- Every NPC station, with its name built like the game does.
+        CREATE TABLE stations (
+            station_id INTEGER PRIMARY KEY,
+            system_id  INTEGER NOT NULL,
+            name       TEXT NOT NULL
+        );
         -- Implants that raise attributes, with the bonus to each.
         CREATE TABLE implant_attributes (
             type_id      INTEGER PRIMARY KEY,
@@ -827,6 +899,8 @@ struct Tables<'a> {
     map: &'a map::MapData,
     corporations: &'a BTreeMap<i64, String>,
     lp_stations: &'a BTreeMap<i64, stations::Station>,
+    all_stations: &'a BTreeMap<i64, stations::Station>,
+    assets: &'a assets::AssetData,
     pi: &'a planetary::PiData,
     remote_modules: &'a BTreeMap<i64, (String, &'static str)>,
     structure_types: &'a BTreeMap<i64, String>,
@@ -844,6 +918,8 @@ fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
         map,
         corporations,
         lp_stations,
+        all_stations,
+        assets,
         pi,
         remote_modules,
         structure_types,
@@ -979,6 +1055,42 @@ fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
         )?;
         for (id, s) in lp_stations {
             insert.execute((id, s.system_id, s.corporation_id, &s.name))?;
+        }
+
+        let mut insert =
+            tx.prepare("INSERT INTO stations (station_id, system_id, name) VALUES (?1, ?2, ?3)")?;
+        for (id, s) in all_stations {
+            insert.execute((id, s.system_id, &s.name))?;
+        }
+
+        let mut insert = tx.prepare(
+            "INSERT INTO types (type_id, name, group_id, volume, packaged_volume, market)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for (id, t) in &assets.types {
+            insert.execute((
+                id,
+                &t.name,
+                t.group_id,
+                t.volume,
+                t.packaged_volume,
+                t.market,
+            ))?;
+        }
+
+        let mut insert = tx.prepare(
+            "INSERT INTO type_groups (group_id, category_id, name, published)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (id, (category_id, name)) in &assets.groups {
+            let published = assets.published_groups.contains(id);
+            insert.execute((id, category_id, name, published))?;
+        }
+
+        let mut insert =
+            tx.prepare("INSERT INTO type_categories (category_id, name) VALUES (?1, ?2)")?;
+        for (id, name) in &assets.categories {
+            insert.execute((id, name))?;
         }
 
         let mut insert = tx.prepare(

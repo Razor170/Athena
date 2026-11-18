@@ -60,22 +60,33 @@ pub struct SdeStation {
     pub use_operation_name: bool,
 }
 
-/// A station with an LP store, ready to be written.
+/// An NPC station, ready to be written.
+#[derive(Clone)]
 pub struct Station {
     pub system_id: i64,
     pub corporation_id: i64,
     pub name: String,
 }
 
-/// The NPC corporations (id -> name) and their stations with an LP store
-/// (station id -> station). `system_names` are the map's systems; stations
-/// in other systems are left out.
+/// What [`build`] makes.
+pub struct StationData {
+    /// NPC corporation id -> name.
+    pub corporations: BTreeMap<i64, String>,
+    /// Stations with an LP store, by station id.
+    pub lp_stations: BTreeMap<i64, Station>,
+    /// Every NPC station, by station id, for the Assets module.
+    pub all: BTreeMap<i64, Station>,
+}
+
+/// The NPC corporations, every NPC station, and the stations with an LP
+/// store. `system_names` are the map's systems; stations in other systems
+/// are left out.
 pub fn build(
     corporations: Vec<SdeCorporation>,
     operations: Vec<SdeOperation>,
     stations: Vec<SdeStation>,
     system_names: &BTreeMap<i64, String>,
-) -> Result<(BTreeMap<i64, String>, BTreeMap<i64, Station>)> {
+) -> Result<StationData> {
     let corporations: BTreeMap<i64, String> = corporations
         .into_iter()
         .filter_map(|c| Some((c.id, english(&c.name)?)))
@@ -84,13 +95,11 @@ pub fn build(
         operations.into_iter().map(|o| (o.id, o)).collect();
 
     let mut out = BTreeMap::new();
+    let mut all = BTreeMap::new();
     for s in stations {
         let Some(operation) = operations.get(&s.operation_id) else {
             continue;
         };
-        if !operation.services.contains(&SERVICE_LP_STORE) {
-            continue;
-        }
         let (Some(system), Some(corporation), Some(planet)) = (
             system_names.get(&s.system_id),
             corporations.get(&s.owner_id),
@@ -109,14 +118,15 @@ pub fn build(
             name.push(' ');
             name.push_str(&operation_name);
         }
-        out.insert(
-            s.id,
-            Station {
-                system_id: s.system_id,
-                corporation_id: s.owner_id,
-                name,
-            },
-        );
+        let station = Station {
+            system_id: s.system_id,
+            corporation_id: s.owner_id,
+            name,
+        };
+        if operation.services.contains(&SERVICE_LP_STORE) {
+            out.insert(s.id, station.clone());
+        }
+        all.insert(s.id, station);
     }
 
     // Sanity checks, so a changed SDE format fails loudly.
@@ -128,13 +138,19 @@ pub fn build(
         ),
         None => bail!("Jita 4-4 not found among LP stations; has the SDE format changed?"),
     }
-    if out.len() < 3000 {
+    if out.len() < 3000 || all.len() < 4000 {
         bail!(
-            "only {} stations with an LP store found; has the SDE format changed?",
-            out.len()
+            "only {} stations with an LP store and {} stations in all found; \
+             has the SDE format changed?",
+            out.len(),
+            all.len()
         );
     }
-    Ok((corporations, out))
+    Ok(StationData {
+        corporations,
+        lp_stations: out,
+        all,
+    })
 }
 
 /// 1 -> "I", 4 -> "IV", 14 -> "XIV". Planets go up to about 20.

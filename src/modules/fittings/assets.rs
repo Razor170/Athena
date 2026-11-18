@@ -9,12 +9,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::eft::Section;
 
-/// One line of `/characters/{id}/assets` (only the fields we need).
-#[derive(Debug, Clone, Deserialize)]
+/// One line of `/characters/{id}/assets` (only the fields we need). The
+/// Assets module reads the same list and keeps it in its cache file.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct EsiAsset {
     pub item_id: i64,
     pub type_id: i64,
@@ -26,6 +27,9 @@ pub struct EsiAsset {
     pub quantity: i64,
     #[serde(default)]
     pub is_singleton: bool,
+    /// Set (true) for blueprint copies, which have no market price.
+    #[serde(default)]
+    pub is_blueprint_copy: Option<bool>,
 }
 
 /// Where a ship is.
@@ -328,6 +332,7 @@ mod tests {
             location_type: kind.to_string(),
             quantity,
             is_singleton: singleton,
+            is_blueprint_copy: None,
         }
     }
 

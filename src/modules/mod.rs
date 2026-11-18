@@ -20,6 +20,7 @@ use crate::overlay::mining_bars::{BarsOverlay, OverlayPlace};
 use crate::settings::Settings;
 use crate::static_data::StaticData;
 
+pub mod assets;
 pub mod characters;
 pub mod cic;
 pub mod contracts;
@@ -152,6 +153,14 @@ pub fn create_all(
             &static_data,
             tokens.clone(),
             roster.clone(),
+        )),
+        Box::new(assets::Assets::new(
+            egui_ctx,
+            data_dir,
+            tokens.clone(),
+            roster.clone(),
+            &static_data,
+            pilot_systems.clone(),
         )),
         Box::new(skills::Skills::new(
             egui_ctx,
