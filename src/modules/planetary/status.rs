@@ -16,14 +16,16 @@
 //!   launchpad or storage is filling up.
 //! - Green: none of the above.
 //!
-//! What ESI shows is the colony at its last in-game view. Two things are
-//! estimated from that moment to now: how much the extractors have added
-//! to storage, and how long the factories' inputs last.
+//! What ESI shows is the colony at its last in-game view. From that moment
+//! the colony is played forward along its routes (see [`super::sim`]) to
+//! estimate how full the launchpads and storage are now, and how long the
+//! factories' inputs last.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::config::Thresholds;
 use super::data::{Colony, Pin};
+use super::sim;
 use crate::static_data::{PiStructureKind, StaticData};
 
 /// How a colony is doing. The order is the sort order: worst first.
@@ -64,7 +66,8 @@ pub struct Store {
     pub capacity_m3: f64,
     /// Filled at the last in-game view.
     pub used_m3: f64,
-    /// Estimated to have been added since then (0 when not estimated).
+    /// Estimated change since then: positive when it filled up, negative
+    /// when factories took inputs out of it (0 when not estimated).
     pub added_m3: f64,
     /// (type id, amount), biggest volume first.
     pub contents: Vec<(i64, i64)>,
@@ -288,75 +291,46 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
         ));
     }
 
-    // ---- Estimate what the extractors added since the last view.
-    if t.show_estimate {
-        for pin in layout.pins.iter() {
-            let (Some(ex), Some(expiry)) = (&pin.extractor, pin.expiry) else {
-                continue;
-            };
-            let from = colony.last_update.max(pin.install.unwrap_or(i64::MIN));
-            let to = now.min(expiry);
-            if to <= from || ex.heads == 0 {
-                continue;
-            }
-            let units = ((to - from) / ex.cycle_secs.max(1)) as f64 * ex.qty_per_cycle as f64;
-            // If a factory here turns the raw resource into something,
-            // what lands in storage is the factory's output.
-            let converted = layout.pins.iter().find_map(|p| {
-                let s = data.pi_schematic(p.schematic_id?)?;
-                let (_, in_qty) = s.inputs.iter().find(|(id, _)| *id == ex.product)?;
-                let (out_id, out_qty) = s.output?;
-                Some((out_id, units * out_qty as f64 / (*in_qty).max(1) as f64))
-            });
-            let (type_id, amount) = converted.unwrap_or((ex.product, units));
-            let added = amount * volume(type_id);
-            // Into the store a route sends this commodity to, else the
-            // first launchpad, else the first storage.
-            let routed = layout.routes.iter().find_map(|r| {
-                (r.type_id == type_id)
-                    .then(|| stores.iter().position(|(id, _)| *id == r.destination))
-                    .flatten()
-            });
-            let target = routed
-                .or_else(|| {
-                    stores
-                        .iter()
-                        .position(|(_, s)| s.kind == PiStructureKind::Launchpad)
-                })
-                .or(if stores.is_empty() { None } else { Some(0) });
-            if let Some(index) = target {
-                let store = &mut stores[index].1;
-                let room = (store.capacity_m3 - store.used_m3 - store.added_m3).max(0.0);
-                store.added_m3 += added.min(room);
-            }
-        }
-    }
-
-    // ---- How long the factories' outside inputs last.
+    // ---- Commodities the factories need from outside the planet.
     let extracted: BTreeSet<i64> = extractors.iter().filter_map(|e| e.product).collect();
     let inputs: Vec<i64> = needed_per_hour
         .keys()
         .copied()
         .filter(|id| !made.contains(id) && !extracted.contains(id))
         .collect();
+
+    // ---- Play the colony forward from the last view (see `sim`): what
+    // the extractors and factories have put into (or taken out of) the
+    // launchpads and storage since, and when the outside inputs run out.
+    let kinds: BTreeMap<i64, PiStructureKind> = layout
+        .pins
+        .iter()
+        .filter_map(|p| Some((p.pin_id, kind_of(p)?)))
+        .collect();
+    let outside: BTreeSet<i64> = inputs.iter().copied().collect();
+    let played = sim::simulate(
+        layout,
+        data,
+        &kinds,
+        &outside,
+        colony.last_update,
+        now.max(colony.last_update),
+    );
+    if t.show_estimate {
+        for (pin_id, store) in stores.iter_mut() {
+            if let Some(now_m3) = played.used_now_m3.get(pin_id) {
+                let change = now_m3 - store.used_m3;
+                // Sums in another order can differ in the last digits.
+                store.added_m3 = if change.abs() < 1e-6 { 0.0 } else { change };
+            }
+        }
+    }
+    // Seconds from now until the inputs run out (negative: that long ago).
+    // If they last past the simulation's horizon, they last at least that.
     let inputs_left = if inputs.is_empty() {
         None
     } else {
-        let stock = |type_id: i64| -> f64 {
-            layout
-                .pins
-                .iter()
-                .flat_map(|p| p.contents.iter())
-                .filter(|(id, _)| *id == type_id)
-                .map(|(_, n)| *n as f64)
-                .sum()
-        };
-        let hours = inputs
-            .iter()
-            .map(|id| stock(*id) / needed_per_hour[id].max(f64::MIN_POSITIVE))
-            .fold(f64::INFINITY, f64::min);
-        let at_view = (hours * 3600.0) as i64;
-        Some(at_view - (now - colony.last_update))
+        Some(played.starved_at.unwrap_or(played.horizon) - now)
     };
 
     // ---- Problems, worst first.
@@ -712,7 +686,9 @@ mod tests {
     fn factory_inputs_last_and_run_out() {
         let data = sample();
         // Superconductors: 40 Plasmoids + 40 Water per hour per factory.
-        // Two factories need 80 of each per hour; 800 Water lasts 10 h.
+        // Two factories need 80 of each per hour; 800 Water lasts 10 more
+        // cycles. Both are in a cycle at the view that ends 50 min later,
+        // so the 11th start fails 10 h 50 min from now.
         let pins = vec![
             factory(1, ADVANCED, 65, NOW - 600),
             factory(2, ADVANCED, 65, NOW - 600),
@@ -722,7 +698,7 @@ mod tests {
         let a = assess(&c, &data, &defaults(), NOW);
         assert_eq!(a.kind, ColonyKind::Factory);
         assert_eq!(a.inputs, vec![PLASMOIDS, WATER]);
-        assert_eq!(a.inputs_left, Some(10 * 3600));
+        assert_eq!(a.inputs_left, Some(10 * 3600 + 3000));
         assert_eq!(a.level, Level::Soon);
         assert_eq!(a.headline, "Inputs last ~10 h");
 
@@ -750,20 +726,25 @@ mod tests {
     #[test]
     fn extracted_inputs_are_not_outside_inputs() {
         let data = sample();
-        // Extractor feeds a Water factory: no outside inputs, and the
-        // estimate stores Water (20 per 3,000 Aqueous Liquids).
+        // Extractor feeds a Water factory: no outside inputs. One basic
+        // factory turns 3,000 Aqueous Liquids into 20 Water every 30 min;
+        // the extractor brings 10,000, so most stays as Aqueous Liquids.
+        let viewed = NOW - 10 * 3600;
         let pins = vec![
             ecu(1, NOW + 5 * 86_400),
-            factory(2, BASIC, 121, NOW - 600),
+            // In a cycle at the view that ends 20 min later.
+            factory(2, BASIC, 121, viewed - 600),
             pad(3, vec![]),
         ];
-        let c = colony(pins, vec![], NOW - 10 * 3600);
+        let c = colony(pins, vec![], viewed);
         let a = assess(&c, &data, &defaults(), NOW);
         assert_eq!(a.kind, ColonyKind::Both);
         assert!(a.inputs.is_empty());
         assert_eq!(a.inputs_left, None);
-        // 200,000 Aqueous -> 1,333.33 Water x 0.19 m³.
-        let expected = 200_000.0 * 20.0 / 3000.0 * 0.19;
+        // 20 extractor cycles bring 200,000; 20 factory cycles start and
+        // take 60,000 of it. 20 cycles end: the one running at the view
+        // and 19 of the new ones, 400 Water.
+        let expected = 140_000.0 * 0.005 + 400.0 * 0.19;
         assert!((a.launchpads[0].added_m3 - expected).abs() < 1e-6);
         assert_eq!(a.level, Level::Active);
         assert_eq!(a.headline, "1 extractor · end in 5d · 1 factory running");
@@ -851,6 +832,144 @@ mod tests {
         assert!(!a.launchpads[0].is_output);
         assert_eq!(a.level, Level::Attention);
         assert_eq!(a.headline, "Launchpad 2 full");
+    }
+
+    fn route(source: i64, destination: i64, type_id: i64) -> Route {
+        Route {
+            source,
+            destination,
+            type_id,
+            quantity: 40.0,
+        }
+    }
+
+    /// Two Superconductor factories take from pad 3 and send to pad 4.
+    fn factory_planet(
+        input_pad: Vec<(i64, i64)>,
+        output_pad: Vec<(i64, i64)>,
+    ) -> (Vec<Pin>, Vec<Route>) {
+        let pins = vec![
+            factory(1, ADVANCED, 65, NOW - 600),
+            factory(2, ADVANCED, 65, NOW - 600),
+            pad(3, input_pad),
+            pad(4, output_pad),
+        ];
+        let routes = vec![
+            route(3, 1, PLASMOIDS),
+            route(3, 1, WATER),
+            route(3, 2, PLASMOIDS),
+            route(3, 2, WATER),
+            route(1, 4, 9838),
+            route(2, 4, 9838),
+        ];
+        (pins, routes)
+    }
+
+    #[test]
+    fn factory_planet_pads_follow_the_routes() {
+        let data = sample();
+        let (pins, routes) = factory_planet(
+            vec![(PLASMOIDS, 26_000), (WATER, 26_000)],
+            vec![(9838, 1000)],
+        );
+        let c = colony(pins, routes, NOW);
+        // 10 hours after the view: each factory finished the cycle it was
+        // in plus 9 more (10 x 5 Superconductors), and started 10 (10 x 40
+        // Plasmoids and 40 Water).
+        let a = assess(&c, &data, &defaults(), NOW + 10 * 3600);
+        let made = 2.0 * 10.0 * 5.0 * 0.75;
+        let used = 2.0 * 10.0 * 80.0 * 0.19;
+        assert!((a.launchpads[1].added_m3 - made).abs() < 1e-6);
+        assert!((a.launchpads[0].added_m3 + used).abs() < 1e-6);
+        // 26,000 Water lasts 325 cycles of both: 13d 13h 50min after the
+        // view, so 13d 3h from 10 hours later.
+        assert_eq!(a.level, Level::Active);
+        assert_eq!(a.headline, "2 factories running · inputs last ~13d 3h");
+    }
+
+    #[test]
+    fn factory_output_pad_fills_up() {
+        let data = sample();
+        // 12,600 Superconductors = 9,450 m³ of 10,000: 94.5% at the view.
+        let (pins, routes) = factory_planet(
+            vec![(PLASMOIDS, 26_000), (WATER, 26_000)],
+            vec![(9838, 12_600)],
+        );
+        let c = colony(pins, routes, NOW);
+        let a = assess(&c, &data, &defaults(), NOW);
+        assert_eq!(a.level, Level::Soon);
+        // 10 hours later 75 m³ more: full.
+        let a = assess(&c, &data, &defaults(), NOW + 10 * 3600);
+        assert_eq!(a.level, Level::Attention);
+        assert_eq!(a.headline, "Launchpad 2 full");
+        // Never more than fits.
+        let a = assess(&c, &data, &defaults(), NOW + 20 * 86_400);
+        assert_eq!(a.launchpads[1].percent(), 100.0);
+    }
+
+    #[test]
+    fn inputs_without_a_route_do_not_count() {
+        let data = sample();
+        // Water is on pad 4, but only Plasmoids are routed from pad 3. The
+        // old estimate counted all Water on the planet.
+        let pins = vec![
+            factory(1, ADVANCED, 65, NOW - 3600),
+            pad(3, vec![(PLASMOIDS, 10_000)]),
+            pad(4, vec![(WATER, 10_000)]),
+        ];
+        let routes = vec![route(3, 1, PLASMOIDS)];
+        let a = assess(&colony(pins, routes, NOW - 600), &data, &defaults(), NOW);
+        assert_eq!(a.inputs_left, Some(0));
+        assert_eq!(a.level, Level::Attention);
+    }
+
+    #[test]
+    fn factories_feed_each_other_before_the_pad() {
+        let data = sample();
+        // An extractor feeds two basic Water factories through storage 5;
+        // the Water goes to the Superconductor factory first, the rest to
+        // the launchpad.
+        let viewed = NOW - 2 * 3600;
+        let pins = vec![
+            ecu(1, NOW + 5 * 86_400),
+            factory(2, BASIC, 121, viewed - 1800),
+            factory(3, BASIC, 121, viewed - 1800),
+            factory(4, ADVANCED, 65, viewed - 3600),
+            pad(6, vec![(PLASMOIDS, 1000)]),
+            Pin {
+                pin_id: 5,
+                type_id: 2562,
+                ..Pin::default()
+            },
+        ];
+        let routes = vec![
+            route(1, 5, AQUEOUS),
+            route(5, 2, AQUEOUS),
+            route(5, 3, AQUEOUS),
+            route(2, 4, WATER),
+            route(3, 4, WATER),
+            route(2, 6, WATER),
+            route(3, 6, WATER),
+            route(6, 4, PLASMOIDS),
+            route(4, 6, 9838),
+        ];
+        let a = assess(&colony(pins, routes, viewed), &data, &defaults(), NOW);
+        assert_eq!(a.inputs, vec![PLASMOIDS]);
+        // At the view all factories are idle and the advanced one takes
+        // 40 Plasmoids. Extractor cycles end 30, 60, 90 and 120 min later:
+        // - 30 min: both basic factories take 3,000 Aqueous and start.
+        // - 60 min: their 2 x 20 Water go to the advanced one, which starts.
+        // - 90 min: 40 Water again fill the advanced one's buffer.
+        // - 120 min: its buffer is full, so this Water (40) goes to the
+        //   pad, the advanced cycle ends (5 Superconductors to the pad)
+        //   and it takes 40 more Plasmoids.
+        let pad = &a.launchpads[0];
+        let expected = 5.0 * 0.75 + 40.0 * 0.19 - 80.0 * 0.19;
+        assert!(
+            (pad.added_m3 - expected).abs() < 1e-6,
+            "added {}",
+            pad.added_m3
+        );
     }
 
     #[test]

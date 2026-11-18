@@ -16,6 +16,7 @@
 
 pub mod config;
 pub mod data;
+pub mod sim;
 pub mod status;
 mod ui;
 pub mod worker;
