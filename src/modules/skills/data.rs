@@ -8,10 +8,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::modules::finance::data::parse_esi_date;
 
-/// Skill points a rank 1 skill needs for each level (index 1 to 5). A
-/// skill of rank N needs N times as many.
-pub const SP_PER_LEVEL: [i64; 6] = [0, 250, 1_415, 8_000, 45_255, 256_000];
-
 /// The most skills a training queue can hold.
 pub const QUEUE_MAX: usize = 150;
 
@@ -23,8 +19,21 @@ pub const ATTR_PERCEPTION: i64 = 167;
 pub const ATTR_WILLPOWER: i64 = 168;
 
 /// The skill points a skill of `rank` needs to reach `level`.
+///
+/// EVE uses 250 * rank * sqrt(32)^(level - 1), rounded up. For levels 1, 3
+/// and 5 that is a whole number; for levels 2 and 4 the rounding happens
+/// after multiplying by the rank, so rank 9 level 4 is 407,294 SP and not
+/// 9 * 45,255 = 407,295.
 pub fn sp_for_level(rank: i64, level: i64) -> i64 {
-    SP_PER_LEVEL[level.clamp(0, 5) as usize] * rank.max(1)
+    let rank = rank.max(1);
+    match level.clamp(0, 5) {
+        0 => 0,
+        1 => 250 * rank,
+        2 => (250.0 * rank as f64 * 32f64.sqrt()).ceil() as i64,
+        3 => 8_000 * rank,
+        4 => (8_000.0 * rank as f64 * 32f64.sqrt()).ceil() as i64,
+        _ => 256_000 * rank,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -544,6 +553,19 @@ pub fn roman(level: i64) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn level_sp_rounds_like_eve() {
+        // Rank 1 table.
+        let rank1: Vec<i64> = (0..=5).map(|l| sp_for_level(1, l)).collect();
+        assert_eq!(rank1, vec![0, 250, 1_415, 8_000, 45_255, 256_000]);
+        // Values from the in-game character sheet (Kevin, 2026-11-18).
+        assert_eq!(sp_for_level(9, 4), 407_294);
+        assert_eq!(sp_for_level(11, 4), 497_804);
+        assert_eq!(sp_for_level(6, 4), 271_530);
+        assert_eq!(sp_for_level(3, 2), 4_243);
+        assert_eq!(sp_for_level(16, 5), 4_096_000);
+    }
+
     use super::*;
 
     const T0: i64 = 1_794_960_000; // 2026-11-18 ...

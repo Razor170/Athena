@@ -403,6 +403,10 @@ pub fn entry_sp(data: &StaticData, entry: PlanEntry, standing: &Standing) -> i64
     let Some(skill) = data.skill(entry.skill_id) else {
         return 0;
     };
+    // A level ESI reports as trained needs nothing more, whatever the SP say.
+    if standing.level(entry.skill_id) >= entry.level {
+        return 0;
+    }
     let level = i64::from(entry.level);
     let end = sp_for_level(skill.rank, level);
     let start = sp_for_level(skill.rank, level - 1).max(standing.sp(entry.skill_id));
