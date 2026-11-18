@@ -353,6 +353,60 @@ pub fn queue_now(
     }
 }
 
+/// Skill points one Large Skill Injector gives a character with
+/// `total_sp`. A small injector gives a fifth of it.
+pub fn large_injector_sp(total_sp: i64) -> i64 {
+    match total_sp {
+        ..5_000_000 => 500_000,
+        5_000_000..50_000_000 => 400_000,
+        50_000_000..80_000_000 => 300_000,
+        _ => 150_000,
+    }
+}
+
+/// How many injectors would finish a queue now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Injectors {
+    pub large: u32,
+    pub small: u32,
+    /// Skill points still missing after the unallocated SP.
+    pub missing_sp: i64,
+}
+
+/// Injectors needed for `needed_sp` more skill points, after using up
+/// `unallocated_sp`. Each injector counts at the total SP the character
+/// has when it's used, so crossing 5m, 50m or 80m SP is handled. Large
+/// ones first while a whole one fits, then small ones; five small ones are
+/// shown as one large.
+pub fn injectors_needed(total_sp: i64, unallocated_sp: i64, needed_sp: i64) -> Injectors {
+    let missing_sp = (needed_sp - unallocated_sp).max(0);
+    let mut missing = missing_sp;
+    let mut sp = total_sp;
+    let mut large = 0;
+    while missing >= large_injector_sp(sp) {
+        let gain = large_injector_sp(sp);
+        missing -= gain;
+        sp += gain;
+        large += 1;
+    }
+    let mut small = 0;
+    while missing > 0 {
+        let gain = large_injector_sp(sp) / 5;
+        missing -= gain;
+        sp += gain;
+        small += 1;
+    }
+    if small >= 5 {
+        large += 1;
+        small = 0;
+    }
+    Injectors {
+        large,
+        small,
+        missing_sp,
+    }
+}
+
 /// "12d 18h 28m", "4h 03m", "12m": a duration for the views. Days drop
 /// the minutes from 10 days on.
 pub fn duration_text(seconds: i64) -> String {
@@ -505,6 +559,23 @@ mod tests {
             ..data
         };
         assert_eq!(queue_now(&data, T0, info).seconds_left, None);
+    }
+
+    #[test]
+    fn injectors_count_at_the_sp_of_the_moment() {
+        // Unallocated SP covers it.
+        let none = injectors_needed(10_000_000, 500_000, 400_000);
+        assert_eq!((none.large, none.small, none.missing_sp), (0, 0, 0));
+        // 92.5m SP: 150k per large, 30k per small.
+        let r = injectors_needed(92_500_000, 0, 560_000);
+        assert_eq!((r.large, r.small), (3, 4));
+        // Five small ones become one large.
+        let r = injectors_needed(124_800_000, 355_000, 497_000);
+        assert_eq!((r.large, r.small), (1, 0));
+        assert_eq!(r.missing_sp, 142_000);
+        // Crossing 5m SP: the first gives 500k, the next 400k.
+        let r = injectors_needed(4_900_000, 0, 900_000);
+        assert_eq!((r.large, r.small), (2, 0));
     }
 
     #[test]
