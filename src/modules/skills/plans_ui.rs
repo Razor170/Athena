@@ -771,14 +771,15 @@ fn catalogue(module: &mut Skills, ui: &mut egui::Ui, data: &StaticData, check: &
         });
         if let Some((skill_id, level)) = click {
             let in_plan = plans::planned_level(&module.plans.editor.plan, skill_id);
-            let standing = &check.standing;
             if level <= in_plan {
                 edit(&mut module.plans, |plan| {
                     plans::remove_from(plan, data, skill_id, level)
                 });
             } else {
                 edit(&mut module.plans, |plan| {
-                    plans::add_with_prereqs(plan, data, skill_id, level, &|id| standing.level(id))
+                    // Plans are shared, so the full prerequisite chain goes in even when the
+                    // picked character already has it (trained rows are marked, not hidden).
+                    plans::add_with_prereqs(plan, data, skill_id, level, &|_| 0)
                 });
             }
         }
@@ -1006,9 +1007,9 @@ fn add_box(module: &mut Skills, ui: &mut egui::Ui, data: &StaticData, check: &Ch
             }
         });
     if let Some((id, level)) = add {
-        let standing = &check.standing;
+        // Full chain, as in the catalogue: the plan is shared by all characters.
         edit(&mut module.plans, |plan| {
-            plans::add_with_prereqs(plan, data, id, level, &|s| standing.level(s))
+            plans::add_with_prereqs(plan, data, id, level, &|_| 0)
         });
         module.plans.search.clear();
     }
