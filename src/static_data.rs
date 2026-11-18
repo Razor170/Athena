@@ -27,7 +27,7 @@ use crate::universe::Universe;
 pub const FILE_NAME: &str = "static.sqlite";
 
 /// The `schema_version` this code can read. Must match the xtask.
-const SCHEMA_VERSION: &str = "10";
+const SCHEMA_VERSION: &str = "11";
 
 /// What kind of thing an item is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -817,7 +817,28 @@ pub mod tests {
             CREATE TABLE booster_duration_bonuses (type_id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL, percent REAL NOT NULL);
 
-            INSERT INTO meta VALUES ('schema_version', '10'), ('sde_build', '3670638');
+            CREATE TABLE types (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                group_id INTEGER NOT NULL, volume REAL NOT NULL, packaged_volume REAL NOT NULL,
+                market INTEGER NOT NULL);
+            CREATE TABLE type_groups (group_id INTEGER PRIMARY KEY, category_id INTEGER NOT NULL,
+                name TEXT NOT NULL, published INTEGER NOT NULL);
+            CREATE TABLE type_categories (category_id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+            CREATE TABLE stations (station_id INTEGER PRIMARY KEY, system_id INTEGER NOT NULL,
+                name TEXT NOT NULL);
+            INSERT INTO types VALUES
+                (34, 'Tritanium', 18, 0.01, 0.01, 1),
+                (587, 'Rifter', 25, 27289.0, 2500.0, 1),
+                (23757, 'Archon', 547, 13950000.0, 1300000.0, 1),
+                (2185, 'Hammerhead II', 100, 10.0, 10.0, 1),
+                (3829, 'Medium Secure Container', 340, 33.0, 33.0, 1);
+            INSERT INTO type_groups VALUES (18, 4, 'Mineral', 1), (25, 6, 'Frigate', 1),
+                (547, 6, 'Carrier', 1), (100, 18, 'Combat Drone', 1),
+                (340, 2, 'Secure Cargo Container', 1), (99, 6, 'Asteroid Pirate Carrier', 0);
+            INSERT INTO type_categories VALUES (2, 'Celestial'), (4, 'Material'), (6, 'Ship'),
+                (18, 'Drone');
+            INSERT INTO stations VALUES
+                (60003760, 30000142, 'Jita IV - Moon 4 - Caldari Navy Assembly Plant');
+            INSERT INTO meta VALUES ('schema_version', '11'), ('sde_build', '3670638');
             INSERT INTO skill_groups VALUES (255, 'Gunnery'), (257, 'Spaceship Command'),
                 (1218, 'Resource Processing');
             INSERT INTO skill_types VALUES

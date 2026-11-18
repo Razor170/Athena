@@ -388,14 +388,15 @@ fn wait(stop: &Receiver<()>, secs: u64) -> bool {
 }
 
 /// What one page of orders gave last time, kept with its ETag.
-struct CachedPage {
+pub struct CachedPage {
     etag: String,
     best: MarketPrice,
     pages: u32,
 }
 
-/// Fetches the best Jita prices for every type, one type (and page) at a time.
-fn fetch_all(
+/// Fetches the best Jita prices for every type, one type (and page) at a
+/// time. The Assets module uses it too, for its Jita price option.
+pub fn fetch_all(
     client: &mut EsiClient,
     type_ids: &[i64],
     etags: &mut HashMap<String, CachedPage>,
