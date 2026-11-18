@@ -59,6 +59,8 @@ pub struct Skills {
     loaded: bool,
     /// Character id -> their skills.
     skills: BTreeMap<u64, CharacterSkills>,
+    /// Jita prices of skill injectors, for the queue footer.
+    injector_prices: Option<worker::InjectorPrices>,
     /// When ESI was last asked.
     checked: Option<i64>,
     /// Problems per character, shown on their card.
@@ -99,6 +101,7 @@ impl Skills {
             static_data: static_data.data.clone(),
             loaded: false,
             skills: BTreeMap::new(),
+            injector_prices: None,
             checked: None,
             character_problems: HashMap::new(),
             problems,
@@ -210,6 +213,9 @@ impl Skills {
                 for (id, skills) in cache.characters {
                     self.skills.entry(id).or_insert(skills);
                 }
+                if self.injector_prices.is_none() {
+                    self.injector_prices = cache.injector_prices;
+                }
             }
             Event::Skills {
                 character_id,
@@ -229,6 +235,7 @@ impl Skills {
                     self.character_problems.remove(&character_id);
                 }
             },
+            Event::Prices(prices) => self.injector_prices = Some(prices),
             Event::Problem(text) => self.problems.push(text),
         }
     }

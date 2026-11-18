@@ -119,7 +119,8 @@ pub const SECTIONS: &[Section] = &[
              an Alpha clone. The search box looks through all groups, **Show not injected** \
              also lists skills you don't have.",
             "Under the queue: the total training time, when it ends, and how many large and \
-             small skill injectors would finish it right now (unallocated SP counts first).",
+             small skill injectors would finish it right now (unallocated SP counts first), \
+             and what they cost at the lowest Jita sell price.",
         ],
         note: "Settings: the \"ends soon\" hours, the badge, and how often ESI is asked \
                (every 15 minutes by default; [Refresh] asks now).",
