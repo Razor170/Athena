@@ -82,6 +82,15 @@ pub struct UiState {
     pub group: Option<i64>,
     pub search: String,
     pub show_not_injected: bool,
+    /// The Overview also shows hidden characters, dimmed.
+    pub show_hidden: bool,
+}
+
+/// What a click on an Overview card asks for.
+enum CardAction {
+    Open,
+    /// Hide (true) or unhide (false) from the right-click menu.
+    Hide(bool),
 }
 
 fn small(text: impl Into<String>) -> RichText {
@@ -189,24 +198,50 @@ fn overview(module: &mut Skills, ui: &mut egui::Ui, now: i64) {
                 }
             }
         }
+        // Only there while something is hidden. With nothing hidden it
+        // switches off, so the next character you hide disappears.
+        let hidden = module.hidden_count();
+        if hidden == 0 {
+            module.ui.show_hidden = false;
+        }
+        if hidden > 0 {
+            ui.add_space(10.0);
+            let on = module.ui.show_hidden;
+            if ui
+                .add(egui::Button::selectable(
+                    on,
+                    small(format!("Show hidden ({hidden})")),
+                ))
+                .on_hover_text("Show hidden characters too, dimmed, so you can unhide them")
+                .clicked()
+            {
+                module.ui.show_hidden = !on;
+            }
+        }
     });
     if changed {
         module.save_settings();
     }
 
     let shown: Vec<(u64, String, Vec<String>)> = module
-        .shown_characters(now)
+        .shown_characters(now, module.ui.show_hidden)
         .into_iter()
         .map(|c| (c.id, c.name.clone(), c.tags.clone()))
         .collect();
+    // Hidden characters never count, even while "Show hidden" is on.
     let count = |which: Status| {
         shown
             .iter()
-            .filter(|(id, _, _)| module.training(*id, now) == which)
+            .filter(|(id, _, _)| !module.is_hidden(*id) && module.training(*id, now) == which)
             .count()
     };
+    let visible = shown
+        .iter()
+        .filter(|(id, _, _)| !module.is_hidden(*id))
+        .count();
+    let hidden = module.hidden_count();
     ui.horizontal_wrapped(|ui| {
-        ui.label(small(format!("{} characters", shown.len())).color(DIM));
+        ui.label(small(format!("{visible} characters")).color(DIM));
         dot_label(ui, GREEN, format!("{} training", count(Status::Training)));
         dot_label(
             ui,
@@ -218,9 +253,13 @@ fn overview(module: &mut Skills, ui: &mut egui::Ui, now: i64) {
             ),
         );
         dot_label(ui, RED, format!("{} not training", count(Status::Stopped)));
+        if hidden > 0 {
+            ui.label(small(format!("· {hidden} hidden")).color(FAINT));
+        }
     });
 
     let mut open = None;
+    let mut hide = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -236,19 +275,30 @@ fn overview(module: &mut Skills, ui: &mut egui::Ui, now: i64) {
                 for (index, (id, name, tags)) in shown.iter().enumerate() {
                     let col = &mut cols[index % columns];
                     col.spacing_mut().item_spacing = Vec2::new(6.0, GAP);
-                    if character_card(module, col, *id, name, tags, now) {
-                        open = Some(*id);
+                    match character_card(module, col, *id, name, tags, now) {
+                        Some(CardAction::Open) => open = Some(*id),
+                        Some(CardAction::Hide(on)) => hide = Some((*id, on)),
+                        None => {}
                     }
                 }
             });
         });
+    if let Some((id, on)) = hide {
+        module.set_hidden(id, on);
+    }
     if let Some(id) = open {
-        module.ui.character = Some(id);
-        module.ui.view = View::Character;
+        open_character(module, id);
     }
 }
 
-/// One Overview card. Returns true when it was clicked.
+fn open_character(module: &mut Skills, id: u64) {
+    module.ui.character = Some(id);
+    module.ui.view = View::Character;
+}
+
+/// One Overview card. Returns what a click or the right-click menu asks
+/// for. A hidden card (only drawn with "Show hidden" on) is dimmed and
+/// has no warning colour.
 fn character_card(
     module: &Skills,
     ui: &mut egui::Ui,
@@ -256,12 +306,14 @@ fn character_card(
     name: &str,
     tags: &[String],
     now: i64,
-) -> bool {
+) -> Option<CardAction> {
+    let hidden = module.is_hidden(id);
     let training = module.training(id, now);
     let queue = module.queue_now(id, now);
     let skills = module.skills.get(&id);
     let problem = module.character_problems.get(&id);
     let border = match training {
+        _ if hidden => FAINT,
         Status::Stopped => CARD_RED,
         Status::EndsSoon => CARD_YELLOW,
         Status::Training => CARD_BORDER,
@@ -274,10 +326,18 @@ fn character_card(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+            if hidden {
+                ui.set_opacity(0.5);
+            }
             // Line 1: name, SP, tags, status. Tags that don't fit become
             // a "+N" chip, so the card never gets wider than its column.
             ui.horizontal(|ui| {
-                let (status, status_color) = status_text(training, queue.as_ref(), problem, now);
+                let (mut status, mut status_color) =
+                    status_text(training, queue.as_ref(), problem, now);
+                if hidden {
+                    status = format!("Hidden · {status}");
+                    status_color = DIM;
+                }
                 let status_width = text_width(ui, &status, 12.0) + 8.0;
                 let name_room = (ui.available_width() - status_width - 70.0).max(60.0);
                 elided_label(ui, name, name_room, BRIGHT, 14.0);
@@ -403,10 +463,38 @@ fn character_card(
         ui.id().with(("skills-card", id)),
         Sense::click(),
     );
-    click
+    let mut action = None;
+    // Right-click menu. `context_menu` keeps the menu open across frames
+    // by itself; the closure runs only while it is open.
+    click.context_menu(|ui| {
+        if ui.button("Open in Character view").clicked() {
+            action = Some(CardAction::Open);
+            ui.close();
+        }
+        ui.separator();
+        let text = if hidden {
+            "Unhide"
+        } else {
+            "Hide from Overview"
+        };
+        if ui.button(text).clicked() {
+            action = Some(CardAction::Hide(!hidden));
+            ui.close();
+        }
+    });
+    let hint = if hidden {
+        "Open this character (right-click to unhide)"
+    } else {
+        "Open this character (right-click to hide)"
+    };
+    if click
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Open this character")
+        .on_hover_text(hint)
         .clicked()
+    {
+        action = Some(CardAction::Open);
+    }
+    action
 }
 
 /// "Login expired" or "ESI problem", short for a card.
@@ -1210,10 +1298,53 @@ fn settings_view(module: &mut Skills, ui: &mut egui::Ui) {
     if changed {
         module.save_settings();
     }
+    hidden_list(module, ui);
     if poll_changed {
         module
             .worker
             .send(Command::SetPollSecs(module.settings.poll_secs()));
+    }
+}
+
+/// "Hidden on Overview": one checkbox per character.
+fn hidden_list(module: &mut Skills, ui: &mut egui::Ui) {
+    if module.characters.is_empty() {
+        return;
+    }
+    ui.add_space(8.0);
+    let mut toggled = None;
+    egui::Frame::new()
+        .fill(CARD_FILL)
+        .stroke(Stroke::new(1.0, CARD_BORDER))
+        .corner_radius(CornerRadius::same(4))
+        .inner_margin(Margin::same(10))
+        .show(ui, |ui| {
+            ui.set_max_width(CARD_MAX_WIDTH);
+            ui.label(RichText::new("Hidden on Overview").strong().color(BRIGHT));
+            ui.label(
+                small(
+                    "Hidden characters get no red or yellow card and don't count in the \
+                     badge. Their skills stay visible in the Character tab.",
+                )
+                .color(DIM),
+            );
+            ui.add_space(4.0);
+            for c in &module.characters {
+                let mut on = module.is_hidden(c.id);
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut on, small(&c.name)).changed() {
+                        toggled = Some((c.id, on));
+                    }
+                    if !c.tags.is_empty() {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(small(c.tags.join(", ")).color(FAINT));
+                        });
+                    }
+                });
+            }
+        });
+    if let Some((id, on)) = toggled {
+        module.set_hidden(id, on);
     }
 }
 

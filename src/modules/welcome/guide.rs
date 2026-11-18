@@ -112,7 +112,8 @@ pub const SECTIONS: &[Section] = &[
              card to open the character.",
             "[Queue end], [Name] and [SP] sort the cards, tag chips show only characters \
              with that tag. The number on the Skills button counts the characters that \
-             aren't training.",
+             aren't training. Right-click a card to hide a character (no warning, not \
+             counted); [Show hidden] or the list in Settings brings it back.",
             "**Character** looks like EVE's skill window: the skill groups on top, the \
              picked group's skills below and the training queue on the right. White squares \
              are trained levels, blue ones are queued, grey ones are trained but limited by \
