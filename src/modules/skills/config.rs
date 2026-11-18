@@ -43,6 +43,9 @@ pub struct SkillsSettings {
     /// Characters hidden on the Overview, by id. They get no red or
     /// yellow card and don't count in the badge.
     pub hidden: BTreeSet<u64>,
+    /// Cerebral accelerators added to the skill plans' list (on top of
+    /// the default ones), by type id.
+    pub plan_accelerators: Vec<i64>,
 }
 
 impl Default for SkillsSettings {
@@ -56,6 +59,7 @@ impl Default for SkillsSettings {
             sort: SortBy::default(),
             tag: None,
             hidden: BTreeSet::new(),
+            plan_accelerators: Vec::new(),
         }
     }
 }

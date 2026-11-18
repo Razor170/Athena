@@ -27,7 +27,7 @@ use crate::universe::Universe;
 pub const FILE_NAME: &str = "static.sqlite";
 
 /// The `schema_version` this code can read. Must match the xtask.
-const SCHEMA_VERSION: &str = "10";
+const SCHEMA_VERSION: &str = "11";
 
 /// What kind of thing an item is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +166,19 @@ pub struct AttributeImplant {
     pub bonuses: [i64; 5],
 }
 
+/// A cerebral accelerator: a booster that raises attributes for a while.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Accelerator {
+    pub type_id: i64,
+    pub name: String,
+    /// Bonus to perception, memory, willpower, intelligence, charisma.
+    pub bonuses: [i64; 5],
+    /// How long it lasts before Biology and implants, in hours.
+    pub hours: f64,
+    /// The last moment it can be plugged in (unix seconds), 0 for never.
+    pub expires: i64,
+}
+
 /// A skill group, such as "Gunnery", with its skills sorted by name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillGroup {
@@ -214,6 +227,11 @@ pub struct StaticData {
     skill_by_name: HashMap<String, i64>,
     /// Implants that raise attributes, by type id.
     implants: HashMap<i64, AttributeImplant>,
+    /// Cerebral accelerators, sorted by name.
+    accelerators: Vec<Accelerator>,
+    /// Skills (per level) and implants that make boosters last longer:
+    /// type id -> (name, percent).
+    booster_duration_bonuses: HashMap<i64, (String, f64)>,
 }
 
 impl StaticData {
@@ -472,7 +490,62 @@ impl StaticData {
             let (id, implant) = row?;
             self.implants.insert(id, implant);
         }
+        let mut query = db.prepare(
+            "SELECT type_id, name, perception, memory, willpower, intelligence, charisma,
+                    hours, expires
+             FROM accelerators ORDER BY name",
+        )?;
+        let rows = query.query_map([], |row| {
+            Ok(Accelerator {
+                type_id: row.get(0)?,
+                name: row.get(1)?,
+                bonuses: [
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ],
+                hours: row.get(7)?,
+                expires: row.get(8)?,
+            })
+        })?;
+        for row in rows {
+            self.accelerators.push(row?);
+        }
+        let mut query =
+            db.prepare("SELECT type_id, name, percent FROM booster_duration_bonuses")?;
+        let rows = query.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, (row.get(1)?, row.get(2)?)))
+        })?;
+        for row in rows {
+            let (id, bonus) = row?;
+            self.booster_duration_bonuses.insert(id, bonus);
+        }
         Ok(())
+    }
+
+    /// Every cerebral accelerator, sorted by name.
+    pub fn accelerators(&self) -> &[Accelerator] {
+        &self.accelerators
+    }
+
+    /// A cerebral accelerator by type id.
+    pub fn accelerator(&self, type_id: i64) -> Option<&Accelerator> {
+        self.accelerators.iter().find(|a| a.type_id == type_id)
+    }
+
+    /// How much longer boosters last thanks to this skill (per level) or
+    /// implant, in percent. `None` for everything else.
+    pub fn booster_duration_bonus(&self, type_id: i64) -> Option<f64> {
+        self.booster_duration_bonuses.get(&type_id).map(|b| b.1)
+    }
+
+    /// The name of a skill or implant that makes boosters last longer.
+    pub fn booster_duration_name(&self, type_id: i64) -> Option<&str> {
+        self.booster_duration_bonuses
+            .get(&type_id)
+            .map(|b| b.0.as_str())
     }
 
     /// A skill by its name, any case ("mining barge").
@@ -737,6 +810,12 @@ pub mod tests {
             CREATE TABLE implant_attributes (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
                 perception INTEGER NOT NULL, memory INTEGER NOT NULL, willpower INTEGER NOT NULL,
                 intelligence INTEGER NOT NULL, charisma INTEGER NOT NULL);
+            CREATE TABLE accelerators (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                perception INTEGER NOT NULL, memory INTEGER NOT NULL, willpower INTEGER NOT NULL,
+                intelligence INTEGER NOT NULL, charisma INTEGER NOT NULL, hours REAL NOT NULL,
+                expires INTEGER NOT NULL);
+            CREATE TABLE booster_duration_bonuses (type_id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL, percent REAL NOT NULL);
 
             CREATE TABLE types (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
                 group_id INTEGER NOT NULL, volume REAL NOT NULL, packaged_volume REAL NOT NULL,
@@ -759,7 +838,7 @@ pub mod tests {
                 (18, 'Drone');
             INSERT INTO stations VALUES
                 (60003760, 30000142, 'Jita IV - Moon 4 - Caldari Navy Assembly Plant');
-            INSERT INTO meta VALUES ('schema_version', '10'), ('sde_build', '3670638');
+            INSERT INTO meta VALUES ('schema_version', '11'), ('sde_build', '3670638');
             INSERT INTO skill_groups VALUES (255, 'Gunnery'), (257, 'Spaceship Command'),
                 (1218, 'Resource Processing');
             INSERT INTO skill_types VALUES
@@ -775,6 +854,11 @@ pub mod tests {
             INSERT INTO implant_attributes VALUES
                 (9899, 'Ocular Filter - Basic', 3, 0, 0, 0, 0),
                 (10209, 'Memory Augmentation - Improved', 0, 5, 0, 0, 0);
+            INSERT INTO accelerators VALUES
+                (72242, 'Expert ''Boost'' Cerebral Accelerator', 10, 10, 10, 10, 10, 240.0, 0),
+                (72238, 'Basic ''Boost'' Cerebral Accelerator', 2, 2, 2, 2, 2, 48.0, 0);
+            INSERT INTO booster_duration_bonuses VALUES (3405, 'Biology', 20.0),
+                (27148, 'Eifyr and Co. ''Alchemist'' Biology BY-810', 10.0);
             INSERT INTO remote_modules VALUES
                 (12102, 'Large Remote Capacitor Transmitter II', 'cap'),
                 (12221, 'Medium Remote Capacitor Transmitter II', 'cap'),
@@ -911,6 +995,21 @@ pub mod tests {
             [0, 5, 0, 0, 0]
         );
         assert!(data.attribute_implant(3300).is_none());
+        let names: Vec<&str> = data
+            .accelerators()
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Basic 'Boost' Cerebral Accelerator",
+                "Expert 'Boost' Cerebral Accelerator"
+            ]
+        );
+        assert_eq!(data.accelerator(72242).unwrap().hours, 240.0);
+        assert_eq!(data.booster_duration_bonus(3405), Some(20.0));
+        assert_eq!(data.booster_duration_bonus(3300), None);
     }
 
     #[test]

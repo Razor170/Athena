@@ -19,7 +19,8 @@ use eframe::egui::{
 use super::Skills;
 use super::data::{duration_text, roman};
 use super::plans::{
-    self, ATTRIBUTE_NAMES, AttributeSet, Draft, FRESH_ATTRIBUTES, Plan, PlansFile, Standing,
+    self, ATTRIBUTE_NAMES, AttributeSet, BoosterRun, Draft, FRESH_ATTRIBUTES, Plan, PlansFile,
+    Standing,
 };
 use super::ui::{
     BRIGHT, CARD_BORDER, CARD_MAX_WIDTH, CURRENT_FILL, DIM, FAINT, GAP, GREEN, GROUP_EDGE,
@@ -36,6 +37,10 @@ const MAX_IMPORT_BYTES: usize = 256 * 1024;
 const NOTE_SECS: i64 = 6;
 /// The folder (in the data folder) exported plans go to.
 const EXPORT_FOLDER: &str = "skill plans";
+/// Cerebral accelerators: their bonus and times.
+const ORANGE: Color32 = Color32::from_rgb(0xf0, 0xa0, 0x60);
+/// The Biology skill (boosters last longer), for the Check column's note.
+const BIOLOGY: i64 = 3405;
 
 /// The implant set the plan is checked with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +87,9 @@ enum Popup {
     Unsaved {
         then: Pending,
     },
+    Accelerators {
+        search: String,
+    },
 }
 
 /// The open plan.
@@ -104,6 +112,9 @@ pub struct PlansState {
     /// The character to check against (`None`: from scratch).
     character: Option<u64>,
     implants: ImplantChoice,
+    /// The cerebral accelerator used for the whole plan, by type id. Not
+    /// saved: Athena can't see a running one, so it starts at none.
+    accelerator: Option<i64>,
     use_remap: bool,
     popup: Option<Popup>,
     /// A short message and until when it shows.
@@ -140,6 +151,7 @@ impl PlansState {
             search: String::new(),
             character: None,
             implants: ImplantChoice::Preset(0),
+            accelerator: None,
             use_remap: false,
             popup: None,
             note: None,
@@ -593,6 +605,8 @@ struct ImplantRow {
     title: String,
     detail: String,
     bonuses: AttributeSet,
+    /// The implant type ids (for the BY-805/BY-810 booster bonus).
+    implants: Vec<i64>,
 }
 
 struct Check {
@@ -601,6 +615,13 @@ struct Check {
     base: AttributeSet,
     rows: Vec<ImplantRow>,
     bonuses: AttributeSet,
+    /// The accelerators the list shows, by type id.
+    accelerators: Vec<i64>,
+    /// The picked accelerator and its bonus (zeros without one).
+    accelerator: Option<i64>,
+    accel_bonuses: AttributeSet,
+    /// How much longer boosters last (Biology, BY implants), as a factor.
+    booster_factor: f64,
     /// The best remap (base attributes) and the plan time with it.
     remap: (AttributeSet, f64),
     /// The attributes the times use: base (or remap) plus implants.
@@ -643,6 +664,7 @@ impl Check {
                     format!("+{k} to all five attributes")
                 },
                 bonuses: [k; 5],
+                implants: Vec::new(),
             })
             .collect();
         if let Some(clones) = clones {
@@ -651,6 +673,7 @@ impl Check {
                 title: "Active clone".to_string(),
                 detail: plans::bonuses_text(&active),
                 bonuses: active,
+                implants: clones.active_implants.clone(),
             });
             for jump in &clones.jump_clones {
                 let bonuses = plans::implant_bonuses(data, &jump.implants);
@@ -667,6 +690,7 @@ impl Check {
                     },
                     detail: format!("{place} · {}", plans::bonuses_text(&bonuses)),
                     bonuses,
+                    implants: jump.implants.clone(),
                 });
             }
         }
@@ -674,38 +698,122 @@ impl Check {
         if !rows.iter().any(|r| r.choice == state.implants) {
             state.implants = ImplantChoice::Preset(0);
         }
-        let bonuses = rows
-            .iter()
-            .find(|r| r.choice == state.implants)
-            .map_or([0; 5], |r| r.bonuses);
-        let remap = plans::best_remap(data, &state.editor.plan, &standing, &bonuses);
+        let picked = rows.iter().find(|r| r.choice == state.implants);
+        let bonuses = picked.map_or([0; 5], |r| r.bonuses);
+        let booster_factor =
+            plans::booster_factor(data, &standing, picked.map_or(&[][..], |r| &r.implants));
+        // The default accelerators, then the ones added from the static data.
+        let mut accelerators: Vec<i64> = plans::DEFAULT_ACCELERATORS.to_vec();
+        for id in &module.settings.plan_accelerators {
+            if !accelerators.contains(id) {
+                accelerators.push(*id);
+            }
+        }
+        accelerators.retain(|id| data.accelerator(*id).is_some());
+        if state
+            .accelerator
+            .is_some_and(|id| !accelerators.contains(&id))
+        {
+            state.accelerator = None;
+        }
+        let accel_bonuses = state
+            .accelerator
+            .and_then(|id| data.accelerator(id))
+            .map_or([0; 5], |a| a.bonuses);
+        let all_bonuses: AttributeSet = std::array::from_fn(|i| bonuses[i] + accel_bonuses[i]);
+        let remap = plans::best_remap(data, &state.editor.plan, &standing, &all_bonuses);
         let has_character = state.character.is_some();
         let from = if state.use_remap && has_character {
             remap.0
         } else {
             base
         };
-        let attributes = std::array::from_fn(|i| from[i] + bonuses[i]);
+        let attributes = std::array::from_fn(|i| from[i] + all_bonuses[i]);
         Check {
             standing,
             base,
             rows,
             bonuses,
+            accelerators,
+            accelerator: state.accelerator,
+            accel_bonuses,
+            booster_factor,
             remap,
             attributes,
             has_character,
         }
     }
 
-    /// The attributes for one implant set (with the remap if it's shown).
+    /// The attributes for one implant set (with the remap if it's shown,
+    /// and the picked accelerator).
     fn attributes_with(&self, bonuses: &AttributeSet, use_remap: bool) -> AttributeSet {
+        self.attributes_for(bonuses, &self.accel_bonuses, use_remap)
+    }
+
+    /// The attributes for one implant set and one accelerator's bonus.
+    fn attributes_for(
+        &self,
+        bonuses: &AttributeSet,
+        accel: &AttributeSet,
+        use_remap: bool,
+    ) -> AttributeSet {
         let from = if use_remap && self.has_character {
             self.remap.0
         } else {
             self.base
         };
-        std::array::from_fn(|i| from[i] + bonuses[i])
+        std::array::from_fn(|i| from[i] + bonuses[i] + accel[i])
     }
+
+    /// How long one accelerator lasts for this character and clone.
+    fn accel_secs(&self, accelerator: &crate::static_data::Accelerator) -> f64 {
+        accelerator.hours * 3600.0 * self.booster_factor
+    }
+
+    /// The picked accelerator, used back to back for `plan_secs`.
+    fn accel_run(&self, data: &StaticData, plan_secs: f64) -> Option<(String, BoosterRun)> {
+        let accelerator = data.accelerator(self.accelerator?)?;
+        let run = plans::booster_run(plan_secs, self.accel_secs(accelerator));
+        Some((short_accel_name(&accelerator.name), run))
+    }
+}
+
+/// "Specialist 'Boost' Cerebral Accelerator" -> "Specialist 'Boost'".
+fn short_accel_name(name: &str) -> String {
+    name.trim_end_matches(" Cerebral Accelerator")
+        .trim_end_matches(" Accelerator")
+        .to_string()
+}
+
+/// "+8 all", or each attribute when they differ.
+fn accel_bonus_text(bonuses: &AttributeSet) -> String {
+    match bonuses[0] {
+        all if bonuses.iter().all(|&b| b == all) => format!("+{all} all"),
+        _ => plans::bonuses_text(bonuses),
+    }
+}
+
+/// A booster duration: "12d", "15d 20h", "6h 47m".
+fn lasts_text(secs: f64) -> String {
+    let secs = secs.round() as i64;
+    let (days, hours) = (secs / 86_400, secs % 86_400 / 3600);
+    match (days, hours) {
+        (0, _) => duration_text(secs),
+        (_, 0) => format!("{days}d"),
+        _ => format!("{days}d {hours}h"),
+    }
+}
+
+/// "×5, 9d 14h left on the last" ("" without a plan).
+fn run_text(run: &BoosterRun) -> String {
+    if run.count == 0 {
+        return String::new();
+    }
+    format!(
+        "×{}, {} left on the last",
+        run.count,
+        lasts_text(run.left_secs)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1227,6 +1335,14 @@ fn entry_list(module: &mut Skills, ui: &mut egui::Ui, data: &StaticData, check: 
         if module.plans.use_remap && check.has_character {
             ui.label(small("· with remap").color(GREEN));
         }
+        if let Some((name, run)) = check.accel_run(data, total)
+            && run.count > 0
+        {
+            ui.label(small(format!("· with {}× {name}", run.count)).color(ORANGE));
+            ui.label(
+                small(format!("· {} left on the last", lasts_text(run.left_secs))).color(ORANGE),
+            );
+        }
     });
 }
 
@@ -1337,6 +1453,8 @@ fn check_panel(module: &mut Skills, ui: &mut egui::Ui, data: &StaticData, check:
         line(ui);
         implant_sets(module, ui, data, check);
         line(ui);
+        accelerator_list(module, ui, data, check);
+        line(ui);
         attribute_table(module, ui, data, check);
         remap_box(module, ui, data, check, now);
     });
@@ -1375,43 +1493,20 @@ fn implant_sets(module: &mut Skills, ui: &mut egui::Ui, data: &StaticData, check
             section(ui, &format!("{name}'s clones"));
         }
         let selected = row.choice == module.plans.implants;
-        let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
-        let painter = ui.painter_at(rect);
-        if selected {
-            painter.rect_filled(rect, 3.0, GROUP_PICKED);
-        } else if response.hovered() {
-            painter.rect_filled(rect, 3.0, CURRENT_FILL);
-        }
-        let dot = egui::pos2(rect.left() + 9.0, rect.center().y);
-        if selected {
-            painter.circle_filled(dot, 4.5, QUEUE_BLUE);
-        } else {
-            painter.circle_stroke(dot, 4.5, Stroke::new(1.0, DIM));
-        }
         let secs = times[index];
         let best = (secs - fastest).abs() < 1.0 && !plan.entries.is_empty();
-        let time = painter.text(
-            rect.right_center() - Vec2::new(6.0, 0.0),
-            egui::Align2::RIGHT_CENTER,
-            duration_text(secs.round() as i64),
-            FontId::proportional(12.0),
-            if best { GREEN } else { DIM },
-        );
-        let width = time.left() - rect.left() - 30.0;
-        let title = one_line(&painter, &row.title, 12.5, TEXT, width);
-        painter.galley(
-            egui::pos2(rect.left() + 20.0, rect.top() + 2.0),
-            title,
-            TEXT,
-        );
-        let detail = one_line(&painter, &row.detail, 11.0, FAINT, width);
-        painter.galley(
-            egui::pos2(rect.left() + 20.0, rect.top() + 16.0),
-            detail,
-            FAINT,
-        );
-        let response = response.on_hover_text(&row.detail);
+        let response = choice_row(
+            ui,
+            selected,
+            &row.title,
+            &[(row.detail.clone(), FAINT)],
+            (
+                duration_text(secs.round() as i64),
+                if best { GREEN } else { DIM },
+            ),
+            None,
+        )
+        .on_hover_text(&row.detail);
         if response.clicked() {
             picked = Some(row.choice);
         }
@@ -1430,14 +1525,215 @@ fn implant_sets(module: &mut Skills, ui: &mut egui::Ui, data: &StaticData, check
     }
 }
 
+/// One radio row of the Check column: a dot, a title with a detail line
+/// under it (in parts, each with its colour), and a time on the right with
+/// an optional second line.
+fn choice_row(
+    ui: &mut egui::Ui,
+    selected: bool,
+    title: &str,
+    detail: &[(String, Color32)],
+    time: (String, Color32),
+    under: Option<(String, Color32)>,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+    let painter = ui.painter_at(rect);
+    if selected {
+        painter.rect_filled(rect, 3.0, GROUP_PICKED);
+    } else if response.hovered() {
+        painter.rect_filled(rect, 3.0, CURRENT_FILL);
+    }
+    let dot = egui::pos2(rect.left() + 9.0, rect.center().y);
+    if selected {
+        painter.circle_filled(dot, 4.5, QUEUE_BLUE);
+    } else {
+        painter.circle_stroke(dot, 4.5, Stroke::new(1.0, DIM));
+    }
+    let right = rect.right() - 6.0;
+    let mut left_edge = right;
+    match &under {
+        Some((text, color)) => {
+            let top = painter.text(
+                egui::pos2(right, rect.top() + 2.0),
+                egui::Align2::RIGHT_TOP,
+                &time.0,
+                FontId::proportional(12.0),
+                time.1,
+            );
+            let bottom = painter.text(
+                egui::pos2(right, rect.top() + 16.0),
+                egui::Align2::RIGHT_TOP,
+                text,
+                FontId::proportional(11.0),
+                *color,
+            );
+            left_edge = left_edge.min(top.left()).min(bottom.left());
+        }
+        None => {
+            let shown = painter.text(
+                egui::pos2(right, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                &time.0,
+                FontId::proportional(12.0),
+                time.1,
+            );
+            left_edge = left_edge.min(shown.left());
+        }
+    }
+    let width = left_edge - rect.left() - 30.0;
+    let title = one_line(&painter, title, 12.5, TEXT, width);
+    painter.galley(
+        egui::pos2(rect.left() + 20.0, rect.top() + 2.0),
+        title,
+        TEXT,
+    );
+    // The detail parts, one after the other, cut at the time column.
+    let mut x = rect.left() + 20.0;
+    for (text, color) in detail {
+        let room = rect.left() + 20.0 + width - x;
+        if room < 12.0 {
+            break;
+        }
+        let galley = one_line(&painter, text, 11.0, *color, room);
+        let w = galley.size().x;
+        painter.galley(egui::pos2(x, rect.top() + 16.0), galley, *color);
+        x += w;
+    }
+    response
+}
+
+/// The accelerators, each with the plan time when used back to back.
+fn accelerator_list(module: &mut Skills, ui: &mut egui::Ui, data: &StaticData, check: &Check) {
+    let plan = &module.plans.editor.plan;
+    let use_remap = module.plans.use_remap;
+    let time_with = |accel: &AttributeSet| {
+        plans::plan_secs(
+            data,
+            plan,
+            &check.standing,
+            &check.attributes_for(&check.bonuses, accel, use_remap),
+        )
+    };
+    let none_secs = time_with(&[0; 5]);
+    let rows: Vec<(&crate::static_data::Accelerator, f64)> = check
+        .accelerators
+        .iter()
+        .filter_map(|id| data.accelerator(*id))
+        .map(|a| (a, time_with(&a.bonuses)))
+        .collect();
+    let fastest = rows.iter().map(|r| r.1).fold(none_secs, f64::min);
+    let has_plan = !plan.entries.is_empty();
+    let is_best = |secs: f64| has_plan && (secs - fastest).abs() < 1.0;
+    section(ui, "Accelerator");
+    // Where the durations come from.
+    let biology = check.standing.level(BIOLOGY);
+    let mut parts = vec![format!(
+        "Biology {} +{}%",
+        roman(i64::from(biology)),
+        u32::from(biology) * 20
+    )];
+    if let Some(row) = check
+        .rows
+        .iter()
+        .find(|r| r.choice == module.plans.implants)
+    {
+        for id in &row.implants {
+            if let Some(percent) = data.booster_duration_bonus(*id) {
+                // "Eifyr and Co. 'Alchemist' Biology BY-810" -> "BY-810".
+                let name = data
+                    .booster_duration_name(*id)
+                    .and_then(|n| n.rsplit(' ').next())
+                    .unwrap_or("implant");
+                parts.push(format!("{name} +{percent:.0}%"));
+            }
+        }
+    }
+    let note = if check.has_character {
+        format!("Durations include {}.", parts.join(", "))
+    } else {
+        "No character: durations without Biology.".to_string()
+    };
+    ui.label(small(note).color(DIM))
+        .on_hover_text("Biology makes boosters last 20% longer per level, Eifyr and Co. 'Alchemist' Biology BY-805/BY-810 implants 5%/10% more.");
+    let mut picked: Option<Option<i64>> = None;
+    let none = choice_row(
+        ui,
+        check.accelerator.is_none(),
+        "None",
+        &[("or one is running already".to_string(), FAINT)],
+        (
+            duration_text(none_secs.round() as i64),
+            if is_best(none_secs) { GREEN } else { DIM },
+        ),
+        None,
+    )
+    .on_hover_text("ESI can't tell which booster is running. If one is, its bonus is probably already in the character's attributes, so pick None.");
+    if none.clicked() {
+        picked = Some(None);
+    }
+    for (accel, secs) in &rows {
+        let one = check.accel_secs(accel);
+        let run = plans::booster_run(*secs, one);
+        let mut detail = vec![
+            (accel_bonus_text(&accel.bonuses), ORANGE),
+            (format!(" · lasts {}", lasts_text(one)), FAINT),
+        ];
+        if run.count > 0 {
+            detail.push((format!(" · {}", run_text(&run)), FAINT));
+        }
+        let saves = none_secs - secs;
+        let under = (has_plan && saves >= 60.0).then(|| {
+            (
+                format!("saves {}", duration_text(saves.round() as i64)),
+                GREEN,
+            )
+        });
+        let response = choice_row(
+            ui,
+            check.accelerator == Some(accel.type_id),
+            &accel.name,
+            &detail,
+            (
+                duration_text(secs.round() as i64),
+                if is_best(*secs) { GREEN } else { DIM },
+            ),
+            under,
+        )
+        .on_hover_text(format!(
+            "{}\nBase duration {}; used back to back for the whole plan.",
+            accel.name,
+            lasts_text(accel.hours * 3600.0)
+        ));
+        if response.clicked() {
+            picked = Some(Some(accel.type_id));
+        }
+    }
+    if ui.button(small("All accelerators…")).clicked() {
+        module.plans.popup = Some(Popup::Accelerators {
+            search: String::new(),
+        });
+    }
+    if let Some(choice) = picked {
+        module.plans.accelerator = choice;
+    }
+}
+
 fn attribute_table(module: &Skills, ui: &mut egui::Ui, data: &StaticData, check: &Check) {
     let shares = plans::attribute_shares(data, &module.plans.editor.plan, &check.standing);
     let remap_shown = module.plans.use_remap && check.has_character;
     egui::Grid::new("plans-attributes")
-        .num_columns(5)
-        .spacing(Vec2::new(14.0, 3.0))
+        .num_columns(6)
+        .spacing(Vec2::new(12.0, 3.0))
         .show(ui, |ui| {
-            for head in ["Attribute", "Base", "Implants", "Total", "Used by plan"] {
+            for head in [
+                "Attribute",
+                "Base",
+                "Implants",
+                "Accel.",
+                "Total",
+                "Used by plan",
+            ] {
                 ui.label(RichText::new(head).size(11.0).color(FAINT));
             }
             ui.end_row();
@@ -1458,7 +1754,20 @@ fn attribute_table(module: &Skills, ui: &mut egui::Ui, data: &StaticData, check:
                     })
                     .color(INJECTOR),
                 );
-                ui.label(small((base + bonus).to_string()).color(BRIGHT).strong());
+                let accel = check.accel_bonuses[i];
+                ui.label(
+                    small(if accel > 0 {
+                        format!("+{accel}")
+                    } else {
+                        "–".to_string()
+                    })
+                    .color(ORANGE),
+                );
+                ui.label(
+                    small((base + bonus + accel).to_string())
+                        .color(BRIGHT)
+                        .strong(),
+                );
                 ui.horizontal(|ui| {
                     let share = shares[i] as f32;
                     let (rect, _) = ui.allocate_exact_size(Vec2::new(70.0, 10.0), Sense::hover());
@@ -1608,12 +1917,101 @@ fn popups(module: &mut Skills, ui: &mut egui::Ui, data: &StaticData, now: i64) {
         Popup::Delete { index } => delete_window(module, &ctx, id, index),
         Popup::Import { text, name } => import_window(module, &ctx, id, data, text, name, now),
         Popup::Unsaved { then } => unsaved_window(module, &ctx, id, then, now),
+        Popup::Accelerators { search } => accelerators_window(module, &ctx, id, data, search, now),
     };
     if let Some(popup) = keep
         && module.plans.popup.is_none()
     {
         module.plans.popup = Some(popup);
     }
+}
+
+/// Every cerebral accelerator in the static data that can still be used;
+/// "Add" puts one in the Check column's list (saved in `skills.toml`).
+fn accelerators_window(
+    module: &mut Skills,
+    ctx: &egui::Context,
+    id: egui::Id,
+    data: &StaticData,
+    mut search: String,
+    now: i64,
+) -> Option<Popup> {
+    let mut add = None;
+    let mut remove = None;
+    let mut done = false;
+    let listed: Vec<i64> = plans::DEFAULT_ACCELERATORS
+        .iter()
+        .chain(module.settings.plan_accelerators.iter())
+        .copied()
+        .collect();
+    let closed = modal(ctx, id, "All accelerators", |ui| {
+        ui.label(
+            small("Every cerebral accelerator in the static data. Ones past their expiry date are left out. Durations are before Biology.")
+                .color(DIM),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut search)
+                .hint_text("Search accelerators")
+                .desired_width(f32::INFINITY),
+        );
+        let needle = search.trim().to_lowercase();
+        egui::ScrollArea::vertical()
+            .max_height(340.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for accel in data.accelerators() {
+                    // Expired, or a "+1 for a minute" skill accelerator.
+                    if (accel.expires > 0 && accel.expires < now) || accel.hours < 1.0 {
+                        continue;
+                    }
+                    if !needle.is_empty() && !accel.name.to_lowercase().contains(&needle) {
+                        continue;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(small(&accel.name).color(TEXT));
+                            ui.label(
+                                small(format!(
+                                    "{} · {}",
+                                    accel_bonus_text(&accel.bonuses),
+                                    lasts_text(accel.hours * 3600.0)
+                                ))
+                                .size(11.0)
+                                .color(FAINT),
+                            );
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if plans::DEFAULT_ACCELERATORS.contains(&accel.type_id) {
+                                ui.label(small("always listed").color(FAINT));
+                            } else if listed.contains(&accel.type_id) {
+                                if ui.button(small("Remove")).clicked() {
+                                    remove = Some(accel.type_id);
+                                }
+                            } else if ui.button(small("Add")).clicked() {
+                                add = Some(accel.type_id);
+                            }
+                        });
+                    });
+                }
+            });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.button("Close").clicked() {
+                done = true;
+            }
+        });
+    });
+    if let Some(type_id) = add {
+        module.settings.plan_accelerators.push(type_id);
+        module.save_settings();
+    }
+    if let Some(type_id) = remove {
+        module.settings.plan_accelerators.retain(|t| *t != type_id);
+        if module.plans.accelerator == Some(type_id) {
+            module.plans.accelerator = None;
+        }
+        module.save_settings();
+    }
+    (!closed && !done).then_some(Popup::Accelerators { search })
 }
 
 fn modal(ctx: &egui::Context, id: egui::Id, title: &str, add: impl FnOnce(&mut egui::Ui)) -> bool {

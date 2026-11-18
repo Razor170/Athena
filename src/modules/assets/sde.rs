@@ -1,5 +1,5 @@
 //! Item types, groups, categories and NPC stations for the Assets module,
-//! read from `static.sqlite` (schema 10, see `xtask/src/assets.rs`).
+//! read from `static.sqlite` (schema 11, see `xtask/src/assets.rs`).
 //!
 //! The file has about 54,000 item types. Loading them all would cost
 //! several megabytes of RAM for every Athena run, so the worker reads only
