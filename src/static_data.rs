@@ -27,7 +27,7 @@ use crate::universe::Universe;
 pub const FILE_NAME: &str = "static.sqlite";
 
 /// The `schema_version` this code can read. Must match the xtask.
-const SCHEMA_VERSION: &str = "7";
+const SCHEMA_VERSION: &str = "8";
 
 /// What kind of thing an item is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +142,28 @@ pub enum RemoteKind {
     Cap,
 }
 
+/// A skill, for the Skills module.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillType {
+    pub type_id: i64,
+    pub name: String,
+    pub group_id: i64,
+    /// Multiplies the skill points each level needs.
+    pub rank: i64,
+    /// Dogma attribute ids (164 charisma, 165 intelligence, 166 memory,
+    /// 167 perception, 168 willpower).
+    pub primary_attribute: i64,
+    pub secondary_attribute: i64,
+}
+
+/// A skill group, such as "Gunnery", with its skills sorted by name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillGroup {
+    pub group_id: i64,
+    pub name: String,
+    pub skill_ids: Vec<i64>,
+}
+
 /// All static data Athena uses, in memory.
 #[derive(Debug, Clone, Default)]
 pub struct StaticData {
@@ -174,6 +196,10 @@ pub struct StaticData {
     drone_types: std::collections::HashSet<String>,
     /// Type ids of charges (ammo, scripts, crystals).
     charge_types: std::collections::HashSet<i64>,
+    /// Skills by type id.
+    skills: HashMap<i64, SkillType>,
+    /// Skill groups, sorted by name.
+    skill_groups: Vec<SkillGroup>,
 }
 
 impl StaticData {
@@ -341,11 +367,65 @@ impl StaticData {
             data.charge_types.insert(row?);
         }
 
+        data.read_skills(db).context("reading skills")?;
+
         if data.items.is_empty() {
             bail!("static data contains no items");
         }
         data.universe = Universe::from_connection(db).context("reading the map")?;
         Ok(data)
+    }
+
+    /// Reads `skill_groups` and `skill_types`.
+    fn read_skills(&mut self, db: &rusqlite::Connection) -> Result<()> {
+        let mut query = db.prepare("SELECT group_id, name FROM skill_groups ORDER BY name")?;
+        let rows = query.query_map([], |row| {
+            Ok(SkillGroup {
+                group_id: row.get(0)?,
+                name: row.get(1)?,
+                skill_ids: Vec::new(),
+            })
+        })?;
+        for row in rows {
+            self.skill_groups.push(row?);
+        }
+        let mut query = db.prepare(
+            "SELECT type_id, name, group_id, rank, primary_attribute, secondary_attribute
+             FROM skill_types ORDER BY name",
+        )?;
+        let rows = query.query_map([], |row| {
+            Ok(SkillType {
+                type_id: row.get(0)?,
+                name: row.get(1)?,
+                group_id: row.get(2)?,
+                rank: row.get(3)?,
+                primary_attribute: row.get(4)?,
+                secondary_attribute: row.get(5)?,
+            })
+        })?;
+        for row in rows {
+            let skill = row?;
+            // Sorted by name above, so each group's list is too.
+            if let Some(group) = self
+                .skill_groups
+                .iter_mut()
+                .find(|g| g.group_id == skill.group_id)
+            {
+                group.skill_ids.push(skill.type_id);
+            }
+            self.skills.insert(skill.type_id, skill);
+        }
+        Ok(())
+    }
+
+    /// A skill by type id.
+    pub fn skill(&self, type_id: i64) -> Option<&SkillType> {
+        self.skills.get(&type_id)
+    }
+
+    /// Every skill group, sorted by name.
+    pub fn skill_groups(&self) -> &[SkillGroup] {
+        &self.skill_groups
     }
 
     /// Reads the `pi_*` tables.
@@ -579,8 +659,22 @@ pub mod tests {
             CREATE TABLE structure_types (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL);
             CREATE TABLE drone_types (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL);
             CREATE TABLE charge_types (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+            CREATE TABLE skill_groups (group_id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+            CREATE TABLE skill_types (type_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                group_id INTEGER NOT NULL, rank INTEGER NOT NULL,
+                primary_attribute INTEGER NOT NULL, secondary_attribute INTEGER NOT NULL);
 
-            INSERT INTO meta VALUES ('schema_version', '7'), ('sde_build', '3670638');
+            INSERT INTO meta VALUES ('schema_version', '8'), ('sde_build', '3670638');
+            INSERT INTO skill_groups VALUES (255, 'Gunnery'), (257, 'Spaceship Command'),
+                (1218, 'Resource Processing');
+            INSERT INTO skill_types VALUES
+                (3300, 'Gunnery', 255, 1, 167, 168),
+                (3301, 'Small Hybrid Turret', 255, 1, 167, 168),
+                (3304, 'Medium Hybrid Turret', 255, 3, 167, 168),
+                (3327, 'Spaceship Command', 257, 1, 167, 168),
+                (24311, 'Amarr Carrier', 257, 14, 167, 168),
+                (3386, 'Mining', 1218, 1, 166, 165),
+                (22578, 'Mining Upgrades', 1218, 4, 166, 165);
             INSERT INTO remote_modules VALUES
                 (12102, 'Large Remote Capacitor Transmitter II', 'cap'),
                 (12221, 'Medium Remote Capacitor Transmitter II', 'cap'),
@@ -688,6 +782,18 @@ pub mod tests {
         assert_eq!(stations.len(), 2);
         assert_eq!(stations[0].system_id, 104);
         assert!(data.lp_stations(1000120).is_empty());
+    }
+
+    #[test]
+    fn loads_skills_by_group() {
+        let data = sample();
+        let names: Vec<&str> = data.skill_groups().iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["Gunnery", "Resource Processing", "Spaceship Command"]);
+        let gunnery = &data.skill_groups()[0];
+        assert_eq!(gunnery.skill_ids, [3300, 3304, 3301]);
+        let carrier = data.skill(24311).unwrap();
+        assert_eq!(carrier.rank, 14);
+        assert_eq!(carrier.group_id, 257);
     }
 
     #[test]

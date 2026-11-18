@@ -31,6 +31,8 @@
 //!   remote capacitor transmitters (for its cap chain settings), and the
 //!   names of structure types (so a rep on a Metenox Moon Drill shows the
 //!   type instead of the structure's own name).
+//! - for the Skills module: skill groups and every skill with its group,
+//!   rank and attributes (see `skills.rs`).
 //!
 //! With `--dotlan <folder>`, the Intel map's layout comes from DOTLAN
 //! EveMaps' region maps in that folder (see `dotlan.rs`). `cargo xtask
@@ -40,6 +42,7 @@
 mod dotlan;
 mod map;
 mod planetary;
+mod skills;
 mod stations;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -51,7 +54,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 /// Bump when the tables change, so the app can refuse a file it can't read.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// The SDE category that holds all asteroid ore, ice and moon ore.
 const CATEGORY_ASTEROID: i64 = 25;
@@ -162,6 +165,8 @@ struct SdeGroup {
     #[serde(rename = "categoryID")]
     category_id: i64,
     name: Option<Name>,
+    #[serde(default)]
+    published: bool,
 }
 
 /// One line of `typeMaterials.jsonl`.
@@ -269,6 +274,12 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
     println!("SDE build {}", info.build_number);
 
     let groups: Vec<SdeGroup> = read_jsonl(&mut archive, "groups.jsonl")?;
+    // Published skill groups, for the Skills module.
+    let skill_groups: BTreeMap<i64, String> = groups
+        .iter()
+        .filter(|g| g.category_id == skills::CATEGORY_SKILL && g.published)
+        .filter_map(|g| Some((g.id, english(&g.name)?)))
+        .collect();
     // Group id -> (category id, English name).
     let groups: BTreeMap<i64, (i64, String)> = groups
         .into_iter()
@@ -408,7 +419,24 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
             published: t.published,
         })
         .collect();
+    let skill_types: Vec<skills::SkillType> = types
+        .iter()
+        .filter(|t| t.published && skill_groups.contains_key(&t.group_id))
+        .filter_map(|t| {
+            Some(skills::SkillType {
+                id: t.id,
+                group_id: t.group_id,
+                name: english(&t.name)?,
+            })
+        })
+        .collect();
     drop(types);
+    println!("Reading skills...");
+    let skills = skills::build(
+        skill_groups,
+        skill_types,
+        read_jsonl(&mut archive, "typeDogma.jsonl")?,
+    )?;
     println!("Reading planetary schematics...");
     let pi = planetary::build(
         &pi_types,
@@ -525,6 +553,7 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         structure_types: &structure_types,
         drone_types: &drone_types,
         charge_types: &charge_types,
+        skills: &skills,
     };
     write_database(out, info, &tables)?;
     println!(
@@ -532,7 +561,7 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
          {} regions, {} systems, {} gates, {} map layout, {} NPC corporations, \
          {} stations with an LP store, {} planetary commodities, {} colony structures, \
          {} schematics, {} remote modules, {} structure types, {} drones and fighters, \
-         {} charges",
+         {} charges, {} skill groups, {} skills",
         out.display(),
         items.len(),
         reprocess.len(),
@@ -550,7 +579,9 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         remote_modules.len(),
         structure_types.len(),
         drone_types.len(),
-        charge_types.len()
+        charge_types.len(),
+        skills.groups.len(),
+        skills.skills.len()
     );
     Ok(())
 }
@@ -729,6 +760,23 @@ fn create_schema(db: &rusqlite::Connection) -> Result<()> {
             is_input     INTEGER NOT NULL,
             PRIMARY KEY (schematic_id, type_id)
         );
+
+        -- Skill groups (Armor, Drones, Gunnery, ...).
+        CREATE TABLE skill_groups (
+            group_id INTEGER PRIMARY KEY,
+            name     TEXT NOT NULL
+        );
+        -- Skills. rank multiplies the SP each level needs; the attributes
+        -- are dogma attribute ids (164 charisma, 165 intelligence,
+        -- 166 memory, 167 perception, 168 willpower).
+        CREATE TABLE skill_types (
+            type_id             INTEGER PRIMARY KEY,
+            name                TEXT NOT NULL,
+            group_id            INTEGER NOT NULL,
+            rank                INTEGER NOT NULL,
+            primary_attribute   INTEGER NOT NULL,
+            secondary_attribute INTEGER NOT NULL
+        );
         ",
     )?;
     Ok(())
@@ -748,6 +796,7 @@ struct Tables<'a> {
     structure_types: &'a BTreeMap<i64, String>,
     drone_types: &'a BTreeMap<i64, String>,
     charge_types: &'a BTreeMap<i64, String>,
+    skills: &'a skills::SkillData,
 }
 
 fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
@@ -764,6 +813,7 @@ fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
         structure_types,
         drone_types,
         charge_types,
+        skills,
     } = *tables;
     // Write to a temporary file first, so a failed run never leaves a
     // half-written static.sqlite behind.
@@ -921,6 +971,27 @@ fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
             for &(type_id, quantity, is_input) in &s.types {
                 insert_type.execute((id, type_id, quantity, is_input))?;
             }
+        }
+
+        let mut insert =
+            tx.prepare("INSERT INTO skill_groups (group_id, name) VALUES (?1, ?2)")?;
+        for (id, name) in &skills.groups {
+            insert.execute((id, name))?;
+        }
+        let mut insert = tx.prepare(
+            "INSERT INTO skill_types
+                (type_id, name, group_id, rank, primary_attribute, secondary_attribute)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for (id, s) in &skills.skills {
+            insert.execute((
+                id,
+                &s.name,
+                s.group_id,
+                s.rank,
+                s.primary_attribute,
+                s.secondary_attribute,
+            ))?;
         }
     }
     tx.commit()?;

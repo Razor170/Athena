@@ -29,6 +29,7 @@ pub mod intel;
 pub mod mining;
 pub mod planetary;
 pub mod shared;
+pub mod skills;
 pub mod welcome;
 
 /// What a module may read from the rest of the app while it runs.
@@ -151,6 +152,13 @@ pub fn create_all(
             &static_data,
             tokens.clone(),
             roster.clone(),
+        )),
+        Box::new(skills::Skills::new(
+            egui_ctx,
+            data_dir,
+            tokens.clone(),
+            roster.clone(),
+            &static_data,
         )),
         Box::new(finance::Finance::new(
             egui_ctx,
