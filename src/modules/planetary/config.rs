@@ -36,6 +36,10 @@ pub struct Thresholds {
     pub old_days: u32,
     /// Show the estimated launchpad fill since the last in-game view.
     pub show_estimate: bool,
+    /// Overflow warning: a planet turns yellow when an output pad will be
+    /// full within `overflow_hours`.
+    pub overflow_warning: bool,
+    pub overflow_hours: u32,
 }
 
 impl Default for Thresholds {
@@ -47,6 +51,8 @@ impl Default for Thresholds {
             full_percent: 95,
             old_days: 3,
             show_estimate: true,
+            overflow_warning: true,
+            overflow_hours: 8,
         }
     }
 }
