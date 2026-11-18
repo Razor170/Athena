@@ -8,6 +8,9 @@
 //! left counts down in the UI from the finish dates, so no ESI call is
 //! needed for that.
 //!
+//! The Jita prices of skill injectors (for the queue footer) are fetched
+//! at most once an hour from ESI's public market orders.
+//!
 //! Everything fetched is saved in `skills-cache.json`, so Athena shows the
 //! skills right after a restart, before ESI answers.
 
@@ -26,10 +29,29 @@ use serde::{Deserialize, Serialize};
 use super::data::{Attributes, CharacterSkills, EsiQueueEntry, EsiSkills};
 use crate::auth::{RefreshError, TokenStore, now_unix};
 use crate::esi::{EsiClient, Fetched};
+use crate::modules::mining::prices::{Order, best_jita_prices};
 
 /// The longest the thread sleeps before looking at the schedule again.
 const MAX_SLEEP: Duration = Duration::from_secs(60);
 const CACHE_FILE: &str = "skills-cache.json";
+/// Injector prices are fetched again when older than this.
+const PRICES_EVERY_SECS: i64 = 60 * 60;
+/// After a failed price fetch, try again after this long.
+const PRICES_RETRY_SECS: i64 = 5 * 60;
+/// The Forge, the region Jita is in.
+const THE_FORGE: i64 = 10_000_002;
+/// Skill injector type ids (SDE).
+pub const LARGE_INJECTOR: i64 = 40_520;
+pub const SMALL_INJECTOR: i64 = 45_635;
+
+/// The lowest Jita 4-4 sell price of each injector: what buying one costs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct InjectorPrices {
+    pub large: Option<f64>,
+    pub small: Option<f64>,
+    /// When they were fetched, Unix seconds.
+    pub fetched_at: i64,
+}
 
 /// What the module asks the worker to do.
 pub enum Command {
@@ -51,6 +73,8 @@ pub enum Event {
         character_id: u64,
         skills: Box<CharacterSkills>,
     },
+    /// New injector prices.
+    Prices(InjectorPrices),
     /// A round of fetching ended at this time.
     Checked(i64),
     /// Something went wrong for one character (`None`: it works again).
@@ -68,6 +92,7 @@ pub enum Event {
 pub struct Cache {
     /// Character id -> their skills.
     pub characters: BTreeMap<u64, CharacterSkills>,
+    pub injector_prices: Option<InjectorPrices>,
 }
 
 impl Cache {
@@ -141,6 +166,8 @@ struct Fetcher {
     poll_secs: i64,
     /// Character id -> when it's due next (Unix seconds).
     due: HashMap<u64, i64>,
+    /// When the injector prices are due next.
+    prices_due: i64,
 }
 
 impl Fetcher {
@@ -155,8 +182,11 @@ impl Fetcher {
             http: crate::auth::sso::http_client()?,
             tokens,
             cache_path,
-            cache,
             poll_secs,
+            prices_due: cache
+                .injector_prices
+                .map_or(0, |p| p.fetched_at + PRICES_EVERY_SECS),
+            cache,
             due: HashMap::new(),
         })
     }
@@ -199,6 +229,21 @@ impl Fetcher {
 
     fn do_due_jobs(&mut self, send: &impl Fn(Event)) {
         let now = now_unix();
+        // Prices only matter once there are characters to show.
+        if !self.due.is_empty() && self.prices_due <= now {
+            match self.fetch_prices(now) {
+                Ok(prices) => {
+                    self.prices_due = now + PRICES_EVERY_SECS;
+                    self.cache.injector_prices = Some(prices);
+                    // Not worth a message if it fails: the next save
+                    // writes them too.
+                    let _ = self.cache.save(&self.cache_path);
+                    send(Event::Prices(prices));
+                }
+                // Quiet: the footer just shows no ISK until it works.
+                Err(_) => self.prices_due = now + PRICES_RETRY_SECS,
+            }
+        }
         let mut ids: Vec<u64> = self
             .due
             .iter()
@@ -266,6 +311,38 @@ impl Fetcher {
         ))
     }
 
+    /// The lowest Jita 4-4 sell order of each injector, from every page
+    /// of The Forge's orders for it.
+    fn fetch_prices(&mut self, now: i64) -> Result<InjectorPrices> {
+        let mut lowest = |type_id: i64| -> Result<Option<f64>> {
+            let mut best: Option<f64> = None;
+            let mut page = 1;
+            loop {
+                let path = format!(
+                    "/markets/{THE_FORGE}/orders?order_type=sell&type_id={type_id}&page={page}"
+                );
+                let pages = match self.esi.get_json::<Vec<Order>>(&path, None)? {
+                    Fetched::Data { value, pages, .. } => {
+                        if let Some(sell) = best_jita_prices(&value).sell {
+                            best = Some(best.map_or(sell, |b: f64| b.min(sell)));
+                        }
+                        pages
+                    }
+                    Fetched::NotModified => 1,
+                };
+                if page >= pages {
+                    return Ok(best);
+                }
+                page += 1;
+            }
+        };
+        Ok(InjectorPrices {
+            large: lowest(LARGE_INJECTOR)?,
+            small: lowest(SMALL_INJECTOR)?,
+            fetched_at: now,
+        })
+    }
+
     fn get<T: serde::de::DeserializeOwned>(&mut self, path: &str, token: &str) -> Result<T> {
         match self.esi.get_json_authed::<T>(path, token, None)? {
             Fetched::Data { value, .. } => Ok(value),
@@ -313,6 +390,11 @@ mod tests {
                 fetched_at: 1_794_960_000,
             },
         );
+        cache.injector_prices = Some(InjectorPrices {
+            large: Some(745_000_000.0),
+            small: None,
+            fetched_at: 1_794_960_000,
+        });
         let dir = std::env::temp_dir().join(format!("athena-skills-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = Cache::file_path(&dir);

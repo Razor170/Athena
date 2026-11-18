@@ -20,7 +20,7 @@ use super::data::{
     self, CharacterSkills, QueueNow, QueueState, duration_text, injectors_needed,
     large_injector_sp, roman,
 };
-use super::worker::Command;
+use super::worker::{Command, InjectorPrices};
 use super::{Skills, Status};
 use crate::localtime;
 use crate::static_data::StaticData;
@@ -274,18 +274,35 @@ fn character_card(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
-            // Line 1: name, SP, tags, status.
+            // Line 1: name, SP, tags, status. Tags that don't fit become
+            // a "+N" chip, so the card never gets wider than its column.
             ui.horizontal(|ui| {
-                ui.label(RichText::new(name).size(14.0).color(BRIGHT).strong());
+                let (status, status_color) = status_text(training, queue.as_ref(), problem, now);
+                let status_width = text_width(ui, &status, 12.0) + 8.0;
+                let name_room = (ui.available_width() - status_width - 70.0).max(60.0);
+                elided_label(ui, name, name_room, BRIGHT, 14.0);
                 if let Some(skills) = skills {
                     ui.label(small(short_sp(skills.total_sp)).color(FAINT));
                 }
-                for tag in tags {
+                let gap = ui.spacing().item_spacing.x;
+                let plus_width = chip_width(ui, "+9") + gap;
+                let mut room = ui.available_width() - status_width;
+                let mut shown = 0;
+                for (index, tag) in tags.iter().enumerate() {
+                    let width = chip_width(ui, tag) + gap;
+                    let more_after = index + 1 < tags.len();
+                    if width + if more_after { plus_width } else { 0.0 } > room {
+                        break;
+                    }
                     chip(ui, tag);
+                    room -= width;
+                    shown += 1;
+                }
+                if shown < tags.len() {
+                    chip(ui, &format!("+{}", tags.len() - shown)).on_hover_text(tags.join(", "));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let (text, color) = status_text(training, queue.as_ref(), problem, now);
-                    let label = ui.label(small(text).color(color));
+                    let label = ui.label(small(status).color(status_color));
                     if let Some(problem) = problem {
                         label.on_hover_text(problem);
                     }
@@ -329,7 +346,7 @@ fn character_card(
                         .finish
                         .map_or(String::new(), |f| duration_text(f - now))
                 };
-                let right = 110.0 + 6.0 + text_width(ui, &time) + 4.0;
+                let right = 110.0 + 6.0 + text_width(ui, &time, 12.0) + 4.0;
                 let name_width = (ui.available_width() - right).max(40.0);
                 let skill = skill_name(module, first.skill_id);
                 elided_label(
@@ -337,6 +354,7 @@ fn character_card(
                     &format!("{skill} {}", roman(first.level)),
                     name_width,
                     TEXT,
+                    12.5,
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(small(time).color(DIM));
@@ -953,6 +971,7 @@ fn queue_panel(
             });
         });
         if injectors.missing_sp > 0 {
+            injector_cost(ui, module.injector_prices, injectors, now);
             ui.label(
                 RichText::new(format!(
                     "A large injector gives {} SP at {} SP (less from 5m, 50m and 80m SP on), \
@@ -965,6 +984,71 @@ fn queue_panel(
             );
         }
     });
+}
+
+/// "≈ 2.41b ISK at Jita sell: 3 × 745.2m + 4 × 160.1m · prices from 08:12".
+fn injector_cost(
+    ui: &mut egui::Ui,
+    prices: Option<InjectorPrices>,
+    injectors: data::Injectors,
+    now: i64,
+) {
+    let Some(prices) = prices else {
+        ui.label(small("Jita injector prices: asking ESI…").color(FAINT));
+        return;
+    };
+    let missing = (injectors.large > 0 && prices.large.is_none())
+        || (injectors.small > 0 && prices.small.is_none());
+    if missing {
+        ui.label(small("No Jita sell order for one of the injectors right now.").color(FAINT));
+        return;
+    }
+    let large = prices.large.unwrap_or(0.0);
+    let small_price = prices.small.unwrap_or(0.0);
+    let total = large * f64::from(injectors.large) + small_price * f64::from(injectors.small);
+    let mut parts = Vec::new();
+    if injectors.large > 0 {
+        parts.push(format!("{} × {}", injectors.large, isk_text(large)));
+    }
+    if injectors.small > 0 {
+        parts.push(format!("{} × {}", injectors.small, isk_text(small_price)));
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(small("≈").color(DIM));
+        ui.label(
+            small(format!("{} ISK", isk_text(total)))
+                .color(INJECTOR)
+                .strong(),
+        );
+        ui.label(small(format!("at Jita sell: {}", parts.join(" + "))).color(DIM));
+        let age = if now - prices.fetched_at > 2 * 3600 {
+            format!("· prices {}", ago(now - prices.fetched_at))
+        } else {
+            format!("· prices from {}", clock_text(prices.fetched_at))
+        };
+        ui.label(small(age).color(FAINT))
+            .on_hover_text("The lowest sell order at Jita 4-4, checked once an hour.");
+    });
+}
+
+/// "2.41b", "745.2m", "950k", "12,000".
+fn isk_text(isk: f64) -> String {
+    if isk >= 1e9 {
+        format!("{:.2}b", isk / 1e9)
+    } else if isk >= 1e6 {
+        format!("{:.1}m", isk / 1e6)
+    } else if isk >= 1e4 {
+        format!("{:.0}k", isk / 1e3)
+    } else {
+        group_digits(isk.round() as i64)
+    }
+}
+
+/// "08:12" in local time.
+fn clock_text(unix: i64) -> String {
+    let seconds = localtime::to_local(unix).rem_euclid(86_400);
+    format!("{:02}:{:02}", seconds / 3600, seconds % 3600 / 60)
 }
 
 /// One queue entry: position, name and level squares, time; then progress
@@ -1188,14 +1272,20 @@ fn bar(ui: &mut egui::Ui, width: f32, height: f32, share: f32, color: Color32) {
     }
 }
 
-fn chip(ui: &mut egui::Ui, text: &str) {
+fn chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
     egui::Frame::new()
         .fill(CHIP_FILL)
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::symmetric(6, 0))
         .show(ui, |ui| {
             ui.label(RichText::new(text).size(10.5).color(CHIP_TEXT));
-        });
+        })
+        .response
+}
+
+/// How wide `chip` draws `text`.
+fn chip_width(ui: &egui::Ui, text: &str) -> f32 {
+    text_width(ui, text, 10.5) + 12.0
 }
 
 /// A small coloured dot and a dim label after it (the font has no "●").
@@ -1209,8 +1299,8 @@ fn dot_label(ui: &mut egui::Ui, color: Color32, text: String) {
 }
 
 /// A label cut with "…" to `width`.
-fn elided_label(ui: &mut egui::Ui, text: &str, width: f32, color: Color32) {
-    let galley = one_line(ui.painter(), text, 12.5, color, width);
+fn elided_label(ui: &mut egui::Ui, text: &str, width: f32, color: Color32, size: f32) {
+    let galley = one_line(ui.painter(), text, size, color, width);
     let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::hover());
     let elided = galley.elided;
     ui.painter().galley(rect.min, galley, color);
@@ -1219,9 +1309,9 @@ fn elided_label(ui: &mut egui::Ui, text: &str, width: f32, color: Color32) {
     }
 }
 
-fn text_width(ui: &egui::Ui, text: &str) -> f32 {
+fn text_width(ui: &egui::Ui, text: &str, size: f32) -> f32 {
     ui.painter()
-        .layout_no_wrap(text.to_string(), FontId::proportional(12.0), DIM)
+        .layout_no_wrap(text.to_string(), FontId::proportional(size), DIM)
         .size()
         .x
 }
@@ -1316,6 +1406,14 @@ fn when_text(unix: i64, now: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isk_reads_short() {
+        assert_eq!(isk_text(2_412_000_000.0), "2.41b");
+        assert_eq!(isk_text(745_230_000.0), "745.2m");
+        assert_eq!(isk_text(950_000.0), "950k");
+        assert_eq!(isk_text(1_500.0), "1,500");
+    }
 
     #[test]
     fn digits_are_grouped() {
