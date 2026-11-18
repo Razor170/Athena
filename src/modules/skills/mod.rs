@@ -175,9 +175,32 @@ impl Skills {
         }
     }
 
-    /// The characters the Overview shows: tag filter, "hide without data"
-    /// and the sort order applied.
-    pub fn shown_characters(&self, now: i64) -> Vec<&RosterCharacter> {
+    /// True when the character is hidden on the Overview.
+    pub fn is_hidden(&self, character_id: u64) -> bool {
+        self.settings.hidden.contains(&character_id)
+    }
+
+    /// Hides or unhides a character on the Overview, and saves it.
+    pub fn set_hidden(&mut self, character_id: u64, hidden: bool) {
+        if hidden {
+            self.settings.hidden.insert(character_id);
+        } else {
+            self.settings.hidden.remove(&character_id);
+        }
+        self.save_settings();
+    }
+
+    /// How many logged-in characters are hidden on the Overview.
+    pub fn hidden_count(&self) -> usize {
+        self.characters
+            .iter()
+            .filter(|c| self.is_hidden(c.id))
+            .count()
+    }
+
+    /// The characters the Overview shows: tag filter, "hide without data",
+    /// hidden characters (unless `with_hidden`) and the sort order applied.
+    pub fn shown_characters(&self, now: i64, with_hidden: bool) -> Vec<&RosterCharacter> {
         let mut list: Vec<&RosterCharacter> = self
             .characters
             .iter()
@@ -188,6 +211,7 @@ impl Skills {
                     .is_none_or(|tag| c.tags.contains(tag))
             })
             .filter(|c| !self.settings.hide_without_data || self.skills.contains_key(&c.id))
+            .filter(|c| with_hidden || !self.is_hidden(c.id))
             .collect();
         match self.settings.sort {
             config::SortBy::Name => list.sort_by_key(|c| c.name.to_lowercase()),
@@ -255,10 +279,11 @@ impl Module for Skills {
             return None;
         }
         let now = crate::auth::now_unix();
+        // Hidden characters don't count.
         let count = self
             .characters
             .iter()
-            .filter(|c| self.training(c.id, now) == Status::Stopped)
+            .filter(|c| !self.is_hidden(c.id) && self.training(c.id, now) == Status::Stopped)
             .count();
         (count > 0).then(|| count.to_string())
     }

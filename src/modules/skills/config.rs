@@ -1,6 +1,7 @@
 //! The Skills module's own settings, saved as `skills.toml` in the data
 //! folder: the Settings view plus the filters and sort order.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,9 @@ pub struct SkillsSettings {
     pub sort: SortBy,
     /// Only show characters with this tag.
     pub tag: Option<String>,
+    /// Characters hidden on the Overview, by id. They get no red or
+    /// yellow card and don't count in the badge.
+    pub hidden: BTreeSet<u64>,
 }
 
 impl Default for SkillsSettings {
@@ -51,6 +55,7 @@ impl Default for SkillsSettings {
             hide_without_data: false,
             sort: SortBy::default(),
             tag: None,
+            hidden: BTreeSet::new(),
         }
     }
 }
@@ -96,6 +101,7 @@ mod tests {
             badge: false,
             sort: SortBy::SkillPoints,
             tag: Some("Miner".into()),
+            hidden: BTreeSet::from([90000001, 90000002]),
             ..SkillsSettings::default()
         };
         let text = toml::to_string(&settings).unwrap();
