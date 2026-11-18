@@ -138,7 +138,7 @@ impl Skills {
         }
     }
 
-    fn save_settings(&mut self) {
+    pub(super) fn save_settings(&mut self) {
         if let Ok(text) = toml::to_string(&self.settings) {
             self.saver
                 .save(SkillsSettings::file_path(&self.data_dir), text);

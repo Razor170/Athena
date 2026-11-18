@@ -126,7 +126,10 @@ pub const SECTIONS: &[Section] = &[
              or type a name to add skills (prerequisites come along), drag to reorder, and \
              [Save]. Import reads a pasted list, Copy for EVE puts the plan on the clipboard \
              for EVE's skill plan import. Check times the plan for a character with each \
-             implant set and their clones, and shows the best remap and the time it saves.",
+             implant set and their clones, and shows the best remap and the time it saves. \
+             Accelerator adds a cerebral accelerator used back to back for the whole plan: \
+             how many you need and what's left on the last one (Biology and BY implants make \
+             them last longer). If one is running already, pick None.",
         ],
         note: "Settings: the \"ends soon\" hours, the badge, and how often ESI is asked \
                (every 15 minutes by default; [Refresh] asks now).",

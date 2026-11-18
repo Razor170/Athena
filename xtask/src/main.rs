@@ -32,8 +32,9 @@
 //!   names of structure types (so a rep on a Metenox Moon Drill shows the
 //!   type instead of the structure's own name).
 //! - for the Skills module: skill groups and every skill with its group,
-//!   rank, attributes and prerequisites, and the attribute implants
-//!   (see `skills.rs`).
+//!   rank, attributes and prerequisites, the attribute implants, the
+//!   cerebral accelerators and what makes boosters last longer (see
+//!   `skills.rs`).
 //!
 //! With `--dotlan <folder>`, the Intel map's layout comes from DOTLAN
 //! EveMaps' region maps in that folder (see `dotlan.rs`). `cargo xtask
@@ -55,7 +56,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 /// Bump when the tables change, so the app can refuse a file it can't read.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// The SDE category that holds all asteroid ore, ice and moon ore.
 const CATEGORY_ASTEROID: i64 = 25;
@@ -443,6 +444,7 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         .filter_map(|t| {
             Some(skills::ImplantType {
                 id: t.id,
+                group_id: t.group_id,
                 name: english(&t.name)?,
             })
         })
@@ -579,7 +581,8 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
          {} regions, {} systems, {} gates, {} map layout, {} NPC corporations, \
          {} stations with an LP store, {} planetary commodities, {} colony structures, \
          {} schematics, {} remote modules, {} structure types, {} drones and fighters, \
-         {} charges, {} skill groups, {} skills, {} attribute implants",
+         {} charges, {} skill groups, {} skills, {} attribute implants, {} accelerators, \
+         {} booster duration bonuses",
         out.display(),
         items.len(),
         reprocess.len(),
@@ -600,7 +603,9 @@ fn build_static_data(zip_path: &Path, out: &Path, dotlan_folder: Option<&Path>) 
         charge_types.len(),
         skills.groups.len(),
         skills.skills.len(),
-        skills.implants.len()
+        skills.implants.len(),
+        skills.accelerators.len(),
+        skills.duration_bonuses.len()
     );
     Ok(())
 }
@@ -802,6 +807,26 @@ fn create_schema(db: &rusqlite::Connection) -> Result<()> {
             required_id INTEGER NOT NULL,
             level       INTEGER NOT NULL,
             PRIMARY KEY (type_id, required_id)
+        );
+        -- Cerebral accelerators: boosters that raise attributes for `hours`
+        -- (before Biology). `expires` is the last moment one can be plugged
+        -- in (unix seconds), 0 for never.
+        CREATE TABLE accelerators (
+            type_id      INTEGER PRIMARY KEY,
+            name         TEXT NOT NULL,
+            perception   INTEGER NOT NULL,
+            memory       INTEGER NOT NULL,
+            willpower    INTEGER NOT NULL,
+            intelligence INTEGER NOT NULL,
+            charisma     INTEGER NOT NULL,
+            hours        REAL NOT NULL,
+            expires      INTEGER NOT NULL
+        );
+        -- Skills (per level) and implants that make boosters last longer.
+        CREATE TABLE booster_duration_bonuses (
+            type_id INTEGER PRIMARY KEY,
+            name    TEXT NOT NULL,
+            percent REAL NOT NULL
         );
         -- Implants that raise attributes, with the bonus to each.
         CREATE TABLE implant_attributes (
@@ -1047,6 +1072,23 @@ fn write_database(out: &Path, info: &SdeInfo, tables: &Tables) -> Result<()> {
         for (id, i) in &skills.implants {
             let [per, mem, wil, int, cha] = i.bonuses;
             insert.execute((id, &i.name, per, mem, wil, int, cha))?;
+        }
+        let mut insert = tx.prepare(
+            "INSERT INTO accelerators
+                (type_id, name, perception, memory, willpower, intelligence, charisma,
+                 hours, expires)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )?;
+        for (id, a) in &skills.accelerators {
+            let [per, mem, wil, int, cha] = a.bonuses;
+            insert.execute((id, &a.name, per, mem, wil, int, cha, a.hours, a.expires))?;
+        }
+        let mut insert = tx.prepare(
+            "INSERT INTO booster_duration_bonuses (type_id, name, percent)
+             VALUES (?1, ?2, ?3)",
+        )?;
+        for (id, b) in &skills.duration_bonuses {
+            insert.execute((id, &b.name, b.percent))?;
         }
     }
     tx.commit()?;

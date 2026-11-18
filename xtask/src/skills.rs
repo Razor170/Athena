@@ -39,6 +39,19 @@ const REQUIREMENTS: [(i64, i64); 6] = [
 /// Dogma attributes: an implant's bonus to perception, memory, willpower,
 /// intelligence and charisma, in that order (Athena's attribute order).
 const IMPLANT_BONUSES: [i64; 5] = [178, 177, 179, 176, 175];
+/// The SDE group of boosters, which holds the cerebral accelerators.
+pub const GROUP_BOOSTER: i64 = 303;
+/// Dogma attribute: how long a booster lasts, in milliseconds.
+const ATTR_BOOSTER_DURATION: i64 = 330;
+/// Dogma attribute: the last day a booster can be plugged in, in days
+/// since 1 January 1970.
+const ATTR_BOOSTER_EXPIRY: i64 = 2422;
+/// Dogma attribute: "durationBonus", a percentage.
+const ATTR_DURATION_BONUS: i64 = 66;
+/// Dogma effect: "biologyTimeBonusFixed". Types with it make boosters last
+/// `durationBonus` percent longer (per level for a skill): Biology and the
+/// Eifyr and Co. 'Alchemist' Biology implants.
+const EFFECT_BOOSTER_DURATION: i64 = 2866;
 
 /// One line of `typeDogma.jsonl` (only the fields we need).
 #[derive(Deserialize)]
@@ -47,6 +60,14 @@ pub struct SdeTypeDogma {
     pub id: i64,
     #[serde(rename = "dogmaAttributes", default)]
     pub attributes: Vec<SdeDogmaValue>,
+    #[serde(rename = "dogmaEffects", default)]
+    pub effects: Vec<SdeDogmaEffect>,
+}
+
+#[derive(Deserialize)]
+pub struct SdeDogmaEffect {
+    #[serde(rename = "effectID")]
+    pub effect_id: i64,
 }
 
 #[derive(Deserialize)]
@@ -77,6 +98,7 @@ pub struct Skill {
 /// A published implant type, already known to be in the implant category.
 pub struct ImplantType {
     pub id: i64,
+    pub group_id: i64,
     pub name: String,
 }
 
@@ -87,6 +109,24 @@ pub struct Implant {
     pub bonuses: [i64; 5],
 }
 
+/// A cerebral accelerator: a booster that raises attributes for a while.
+pub struct Accelerator {
+    pub name: String,
+    /// Perception, memory, willpower, intelligence, charisma.
+    pub bonuses: [i64; 5],
+    /// How long it lasts without Biology, in hours.
+    pub hours: f64,
+    /// The last moment it can be plugged in (unix seconds), 0 for never.
+    pub expires: i64,
+}
+
+/// A skill or implant that makes boosters last longer.
+pub struct DurationBonus {
+    pub name: String,
+    /// Percent; for a skill, per level.
+    pub percent: f64,
+}
+
 pub struct SkillData {
     /// Group id -> name.
     pub groups: BTreeMap<i64, String>,
@@ -94,6 +134,10 @@ pub struct SkillData {
     pub skills: BTreeMap<i64, Skill>,
     /// Type id -> attribute implant.
     pub implants: BTreeMap<i64, Implant>,
+    /// Type id -> cerebral accelerator.
+    pub accelerators: BTreeMap<i64, Accelerator>,
+    /// Type id -> skill or implant that makes boosters last longer.
+    pub duration_bonuses: BTreeMap<i64, DurationBonus>,
 }
 
 /// Puts the skills together with their dogma values. `groups` are the
@@ -107,6 +151,25 @@ pub fn build(
 ) -> Result<SkillData> {
     let dogma: BTreeMap<i64, SdeTypeDogma> = dogma.into_iter().map(|d| (d.id, d)).collect();
     let skills = join(types, &dogma);
+    // Both lists below need the names, so collect them before `implants`
+    // takes `implant_types`.
+    let mut duration_bonuses = BTreeMap::new();
+    let named = skills
+        .iter()
+        .map(|(id, s)| (*id, s.name.as_str()))
+        .chain(implant_types.iter().map(|t| (t.id, t.name.as_str())));
+    for (id, name) in named {
+        if let Some(bonus) = duration_bonus(dogma.get(&id)) {
+            duration_bonuses.insert(
+                id,
+                DurationBonus {
+                    name: name.to_string(),
+                    percent: bonus,
+                },
+            );
+        }
+    }
+    let accelerators = accelerators(&implant_types, &dogma);
     let implants = implants(implant_types, &dogma);
     // Sanity checks, so a changed SDE format fails loudly.
     if groups.len() < 20 {
@@ -131,10 +194,25 @@ pub fn build(
     {
         bail!("Ocular Filter - Basic (+3 perception) not found; has the SDE format changed?");
     }
+    if !accelerators.values().any(|a| {
+        a.name == "Expert 'Boost' Cerebral Accelerator" && a.bonuses == [10; 5] && a.hours == 240.0
+    }) {
+        bail!(
+            "Expert 'Boost' Cerebral Accelerator (+10, 240 h) not found; has the SDE format changed?"
+        );
+    }
+    if !duration_bonuses
+        .values()
+        .any(|b| b.name == "Biology" && b.percent == 20.0)
+    {
+        bail!("Biology (+20% booster duration) not found; has the SDE format changed?");
+    }
     Ok(SkillData {
         groups,
         skills,
         implants,
+        accelerators,
+        duration_bonuses,
     })
 }
 
@@ -144,6 +222,58 @@ fn value(row: &SdeTypeDogma, attribute: i64) -> Option<i64> {
         .iter()
         .find(|a| a.attribute_id == attribute)
         .map(|a| a.value as i64)
+}
+
+/// A dogma attribute's exact value.
+fn value_f64(row: &SdeTypeDogma, attribute: i64) -> Option<f64> {
+    row.attributes
+        .iter()
+        .find(|a| a.attribute_id == attribute)
+        .map(|a| a.value)
+}
+
+/// The booster duration bonus (percent) of a type that has the Biology
+/// effect, if any.
+fn duration_bonus(row: Option<&SdeTypeDogma>) -> Option<f64> {
+    let row = row?;
+    if !row
+        .effects
+        .iter()
+        .any(|e| e.effect_id == EFFECT_BOOSTER_DURATION)
+    {
+        return None;
+    }
+    value_f64(row, ATTR_DURATION_BONUS).filter(|&b| b > 0.0)
+}
+
+/// The boosters that raise attributes for a set time.
+fn accelerators(
+    types: &[ImplantType],
+    dogma: &BTreeMap<i64, SdeTypeDogma>,
+) -> BTreeMap<i64, Accelerator> {
+    let mut out = BTreeMap::new();
+    for t in types.iter().filter(|t| t.group_id == GROUP_BOOSTER) {
+        let Some(row) = dogma.get(&t.id) else {
+            continue;
+        };
+        let bonuses = IMPLANT_BONUSES.map(|attribute| value(row, attribute).unwrap_or(0));
+        let millis = value_f64(row, ATTR_BOOSTER_DURATION).unwrap_or(0.0);
+        if bonuses.iter().all(|&b| b <= 0) || millis <= 0.0 {
+            continue;
+        }
+        let expires =
+            value_f64(row, ATTR_BOOSTER_EXPIRY).map_or(0, |days| (days * 86_400.0).round() as i64);
+        out.insert(
+            t.id,
+            Accelerator {
+                name: t.name.clone(),
+                bonuses,
+                hours: millis / 3_600_000.0,
+                expires,
+            },
+        );
+    }
+    out
 }
 
 /// The implants that raise at least one attribute.
@@ -255,10 +385,12 @@ mod tests {
                         value: 4.0,
                     },
                 ],
+                effects: Vec::new(),
             },
             SdeTypeDogma {
                 id: 1,
                 attributes: Vec::new(),
+                effects: Vec::new(),
             },
         ];
         let dogma = dogma.into_iter().map(|d| (d.id, d)).collect();
@@ -278,10 +410,12 @@ mod tests {
         let types = vec![
             ImplantType {
                 id: 9899,
+                group_id: 300,
                 name: "Ocular Filter - Basic".into(),
             },
             ImplantType {
                 id: 1,
+                group_id: 300,
                 name: "Hardwiring".into(),
             },
         ];
@@ -298,6 +432,7 @@ mod tests {
                         value: 0.0,
                     },
                 ],
+                effects: Vec::new(),
             },
             SdeTypeDogma {
                 id: 1,
@@ -305,6 +440,7 @@ mod tests {
                     attribute_id: 175,
                     value: 0.0,
                 }],
+                effects: Vec::new(),
             },
         ]
         .into_iter()
@@ -313,5 +449,73 @@ mod tests {
         let implants = implants(types, &dogma);
         assert_eq!(implants.len(), 1);
         assert_eq!(implants[&9899].bonuses, [3, 0, 0, 0, 0]);
+    }
+
+    fn dogma_row(id: i64, attributes: &[(i64, f64)], effects: &[i64]) -> SdeTypeDogma {
+        SdeTypeDogma {
+            id,
+            attributes: attributes
+                .iter()
+                .map(|&(attribute_id, value)| SdeDogmaValue {
+                    attribute_id,
+                    value,
+                })
+                .collect(),
+            effects: effects
+                .iter()
+                .map(|&effect_id| SdeDogmaEffect { effect_id })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn finds_accelerators_and_duration_bonuses() {
+        let types = vec![
+            ImplantType {
+                id: 72242,
+                group_id: GROUP_BOOSTER,
+                name: "Expert 'Boost' Cerebral Accelerator".into(),
+            },
+            ImplantType {
+                id: 2,
+                group_id: GROUP_BOOSTER,
+                name: "Combat booster".into(),
+            },
+            ImplantType {
+                id: 3,
+                group_id: GROUP_BOOSTER,
+                name: "Old event accelerator".into(),
+            },
+        ];
+        let all_five = |v: f64| IMPLANT_BONUSES.map(|a| (a, v));
+        let mut expert = all_five(10.0).to_vec();
+        expert.push((ATTR_BOOSTER_DURATION, 864_000_000.0));
+        let mut old = all_five(5.0).to_vec();
+        old.push((ATTR_BOOSTER_DURATION, 43_200_000.0));
+        old.push((ATTR_BOOSTER_EXPIRY, 18_500.0));
+        let dogma = [
+            dogma_row(72242, &expert, &[]),
+            dogma_row(2, &[(ATTR_BOOSTER_DURATION, 1_800_000.0)], &[]),
+            dogma_row(3, &old, &[]),
+        ]
+        .into_iter()
+        .map(|d| (d.id, d))
+        .collect();
+        let found = accelerators(&types, &dogma);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[&72242].bonuses, [10; 5]);
+        assert_eq!(found[&72242].hours, 240.0);
+        assert_eq!(found[&72242].expires, 0);
+        assert_eq!(found[&3].expires, 18_500 * 86_400);
+
+        let biology = dogma_row(
+            3405,
+            &[(ATTR_DURATION_BONUS, 20.0)],
+            &[EFFECT_BOOSTER_DURATION],
+        );
+        assert_eq!(duration_bonus(Some(&biology)), Some(20.0));
+        // Same attribute, other effect (gas harvesting implants).
+        let gas = dogma_row(27238, &[(ATTR_DURATION_BONUS, -3.0)], &[2885]);
+        assert_eq!(duration_bonus(Some(&gas)), None);
     }
 }

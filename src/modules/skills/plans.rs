@@ -535,6 +535,53 @@ pub fn best_remap(
     (best, best_time)
 }
 
+/// The cerebral accelerators the Check column always lists: the New Eden
+/// Store 'Boost' line and the market's Expert Cerebral Accelerator. More
+/// can be added from the static data.
+pub const DEFAULT_ACCELERATORS: [i64; 7] = [72238, 72239, 72240, 72241, 72242, 77919, 55826];
+
+/// How much longer boosters last for this character with these implants,
+/// as a factor (1.0 = base duration). Biology adds its percentage per
+/// level, a BY-805/BY-810 implant its own; EVE multiplies the two.
+pub fn booster_factor(data: &StaticData, standing: &Standing, implants: &[i64]) -> f64 {
+    let mut factor = 1.0;
+    for (&skill_id, &(level, _)) in &standing.skills {
+        if let Some(percent) = data.booster_duration_bonus(skill_id) {
+            factor *= 1.0 + percent * f64::from(level) / 100.0;
+        }
+    }
+    for id in implants {
+        if let Some(percent) = data.booster_duration_bonus(*id) {
+            factor *= 1.0 + percent / 100.0;
+        }
+    }
+    factor
+}
+
+/// Accelerators used back to back for a whole plan: how many, and how much
+/// time is left on the last one when the plan is done.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoosterRun {
+    pub count: u32,
+    pub left_secs: f64,
+}
+
+/// `plan_secs` of training with accelerators that each last `one_secs`.
+pub fn booster_run(plan_secs: f64, one_secs: f64) -> BoosterRun {
+    if one_secs <= 0.0 || plan_secs <= 0.0 {
+        return BoosterRun {
+            count: 0,
+            left_secs: 0.0,
+        };
+    }
+    // Small rounding errors must not ask for one more accelerator.
+    let count = ((plan_secs - 0.5) / one_secs).ceil().max(1.0);
+    BoosterRun {
+        count: count as u32,
+        left_secs: (count * one_secs - plan_secs).max(0.0),
+    }
+}
+
 /// The attribute bonuses of a set of implants.
 pub fn implant_bonuses(data: &StaticData, implants: &[i64]) -> AttributeSet {
     let mut sum = [0; 5];
@@ -755,5 +802,28 @@ mod tests {
         assert!(problem.unwrap().contains("skills_plans.broken-77.toml"));
         assert!(dir.join("skills_plans.broken-77.toml").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accelerators_back_to_back() {
+        let day = 86_400.0;
+        let run = booster_run(10.0 * day, 4.0 * day);
+        assert_eq!(run.count, 3);
+        assert!((run.left_secs - 2.0 * day).abs() < 1.0);
+        // Exactly two: no third one.
+        assert_eq!(booster_run(8.0 * day, 4.0 * day).count, 2);
+        assert_eq!(booster_run(0.0, 4.0 * day).count, 0);
+        assert_eq!(booster_run(1.0, 4.0 * day).count, 1);
+    }
+
+    #[test]
+    fn biology_and_implants_stretch_accelerators() {
+        let data = sample();
+        let mut standing = Standing::default();
+        assert_eq!(booster_factor(&data, &standing, &[]), 1.0);
+        // Biology IV (+80%) and BY-810 (+10%): 1.8 * 1.1.
+        standing.skills.insert(3405, (4, 0));
+        let factor = booster_factor(&data, &standing, &[27148, 9899]);
+        assert!((factor - 1.98).abs() < 1e-9);
     }
 }
