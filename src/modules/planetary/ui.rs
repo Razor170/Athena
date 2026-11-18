@@ -545,7 +545,7 @@ fn planet_row(
 }
 
 /// One bar per launchpad side by side: solid = at the last view, hatched
-/// = estimated since then.
+/// = estimated to have come in since then.
 fn draw_bars(
     painter: &egui::Painter,
     stores: &[&Store],
@@ -559,8 +559,10 @@ fn draw_bars(
         let bar = Rect::from_min_size(Pos2::new(x, area.top()), Vec2::new(width, area.height()));
         painter.rect_filled(bar, 1.0, BAR_BACK);
         let color = fill_color(store.percent(), thresholds);
-        let solid = (store.percent_at_view() / 100.0) as f32 * width;
         let total = (store.percent() / 100.0) as f32 * width;
+        // When factories took more out than came in, the bar just shows
+        // the smaller estimate, without a hatched part.
+        let solid = ((store.percent_at_view() / 100.0) as f32 * width).min(total);
         if solid > 0.0 {
             painter.rect_filled(
                 Rect::from_min_size(bar.min, Vec2::new(solid, bar.height())),
@@ -717,11 +719,12 @@ fn planet_details(
                     }
                 }
                 let mut note = format!("{:.0}%", s.percent_at_view());
-                if s.added_m3 > 0.0 {
+                if s.added_m3 != 0.0 {
+                    let sign = if s.added_m3 > 0.0 { "+" } else { "−" };
                     note = format!(
-                        "{note}, ~{:.0}% now (+{} m³ est.)",
+                        "{note}, ~{:.0}% now ({sign}{} m³ est.)",
                         s.percent(),
-                        grouped(s.added_m3)
+                        grouped(s.added_m3.abs())
                     );
                 }
                 let color = fill_color(s.percent(), &module.settings.thresholds);
