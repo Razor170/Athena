@@ -374,14 +374,15 @@ pub struct Injectors {
 }
 
 /// Injectors needed for `needed_sp` more skill points, after using up
-/// `unallocated_sp`. Each injector counts at the total SP the character
-/// has when it's used, so crossing 5m, 50m or 80m SP is handled. Large
+/// `unallocated_sp`. Each injector counts at the total SP (allocated and
+/// unallocated) the character has when it's used, so crossing 5m, 50m or 80m SP is handled. Large
 /// ones first while a whole one fits, then small ones; five small ones are
 /// shown as one large.
 pub fn injectors_needed(total_sp: i64, unallocated_sp: i64, needed_sp: i64) -> Injectors {
     let missing_sp = (needed_sp - unallocated_sp).max(0);
     let mut missing = missing_sp;
-    let mut sp = total_sp;
+    // The game counts unallocated SP towards the injector brackets.
+    let mut sp = total_sp + unallocated_sp;
     let mut large = 0;
     while missing >= large_injector_sp(sp) {
         let gain = large_injector_sp(sp);
@@ -576,6 +577,10 @@ mod tests {
         // Crossing 5m SP: the first gives 500k, the next 400k.
         let r = injectors_needed(4_900_000, 0, 900_000);
         assert_eq!((r.large, r.small), (2, 0));
+        // Unallocated SP counts towards the bracket: 4.8m + 0.3m is past 5m,
+        // so one large gives 400k.
+        let r = injectors_needed(4_800_000, 300_000, 700_000);
+        assert_eq!((r.large, r.small), (1, 0));
     }
 
     #[test]

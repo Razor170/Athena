@@ -815,7 +815,7 @@ fn skill_row(
         color,
     );
     if have.is_some_and(|s| s.active_level < s.trained_level) {
-        response.on_hover_text("Striped levels are trained but can't be used with an Alpha clone.");
+        response.on_hover_text("Grey levels are trained but can't be used with an Alpha clone.");
     }
 }
 
@@ -957,8 +957,8 @@ fn queue_panel(
                 RichText::new(format!(
                     "A large injector gives {} SP at {} SP (less from 5m, 50m and 80m SP on), \
                      a small one a fifth.",
-                    group_digits(large_injector_sp(skills.total_sp)),
-                    short_sp(skills.total_sp).trim_end_matches(" SP"),
+                    group_digits(large_injector_sp(skills.total_sp + skills.unallocated_sp)),
+                    short_sp(skills.total_sp + skills.unallocated_sp).trim_end_matches(" SP"),
                 ))
                 .size(11.0)
                 .color(FAINT),
