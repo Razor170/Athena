@@ -198,8 +198,12 @@ fn overview(module: &mut Skills, ui: &mut egui::Ui, now: i64) {
                 }
             }
         }
-        // Only there while something is hidden.
+        // Only there while something is hidden. With nothing hidden it
+        // switches off, so the next character you hide disappears.
         let hidden = module.hidden_count();
+        if hidden == 0 {
+            module.ui.show_hidden = false;
+        }
         if hidden > 0 {
             ui.add_space(10.0);
             let on = module.ui.show_hidden;
