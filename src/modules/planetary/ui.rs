@@ -13,6 +13,7 @@ use eframe::egui::{
 
 use super::Planetary;
 use super::data::Colony;
+use super::sim::Outlook;
 use super::status::{Assessment, Level, Store, duration_text};
 use crate::localtime;
 use crate::static_data::PiStructureKind;
@@ -494,7 +495,21 @@ fn planet_row(
     let stores = a.bar_stores();
     let mut status_right = rect.right();
     if !stores.is_empty() {
-        let percent_left = rect.right() - PERCENT_WIDTH;
+        let worst = stores.iter().map(|s| s.percent()).fold(0.0, f64::max);
+        // The hatched part of the bars shows what is estimated; the
+        // details say it in words.
+        let mut text = String::new();
+        if stores.len() > 1 {
+            text.push_str("max ");
+        }
+        text.push_str(&format!("{worst:.0}%"));
+        // "· full 14 h", "· stops at 61%" (see `Assessment::row_outlook`).
+        if let Some(outlook) = a.row_outlook(now) {
+            text.push_str(" · ");
+            text.push_str(&outlook);
+        }
+        let percent = painter.layout_no_wrap(text, FontId::proportional(12.0), TEXT);
+        let percent_left = rect.right() - percent.size().x.max(PERCENT_WIDTH);
         let bars_left = percent_left - BARS_WIDTH - 6.0;
         draw_bars(
             &painter,
@@ -505,15 +520,6 @@ fn planet_row(
             ),
             thresholds,
         );
-        let worst = stores.iter().map(|s| s.percent()).fold(0.0, f64::max);
-        // The hatched part of the bars shows what is estimated; the
-        // details say it in words.
-        let mut text = String::new();
-        if stores.len() > 1 {
-            text.push_str("max ");
-        }
-        text.push_str(&format!("{worst:.0}%"));
-        let percent = painter.layout_no_wrap(text, FontId::proportional(12.0), TEXT);
         let px = rect.right() - percent.size().x;
         painter.galley(Pos2::new(px, line2), percent, TEXT);
         let label = if stores.len() > 1 {
@@ -674,11 +680,20 @@ fn planet_details(
             .schematic_id
             .and_then(|id| data.pi_schematic(id))
             .map_or_else(|| "no schematic".to_string(), |s| s.name.clone());
-        let (note, color) = if f.idle > 0 {
+        let (mut note, color) = if f.idle > 0 {
             (format!("{} idle at last view", f.idle), YELLOW)
+        } else if f.spare == f.count {
+            (String::new(), DIM)
         } else {
             ("running".to_string(), GREEN)
         };
+        if f.spare > 0 {
+            if !note.is_empty() {
+                note.push_str(" · ");
+            }
+            // Nothing is routed to them: not in use, so no warning.
+            note.push_str(&format!("{} spare (no route in)", f.spare));
+        }
         rows.push((
             "Factories".into(),
             format!("{} × {what}", f.count),
@@ -690,6 +705,8 @@ fn planet_details(
         let names: Vec<String> = a.inputs.iter().map(|id| name_of(*id)).collect();
         let (note, color) = if left <= 0 {
             (format!("ran out ~{} ago", duration_text(-left)), RED)
+        } else if a.inputs_past_horizon {
+            (format!("last {}+", duration_text(left)), TEXT)
         } else {
             (format!("last ~{}", duration_text(left)), TEXT)
         };
@@ -729,6 +746,31 @@ fn planet_details(
                 }
                 let color = fill_color(s.percent(), &module.settings.thresholds);
                 let mut color = if color == BAR_GREEN { TEXT } else { color };
+                match s.outlook {
+                    Some(Outlook::FullAt(at)) if at > now => {
+                        note.push_str(&format!(
+                            " · full in ~{} ({})",
+                            duration_text(at - now),
+                            when_text(at)
+                        ));
+                    }
+                    Some(Outlook::StopsAt(m3)) => {
+                        let pct = if s.capacity_m3 > 0.0 {
+                            (m3 / s.capacity_m3 * 100.0).min(100.0)
+                        } else {
+                            0.0
+                        };
+                        note.push_str(&format!(" · stops at {pct:.0}%"));
+                    }
+                    Some(Outlook::Beyond) => {
+                        note.push_str(&format!(
+                            " · full in {}+",
+                            duration_text(super::sim::HORIZON_SECS)
+                        ));
+                    }
+                    Some(Outlook::NotFilling) => note.push_str(" · not filling"),
+                    _ => {}
+                }
                 if !s.is_output {
                     // Feeds factories or passes things on: full is fine.
                     note.push_str(" · input, no warning");
@@ -846,6 +888,21 @@ fn settings_rows(module: &mut Planetary, ui: &mut egui::Ui) {
         1..=60,
         "days",
     );
+    ui.horizontal(|ui| {
+        ui.checkbox(
+            &mut t.overflow_warning,
+            "Overflow warning: yellow when an output pad will be full within",
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label("h");
+            ui.add_enabled(
+                t.overflow_warning,
+                egui::DragValue::new(&mut t.overflow_hours)
+                    .range(1..=168)
+                    .speed(0.2),
+            );
+        });
+    });
     ui.checkbox(
         &mut t.show_estimate,
         "Show estimated launchpad fill since the last in-game view (hatched)",

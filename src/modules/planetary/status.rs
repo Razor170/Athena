@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::config::Thresholds;
 use super::data::{Colony, Pin};
-use super::sim;
+use super::sim::{self, Outlook};
 use crate::static_data::{PiStructureKind, StaticData};
 
 /// How a colony is doing. The order is the sort order: worst first.
@@ -75,6 +75,9 @@ pub struct Store {
     /// or passes on whatever is routed into it. Those are meant to be
     /// full, so they never warn and get no bar in the row.
     pub is_output: bool,
+    /// Where an output store is heading: when it gets full, or where it
+    /// stops. `None` for input stores.
+    pub outlook: Option<Outlook>,
 }
 
 impl Store {
@@ -115,8 +118,11 @@ pub struct FactoryGroup {
     /// `None` for factories without a schematic.
     pub schematic_id: Option<i64>,
     pub count: usize,
-    /// How many were idle at the last view.
+    /// How many were idle at the last view (spare ones not counted).
     pub idle: usize,
+    /// How many have no route bringing them anything: set up but not in
+    /// use. They never warn.
+    pub spare: usize,
 }
 
 /// Everything the planet row and its details show.
@@ -135,6 +141,9 @@ pub struct Assessment {
     /// Seconds the inputs still last from now (negative: ran out that long
     /// ago). `None` when the factories need no outside inputs.
     pub inputs_left: Option<i64>,
+    /// The inputs last past the simulation's look-ahead: `inputs_left` is
+    /// then only "at least".
+    pub inputs_past_horizon: bool,
 }
 
 impl Assessment {
@@ -148,6 +157,37 @@ impl Assessment {
         } else {
             pads
         }
+    }
+}
+
+impl Assessment {
+    /// What the row says after the percent: "full 14 h" for the bar store
+    /// that gets full first, "full 30d+" when one still fills past the
+    /// look-ahead, or "stops at 61%" when the fullest one stops below
+    /// full. `None` when nothing fills (or a store is full already).
+    pub fn row_outlook(&self, now: i64) -> Option<String> {
+        let stores = self.bar_stores();
+        if let Some(at) = stores
+            .iter()
+            .filter_map(|s| match s.outlook {
+                Some(Outlook::FullAt(at)) => Some(at),
+                _ => None,
+            })
+            .min()
+        {
+            return (at > now).then(|| format!("full {}", duration_text(at - now)));
+        }
+        if stores.iter().any(|s| s.outlook == Some(Outlook::Beyond)) {
+            return Some(format!("full {}+", duration_text(sim::HORIZON_SECS)));
+        }
+        stores
+            .iter()
+            .filter_map(|s| match s.outlook {
+                Some(Outlook::StopsAt(m3)) => Some(percent(m3, s.capacity_m3)),
+                _ => None,
+            })
+            .max_by(f64::total_cmp)
+            .map(|pct| format!("stops at {pct:.0}%"))
     }
 }
 
@@ -166,6 +206,7 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
             factories: Vec::new(),
             inputs: Vec::new(),
             inputs_left: None,
+            inputs_past_horizon: false,
         };
     };
     let kind_of = |pin: &Pin| -> Option<PiStructureKind> {
@@ -216,14 +257,23 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
             (Some(s), Some(start)) => start + s.cycle_secs + IDLE_SLACK_SECS < colony.last_update,
             _ => true,
         };
+        // A factory no route brings anything to is a spare one (only when
+        // the layout has routes at all).
+        let spare =
+            !layout.routes.is_empty() && !layout.routes.iter().any(|r| r.destination == pin.pin_id);
         let group = groups
             .entry(pin.schematic_id.filter(|_| schematic.is_some()))
             .or_insert(FactoryGroup {
                 schematic_id: pin.schematic_id.filter(|_| schematic.is_some()),
                 count: 0,
                 idle: 0,
+                spare: 0,
             });
         group.count += 1;
+        if spare {
+            group.spare += 1;
+            continue;
+        }
         if idle {
             group.idle += 1;
         }
@@ -240,6 +290,8 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
     let factories: Vec<FactoryGroup> = groups.into_values().collect();
     let factory_count: usize = factories.iter().map(|g| g.count).sum();
     let idle_count: usize = factories.iter().map(|g| g.idle).sum();
+    // Factories in use: spare ones aren't counted in the texts.
+    let working_count = factory_count - factories.iter().map(|g| g.spare).sum::<usize>();
 
     // ---- Launchpads and storage
     let mut stores: Vec<(i64, Store)> = Vec::new();
@@ -286,6 +338,7 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
                     .map_or(0.0, |s| s.capacity_m3),
                 used_m3: contents.iter().map(|(id, n)| *n as f64 * volume(*id)).sum(),
                 added_m3: 0.0,
+                outlook: None,
                 contents,
             },
         ));
@@ -308,11 +361,17 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
         .filter_map(|p| Some((p.pin_id, kind_of(p)?)))
         .collect();
     let outside: BTreeSet<i64> = inputs.iter().copied().collect();
+    let watch: BTreeSet<i64> = stores
+        .iter()
+        .filter(|(_, s)| s.is_output)
+        .map(|(id, _)| *id)
+        .collect();
     let played = sim::simulate(
         layout,
         data,
         &kinds,
         &outside,
+        &watch,
         colony.last_update,
         now.max(colony.last_update),
     );
@@ -325,12 +384,24 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
             }
         }
     }
+    for (pin_id, store) in stores.iter_mut() {
+        store.outlook = played.outlook.get(pin_id).copied();
+    }
     // Seconds from now until the inputs run out (negative: that long ago).
     // If they last past the simulation's horizon, they last at least that.
     let inputs_left = if inputs.is_empty() {
         None
     } else {
         Some(played.starved_at.unwrap_or(played.horizon) - now)
+    };
+    let inputs_past_horizon = inputs_left.is_some() && played.starved_at.is_none();
+    // "~5d 2h", or "30d+" past the look-ahead.
+    let inputs_text = |left: i64| {
+        if inputs_past_horizon {
+            format!("{}+", duration_text(left))
+        } else {
+            format!("~{}", duration_text(left))
+        }
     };
 
     // ---- Problems, worst first.
@@ -370,7 +441,7 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
     let inputs_empty = inputs_left.is_some_and(|left| left <= 0);
     if inputs_empty {
         let text = if idle_count > 0 {
-            format!("{idle_count} of {factory_count} factories idle · inputs empty")
+            format!("{idle_count} of {working_count} factories idle · inputs empty")
         } else {
             "Factory inputs ran out".to_string()
         };
@@ -379,7 +450,7 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
         if let Some(left) = inputs_left
             && left < t.factory_soon_hours as i64 * 3600
         {
-            issues.push((Level::Soon, format!("Inputs last ~{}", duration_text(left))));
+            issues.push((Level::Soon, format!("Inputs last {}", inputs_text(left))));
         }
         // Basic factories fed by a running extractor are often idle when
         // you look, waiting for the next batch. That's normal; idle
@@ -389,7 +460,7 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
         if idle_count > 0 && idle_matters {
             issues.push((
                 Level::Soon,
-                format!("{idle_count} of {factory_count} factories idle at last view"),
+                format!("{idle_count} of {working_count} factories idle at last view"),
             ));
         }
     }
@@ -398,11 +469,29 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
         .map(|(_, s)| s)
         .filter(|s| s.is_output)
         .max_by(|a, b| a.percent().total_cmp(&b.percent()));
+    // The output store that gets full first, if that is soon.
+    let overflow = stores
+        .iter()
+        .map(|(_, s)| s)
+        .filter(|s| s.is_output && s.percent() < t.full_percent as f64)
+        .filter_map(|s| match s.outlook {
+            Some(Outlook::FullAt(at)) if at > now => Some((at, s)),
+            _ => None,
+        })
+        .min_by_key(|(at, _)| *at)
+        .filter(|(at, _)| t.overflow_warning && at - now <= t.overflow_hours as i64 * 3600);
     if let Some(store) = fullest {
         let name = store_name(&stores, store);
         let pct = store.percent();
         if pct >= t.full_percent as f64 {
             issues.push((Level::Attention, format!("{name} full")));
+        } else if let Some((at, soon)) = overflow {
+            // Says more than "at 80%", so it replaces that.
+            let name = store_name(&stores, soon);
+            issues.push((
+                Level::Soon,
+                format!("{name} full in ~{}", duration_text(at - now)),
+            ));
         } else if pct >= t.warn_percent as f64 {
             issues.push((Level::Soon, format!("{name} at {pct:.0}%")));
         }
@@ -439,15 +528,15 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
                     duration_text(end - now)
                 ));
             }
-            if factory_count > 0 {
-                let noun = if factory_count == 1 {
+            if working_count > 0 {
+                let noun = if working_count == 1 {
                     "factory"
                 } else {
                     "factories"
                 };
-                let mut text = format!("{factory_count} {noun} running");
+                let mut text = format!("{working_count} {noun} running");
                 if let Some(left) = inputs_left {
-                    text.push_str(&format!(" · inputs last ~{}", duration_text(left)));
+                    text.push_str(&format!(" · inputs last {}", inputs_text(left)));
                 }
                 parts.push(text);
             }
@@ -469,6 +558,7 @@ pub fn assess(colony: &Colony, data: &StaticData, t: &Thresholds, now: i64) -> A
         factories,
         inputs,
         inputs_left,
+        inputs_past_horizon,
     }
 }
 
@@ -970,6 +1060,98 @@ mod tests {
             "added {}",
             pad.added_m3
         );
+    }
+
+    /// An extractor with 5x the yield of `ecu`: 250 m³ per 30 min.
+    fn big_ecu(pin_id: i64, expiry: i64) -> Pin {
+        let mut pin = ecu(pin_id, expiry);
+        if let Some(ex) = pin.extractor.as_mut() {
+            ex.qty_per_cycle = 50_000;
+        }
+        pin
+    }
+
+    #[test]
+    fn overflow_warning_before_the_pad_is_full() {
+        let data = sample();
+        // 6,500 of 10,000 m³ (65%), 500 m³ per hour more: full in 7 h.
+        let pins = vec![
+            big_ecu(1, NOW + 5 * 86_400),
+            pad(2, vec![(AQUEOUS, 1_300_000)]),
+        ];
+        let routes = vec![route(1, 2, AQUEOUS)];
+        let c = colony(pins, routes, NOW);
+        let a = assess(&c, &data, &defaults(), NOW);
+        assert_eq!(
+            a.launchpads[0].outlook,
+            Some(Outlook::FullAt(NOW + 7 * 3600))
+        );
+        assert_eq!(a.row_outlook(NOW).as_deref(), Some("full 7 h"));
+        assert_eq!(a.level, Level::Soon);
+        assert_eq!(a.headline, "Launchpad full in ~7 h");
+
+        // Outside the warning time, or switched off: no warning, but the
+        // row still says when.
+        for t in [
+            Thresholds {
+                overflow_hours: 6,
+                ..defaults()
+            },
+            Thresholds {
+                overflow_warning: false,
+                ..defaults()
+            },
+        ] {
+            let a = assess(&c, &data, &t, NOW);
+            assert_eq!(a.level, Level::Active);
+            assert_eq!(a.row_outlook(NOW).as_deref(), Some("full 7 h"));
+        }
+    }
+
+    #[test]
+    fn pad_stops_filling_when_the_extractor_ends() {
+        let data = sample();
+        // 4 more cycles of 50 m³ before the program ends: 10% -> 12%.
+        let pins = vec![ecu(1, NOW + 2 * 3600), pad(2, vec![(AQUEOUS, 200_000)])];
+        let routes = vec![route(1, 2, AQUEOUS)];
+        let a = assess(&colony(pins, routes, NOW), &data, &defaults(), NOW);
+        assert_eq!(a.launchpads[0].outlook, Some(Outlook::StopsAt(1200.0)));
+        assert_eq!(a.row_outlook(NOW).as_deref(), Some("stops at 12%"));
+    }
+
+    #[test]
+    fn inputs_and_pads_past_the_look_ahead() {
+        let data = sample();
+        // 100,000 Water lasts 1,250 h: past the 30-day look-ahead, and the
+        // output pad (7.5 m³ an hour) isn't full by then either.
+        let (pins, routes) = factory_planet(
+            vec![(PLASMOIDS, 100_000), (WATER, 100_000)],
+            vec![(9838, 1000)],
+        );
+        let a = assess(&colony(pins, routes, NOW), &data, &defaults(), NOW);
+        assert!(a.inputs_past_horizon);
+        assert_eq!(a.headline, "2 factories running · inputs last 30d+");
+        assert_eq!(a.launchpads[1].outlook, Some(Outlook::Beyond));
+        assert_eq!(a.row_outlook(NOW).as_deref(), Some("full 30d+"));
+        // The input pad isn't watched.
+        assert_eq!(a.launchpads[0].outlook, None);
+    }
+
+    #[test]
+    fn spare_factory_without_routes_does_not_warn() {
+        let data = sample();
+        let (mut pins, routes) = factory_planet(
+            vec![(PLASMOIDS, 26_000), (WATER, 26_000)],
+            vec![(9838, 1000)],
+        );
+        // A third Superconductor factory nothing is routed to, idle.
+        pins.push(factory(5, ADVANCED, 65, NOW - 30 * 86_400));
+        let a = assess(&colony(pins, routes, NOW), &data, &defaults(), NOW);
+        assert_eq!(a.level, Level::Active);
+        assert_eq!(a.factories[0].count, 3);
+        assert_eq!(a.factories[0].spare, 1);
+        assert_eq!(a.factories[0].idle, 0);
+        assert!(a.headline.starts_with("2 factories running"));
     }
 
     #[test]
