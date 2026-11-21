@@ -11,9 +11,9 @@
 //!   whichever is later. Sent with its ETag, so an unchanged list costs
 //!   almost nothing.
 //! - a colony's layout: with every colony list round, sent with its ETag.
-//!   `last_update` in the list doesn't always move when a layout changes
-//!   (a launchpad filled from the customs office, or a stale copy fetched
-//!   right after a change), so it isn't trusted to say when to look.
+//!   `last_update` in the list isn't trusted to say when to look: a copy
+//!   ESI still had cached from before an edit would otherwise stay
+//!   forever, and some changes may not move `last_update` at all.
 //! - planet names: once per planet, ever (they're saved).
 //! - the Interplanetary Consolidation skill: every 6 hours.
 //!
@@ -332,9 +332,9 @@ impl Fetcher {
     ///
     /// Each layout is asked for again every round, with its ETag, even
     /// when the list (and so the colony's `last_update`) is unchanged: a
-    /// layout can change without `last_update` moving (for example
-    /// commodities put on a launchpad from the customs office, or a
-    /// layout ESI still had cached from before the last edit). An
+    /// layout ESI still had cached from before the last edit is never
+    /// replaced otherwise, and some changes (perhaps commodities put on a
+    /// launchpad from the customs office) may not move `last_update`. An
     /// unchanged layout costs only a short "not modified" answer.
     #[allow(clippy::type_complexity)]
     fn fetch_colonies(
@@ -373,8 +373,7 @@ impl Fetcher {
                         colony
                     })
                     .collect();
-                let changed = colonies.len() != saved.len()
-                    || colonies.iter().any(|c| saved.get(&c.planet_id) != Some(c));
+                let changed = list_changed(self.cache.colonies.get(&id), &colonies);
                 (colonies, changed, etag)
             }
         };
@@ -489,6 +488,22 @@ impl Fetcher {
     }
 }
 
+/// Is a freshly fetched colony list (with the saved layouts already put
+/// back in) different from the saved one? A character with nothing saved
+/// yet always counts as changed, so even an empty list reaches the module
+/// (and its card says "No colonies." instead of waiting).
+fn list_changed(saved: Option<&Vec<Colony>>, fresh: &[Colony]) -> bool {
+    let Some(saved) = saved else {
+        return true;
+    };
+    fresh.len() != saved.len()
+        || fresh.iter().any(|c| {
+            !saved
+                .iter()
+                .any(|old| old.planet_id == c.planet_id && old == c)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,5 +538,41 @@ mod tests {
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(Cache::load(&path), Cache::default());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn colony(planet_id: i64, last_update: i64) -> Colony {
+        Colony {
+            character_id: 7,
+            planet_id,
+            system_id: 30_000_001,
+            planet_type: "barren".into(),
+            upgrade_level: 5,
+            num_pins: 3,
+            last_update,
+            layout: Some(Layout::default()),
+        }
+    }
+
+    #[test]
+    fn list_changed_spots_new_lists_and_edits() {
+        // Nothing saved yet: even an empty list is news.
+        assert!(list_changed(None, &[]));
+        assert!(!list_changed(Some(&vec![]), &[]));
+        let saved = vec![colony(1, 100), colony(2, 100)];
+        assert!(!list_changed(
+            Some(&saved),
+            &[colony(1, 100), colony(2, 100)]
+        ));
+        // Viewed again in the game.
+        assert!(list_changed(
+            Some(&saved),
+            &[colony(1, 100), colony(2, 200)]
+        ));
+        // A colony gone, or a new one.
+        assert!(list_changed(Some(&saved), &[colony(1, 100)]));
+        assert!(list_changed(
+            Some(&saved),
+            &[colony(1, 100), colony(3, 100)]
+        ));
     }
 }
