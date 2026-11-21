@@ -98,7 +98,7 @@ fn check_status(response: Response) -> Result<Response> {
         StatusCode::NOT_FOUND => Err(anyhow!(
             "GitHub can't find Athena's releases. The repository may have moved or become private."
         )),
-        StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => {
+        StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS if is_rate_limited(&response) => {
             let wait = rate_limit_reset(&response)
                 .and_then(|reset| minutes_until(reset, unix_now()))
                 .map(|minutes| format!("Try again in about {minutes} min."))
@@ -109,6 +109,18 @@ fn check_status(response: Response) -> Result<Response> {
         }
         status => Err(anyhow!("GitHub answered with an error ({status}).")),
     }
+}
+
+/// True when GitHub refused because of its rate limit. A 403 can also mean
+/// other things (blocked by policy, for example), which aren't limits.
+fn is_rate_limited(response: &Response) -> bool {
+    let headers = response.headers();
+    response.status() == StatusCode::TOO_MANY_REQUESTS
+        || headers.contains_key("retry-after")
+        || headers
+            .get("x-ratelimit-remaining")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|text| text.trim() == "0")
 }
 
 /// When GitHub's hourly limit resets, as Unix seconds, if it said so.
@@ -211,8 +223,9 @@ pub fn download(
     cancel: &AtomicBool,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<()> {
-    // GitHub answers with a redirect to its file servers, which reqwest
-    // follows. Only the API call counts toward the hourly limit.
+    // This asks api.github.com (one call toward the hourly limit), which
+    // answers with a redirect to its file servers. reqwest follows it, and
+    // the file servers don't count toward the limit.
     let response = github_request(client.get(&release.asset_url))
         .header("Accept", "application/octet-stream")
         .send()
