@@ -10,8 +10,10 @@
 //! - the colony list: every 10 minutes, or when ESI says its copy expires,
 //!   whichever is later. Sent with its ETag, so an unchanged list costs
 //!   almost nothing.
-//! - a colony's layout: only when the list says the colony was viewed in
-//!   the game since we last fetched it.
+//! - a colony's layout: with every colony list round, sent with its ETag.
+//!   `last_update` in the list isn't trusted to say when to look: a copy
+//!   ESI still had cached from before an edit would otherwise stay
+//!   forever, and some changes may not move `last_update` at all.
 //! - planet names: once per planet, ever (they're saved).
 //! - the Interplanetary Consolidation skill: every 6 hours.
 //!
@@ -144,13 +146,17 @@ impl Worker {
     }
 }
 
-/// When each kind of data is due next for one character, and the ETag of
-/// the colony list from last time.
+/// When each kind of data is due next for one character, and the ETags
+/// from last time. ETags are only kept in memory: after a restart every
+/// layout is fetched once in full.
 #[derive(Default)]
 struct Schedule {
     colonies_due: i64,
     skills_due: i64,
+    /// Of the colony list.
     etag: Option<String>,
+    /// Planet id -> ETag of that colony's layout.
+    layout_etags: HashMap<i64, String>,
 }
 
 /// Owns the ESI client, the token store, the cache and the schedule.
@@ -319,10 +325,17 @@ impl Fetcher {
         }
     }
 
-    /// The character's colony list, with each layout fetched again only
-    /// when the colony was viewed since the saved copy. Returns `None` for
-    /// the list when ESI says nothing changed, how many seconds until ESI
-    /// has fresh data, and a problem if some layouts couldn't be fetched.
+    /// The character's colony list and every colony's layout. Returns
+    /// `None` for the list when nothing changed, how many seconds until
+    /// ESI has a fresh list, and a problem if some layouts couldn't be
+    /// fetched.
+    ///
+    /// Each layout is asked for again every round, with its ETag, even
+    /// when the list (and so the colony's `last_update`) is unchanged: a
+    /// layout ESI still had cached from before the last edit is never
+    /// replaced otherwise, and some changes (perhaps commodities put on a
+    /// launchpad from the customs office) may not move `last_update`. An
+    /// unchanged layout costs only a short "not modified" answer.
     #[allow(clippy::type_complexity)]
     fn fetch_colonies(
         &mut self,
@@ -331,14 +344,10 @@ impl Fetcher {
     ) -> Result<(Option<Vec<Colony>>, i64, Option<String>)> {
         let etag = self.characters.get(&id).and_then(|s| s.etag.clone());
         let path = format!("/characters/{id}/planets");
-        let (list, new_etag) =
-            match self
-                .esi
-                .get_json_authed::<Vec<EsiColony>>(&path, token, etag.as_deref())?
-            {
-                Fetched::NotModified => return Ok((None, self.expires_in_secs(), None)),
-                Fetched::Data { value, etag, .. } => (value, etag),
-            };
+        let fetched = self
+            .esi
+            .get_json_authed::<Vec<EsiColony>>(&path, token, etag.as_deref())?;
+        // Read now: the layout requests below overwrite it.
         let expires = self.expires_in_secs();
         let saved: HashMap<i64, Colony> = self
             .cache
@@ -347,43 +356,73 @@ impl Fetcher {
             .map(|list| list.iter().map(|c| (c.planet_id, c.clone())).collect())
             .unwrap_or_default();
 
-        let mut colonies = Vec::new();
+        // The colonies as the list says, still with their saved layouts.
+        let (mut colonies, list_changed, new_etag) = match fetched {
+            Fetched::NotModified => {
+                let colonies = self.cache.colonies.get(&id).cloned().unwrap_or_default();
+                (colonies, false, etag)
+            }
+            Fetched::Data { value, etag, .. } => {
+                let colonies: Vec<Colony> = value
+                    .into_iter()
+                    .filter_map(|line| Colony::from_esi(id, line))
+                    .map(|mut colony| {
+                        colony.layout = saved
+                            .get(&colony.planet_id)
+                            .and_then(|old| old.layout.clone());
+                        colony
+                    })
+                    .collect();
+                let changed = list_changed(self.cache.colonies.get(&id), &colonies);
+                (colonies, changed, etag)
+            }
+        };
+
+        let mut layout_changed = false;
         let mut failed = 0;
-        for line in list {
-            let Some(mut colony) = Colony::from_esi(id, line) else {
-                continue;
-            };
-            let old = saved.get(&colony.planet_id);
-            let unchanged = old
-                .is_some_and(|old| old.last_update == colony.last_update && old.layout.is_some());
-            if unchanged {
-                colony.layout = old.and_then(|old| old.layout.clone());
+        for colony in colonies.iter_mut() {
+            // Without a saved layout, ask without an ETag, so ESI sends it.
+            let layout_etag = if colony.layout.is_some() {
+                self.characters
+                    .get(&id)
+                    .and_then(|s| s.layout_etags.get(&colony.planet_id).cloned())
             } else {
-                let path = format!("/characters/{id}/planets/{}", colony.planet_id);
-                match self.esi.get_json_authed::<EsiLayout>(&path, token, None) {
-                    Ok(Fetched::Data { value, .. }) => {
-                        colony.layout = Some(Layout::from_esi(value));
+                None
+            };
+            let path = format!("/characters/{id}/planets/{}", colony.planet_id);
+            match self
+                .esi
+                .get_json_authed::<EsiLayout>(&path, token, layout_etag.as_deref())
+            {
+                Ok(Fetched::Data { value, etag, .. }) => {
+                    let layout = Layout::from_esi(value);
+                    if colony.layout.as_ref() != Some(&layout) {
+                        colony.layout = Some(layout);
+                        layout_changed = true;
                     }
-                    _ => {
-                        // Keep the old layout, if any, and try again next
-                        // time (the ETag isn't saved below).
-                        colony.layout = old.and_then(|old| old.layout.clone());
-                        failed += 1;
+                    if let Some(s) = self.characters.get_mut(&id) {
+                        match etag {
+                            Some(etag) => s.layout_etags.insert(colony.planet_id, etag),
+                            None => s.layout_etags.remove(&colony.planet_id),
+                        };
                     }
                 }
+                // Unchanged since last time: keep the saved layout.
+                Ok(Fetched::NotModified) => {}
+                // Keep the saved layout, if any, and try again next round.
+                Err(_) => failed += 1,
             }
-            colonies.push(colony);
         }
         let problem = (failed > 0)
             .then(|| format!("{failed} planet layout(s) couldn't be fetched; trying again later"));
-        // Only remember the ETag when every layout is in, so a failed one
-        // is fetched again next time.
-        if failed == 0
-            && let Some(s) = self.characters.get_mut(&id)
-        {
+        if let Some(s) = self.characters.get_mut(&id) {
             s.etag = new_etag;
+            // Forget the ETags of colonies that are gone.
+            s.layout_etags
+                .retain(|planet_id, _| colonies.iter().any(|c| c.planet_id == *planet_id));
         }
-        Ok((Some(colonies), expires, problem))
+        let colonies = (list_changed || layout_changed).then_some(colonies);
+        Ok((colonies, expires, problem))
     }
 
     fn fetch_max_planets(&mut self, id: u64, token: &str) -> Result<u32> {
@@ -449,6 +488,22 @@ impl Fetcher {
     }
 }
 
+/// Is a freshly fetched colony list (with the saved layouts already put
+/// back in) different from the saved one? A character with nothing saved
+/// yet always counts as changed, so even an empty list reaches the module
+/// (and its card says "No colonies." instead of waiting).
+fn list_changed(saved: Option<&Vec<Colony>>, fresh: &[Colony]) -> bool {
+    let Some(saved) = saved else {
+        return true;
+    };
+    fresh.len() != saved.len()
+        || fresh.iter().any(|c| {
+            !saved
+                .iter()
+                .any(|old| old.planet_id == c.planet_id && old == c)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,5 +538,41 @@ mod tests {
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(Cache::load(&path), Cache::default());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn colony(planet_id: i64, last_update: i64) -> Colony {
+        Colony {
+            character_id: 7,
+            planet_id,
+            system_id: 30_000_001,
+            planet_type: "barren".into(),
+            upgrade_level: 5,
+            num_pins: 3,
+            last_update,
+            layout: Some(Layout::default()),
+        }
+    }
+
+    #[test]
+    fn list_changed_spots_new_lists_and_edits() {
+        // Nothing saved yet: even an empty list is news.
+        assert!(list_changed(None, &[]));
+        assert!(!list_changed(Some(&vec![]), &[]));
+        let saved = vec![colony(1, 100), colony(2, 100)];
+        assert!(!list_changed(
+            Some(&saved),
+            &[colony(1, 100), colony(2, 100)]
+        ));
+        // Viewed again in the game.
+        assert!(list_changed(
+            Some(&saved),
+            &[colony(1, 100), colony(2, 200)]
+        ));
+        // A colony gone, or a new one.
+        assert!(list_changed(Some(&saved), &[colony(1, 100)]));
+        assert!(list_changed(
+            Some(&saved),
+            &[colony(1, 100), colony(3, 100)]
+        ));
     }
 }
