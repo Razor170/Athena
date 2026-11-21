@@ -242,6 +242,6 @@ pub const SECTIONS: &[Section] = &[
              [Update now], then [Restart now] or [On next start]. Settings, layout and \
              history are kept.",
         ],
-        note: "Updates need a read-only GitHub token, pasted once in Settings › Updates.",
+        note: "",
     },
 ];

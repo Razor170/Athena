@@ -1,13 +1,15 @@
 //! Talking to GitHub: which releases exist, and downloading one.
 //!
-//! The repo is private, so every request carries the user's read-only token.
+//! The repo is public, so requests go out anonymously, without a token.
+//! GitHub allows 60 anonymous API calls an hour per IP address; a check is
+//! one call and a download one more, so a person never gets near that.
 //! These functions block, so they only run on the updater's background thread.
 
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::StatusCode;
@@ -58,15 +60,6 @@ pub struct Release {
     pub size: u64,
 }
 
-/// What a check found out.
-pub struct CheckResult {
-    /// The newest release Athena may update to, whether or not it is newer
-    /// than this version (the caller compares).
-    pub newest: Option<Release>,
-    /// When the token stops working, `YYYY-MM-DD`, if GitHub said so.
-    pub token_expires: Option<String>,
-}
-
 /// Builds the HTTP client. No overall time limit, because a download can
 /// take a while on a slow line; the API call sets its own limit.
 pub fn client() -> Result<Client> {
@@ -79,51 +72,81 @@ pub fn client() -> Result<Client> {
 }
 
 /// Headers every GitHub API call needs.
-fn github_request(builder: RequestBuilder, token: &str) -> RequestBuilder {
-    builder
-        .bearer_auth(token)
-        .header("X-GitHub-Api-Version", "2022-11-28")
+fn github_request(builder: RequestBuilder) -> RequestBuilder {
+    builder.header("X-GitHub-Api-Version", "2022-11-28")
 }
 
-/// Asks GitHub for the recent releases and picks the newest usable one.
-pub fn check(client: &Client, token: &str, include_prereleases: bool) -> Result<CheckResult> {
-    let response = github_request(client.get(RELEASES_URL), token)
+/// Asks GitHub for the recent releases and picks the newest usable one,
+/// whether or not it is newer than this version (the caller compares).
+pub fn check(client: &Client, include_prereleases: bool) -> Result<Option<Release>> {
+    let response = github_request(client.get(RELEASES_URL))
         .header("Accept", "application/vnd.github+json")
         .timeout(Duration::from_secs(30))
         .send()
         .context("can't reach GitHub")?;
     let response = check_status(response)?;
-    let token_expires = response
-        .headers()
-        .get("github-authentication-token-expiration")
-        .and_then(|value| value.to_str().ok())
-        // "2027-11-10 19:00:00 UTC": the date is enough.
-        .and_then(|text| text.get(..10))
-        .map(str::to_string);
     let releases: Vec<ApiRelease> = response
         .json()
         .context("GitHub sent a list of releases Athena can't read")?;
-    Ok(CheckResult {
-        newest: newest_release(releases, include_prereleases),
-        token_expires,
-    })
+    Ok(newest_release(releases, include_prereleases))
 }
 
 /// Turns GitHub's error codes into messages that say what to do.
 fn check_status(response: Response) -> Result<Response> {
     match response.status() {
         status if status.is_success() => Ok(response),
-        StatusCode::UNAUTHORIZED => Err(anyhow!(
-            "GitHub refused the token. It may have expired; make a new one in Settings."
-        )),
         StatusCode::NOT_FOUND => Err(anyhow!(
-            "GitHub can't find Athena with this token. Check that the token has access to the Athena repository with Contents: Read-only."
+            "GitHub can't find Athena's releases. The repository may have moved or become private."
         )),
-        StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => Err(anyhow!(
-            "GitHub is limiting requests right now. Try again in a few minutes."
-        )),
+        StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS if is_rate_limited(&response) => {
+            let wait = rate_limit_reset(&response)
+                .and_then(|reset| minutes_until(reset, unix_now()))
+                .map(|minutes| format!("Try again in about {minutes} min."))
+                .unwrap_or_else(|| "Try again in a few minutes.".to_string());
+            Err(anyhow!(
+                "GitHub is limiting requests from this connection (60 an hour without sign-in). {wait}"
+            ))
+        }
         status => Err(anyhow!("GitHub answered with an error ({status}).")),
     }
+}
+
+/// True when GitHub refused because of its rate limit. A 403 can also mean
+/// other things (blocked by policy, for example), which aren't limits.
+fn is_rate_limited(response: &Response) -> bool {
+    let headers = response.headers();
+    response.status() == StatusCode::TOO_MANY_REQUESTS
+        || headers.contains_key("retry-after")
+        || headers
+            .get("x-ratelimit-remaining")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|text| text.trim() == "0")
+}
+
+/// When GitHub's hourly limit resets, as Unix seconds, if it said so.
+fn rate_limit_reset(response: &Response) -> Option<u64> {
+    response
+        .headers()
+        .get("x-ratelimit-reset")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|text| text.trim().parse().ok())
+}
+
+/// Whole minutes (at least 1) from `now` until `reset`, both Unix seconds.
+/// `None` when the time looks wrong (in the past, or over an hour ahead).
+fn minutes_until(reset: u64, now: u64) -> Option<u64> {
+    let seconds = reset.checked_sub(now)?;
+    if seconds > 3600 {
+        return None;
+    }
+    Some(seconds.div_ceil(60).max(1))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
 }
 
 /// The newest release that has our zip, skipping drafts, tags that aren't
@@ -195,16 +218,15 @@ fn note_lines(body: &str) -> Vec<String> {
 /// when `cancel` is set.
 pub fn download(
     client: &Client,
-    token: &str,
     release: &Release,
     destination: &Path,
     cancel: &AtomicBool,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<()> {
-    // GitHub answers with a redirect to its file servers. reqwest follows it
-    // and drops the token from the request when the host changes, so the
-    // token only ever goes to api.github.com.
-    let response = github_request(client.get(&release.asset_url), token)
+    // This asks api.github.com (one call toward the hourly limit), which
+    // answers with a redirect to its file servers. reqwest follows it, and
+    // the file servers don't count toward the limit.
+    let response = github_request(client.get(&release.asset_url))
         .header("Accept", "application/octet-stream")
         .send()
         .context("can't reach GitHub")?;
@@ -301,6 +323,15 @@ mod tests {
         ];
         assert_eq!(newest_release(list, true).unwrap().version_text, "0.1.0");
         assert_eq!(newest_release(Vec::new(), true), None);
+    }
+
+    #[test]
+    fn rate_limit_wait_in_minutes() {
+        assert_eq!(minutes_until(1_000 + 90, 1_000), Some(2));
+        assert_eq!(minutes_until(1_000 + 5, 1_000), Some(1));
+        assert_eq!(minutes_until(1_000, 1_000), Some(1));
+        assert_eq!(minutes_until(999, 1_000), None);
+        assert_eq!(minutes_until(1_000 + 7_200, 1_000), None);
     }
 
     #[test]

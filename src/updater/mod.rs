@@ -1,7 +1,11 @@
 //! The auto-updater: finds newer Athena releases on GitHub, downloads one
 //! and swaps it in on restart (PLAN.md Step 7).
 //!
-//! All GitHub, Credential Manager and file work happens on one background
+//! The repo is public, so GitHub is asked anonymously: no token, no
+//! sign-in. Anonymous calls are limited to 60 an hour per IP address, and a
+//! check is one call, so that is plenty.
+//!
+//! All GitHub and file work happens on one background
 //! thread. The UI sends it a [`Command`] and gets [`Event`]s back through
 //! channels, which `update` drains each frame. The thread asks for a repaint
 //! only when it has news, so the updater costs nothing while idle.
@@ -22,30 +26,18 @@ use eframe::egui;
 use crate::settings::Settings;
 use crate::storage::DataDir;
 use crate::version;
-use github::{CheckResult, Release};
+use github::Release;
 use semver::Version;
 
 pub use install::{Startup, StartupInfo};
 
-/// Where to make the token. Opens GitHub's "new fine-grained token" page.
-const NEW_TOKEN_URL: &str = "https://github.com/settings/personal-access-tokens/new";
-/// From this many days before the token expires, Settings warns about it.
-const EXPIRY_WARNING_DAYS: i64 = 14;
-
 /// Work for the background thread.
-// No `Debug` on purpose: `SaveToken` holds the token, and it must never
-// end up in debug output.
 enum Command {
-    /// Read the token and, if asked, check for updates.
+    /// Remove the old token and, if asked, check for updates.
     Startup {
         check: bool,
         include_prereleases: bool,
     },
-    SaveToken {
-        token: String,
-        include_prereleases: bool,
-    },
-    RemoveToken,
     Check {
         include_prereleases: bool,
     },
@@ -54,15 +46,12 @@ enum Command {
 
 /// News from the background thread.
 enum Event {
-    TokenStatus {
-        saved: bool,
-        error: Option<String>,
-    },
     Checked {
         /// True when the user pressed a button (errors are then shown in
         /// the strip); false for the quiet check at startup.
         manual: bool,
-        result: Result<CheckResult, String>,
+        /// The newest release Athena may update to, if any.
+        result: Result<Option<Release>, String>,
     },
     Progress {
         done: u64,
@@ -113,13 +102,6 @@ pub struct Updater {
     /// True when the data folder fell back to %APPDATA%, which means
     /// Athena's own folder isn't writable and files can't be swapped there.
     folder_read_only: bool,
-    /// `None` until the background thread has looked.
-    token_saved: Option<bool>,
-    token_expires: Option<String>,
-    /// What the user is typing into the token field. Cleared on save.
-    token_input: String,
-    /// True while the "Replace" field is open for a saved token.
-    replacing_token: bool,
     strip: Strip,
     notes_open: bool,
     status: Option<(Tone, String)>,
@@ -164,10 +146,6 @@ impl Updater {
             events: event_rx,
             cancel,
             folder_read_only: data_dir.is_fallback,
-            token_saved: None,
-            token_expires: None,
-            token_input: String::new(),
-            replacing_token: false,
             strip: Strip::Hidden,
             notes_open: false,
             status: startup.note.map(|note| (Tone::Normal, note)),
@@ -188,24 +166,11 @@ impl Updater {
 
     fn handle(&mut self, event: Event) {
         match event {
-            Event::TokenStatus { saved, error } => {
-                self.token_saved = Some(saved);
-                if !saved {
-                    self.token_expires = None;
-                    self.checking = false;
-                }
-                if let Some(error) = error {
-                    self.status = Some((Tone::Bad, error));
-                }
-            }
             Event::Checked { manual, result } => {
                 self.checking = false;
                 self.checked_at = Some(utc_clock());
                 match result {
-                    Ok(result) => {
-                        self.token_expires = result.token_expires;
-                        self.found(result.newest, manual);
-                    }
+                    Ok(newest) => self.found(newest, manual),
                     Err(error) => {
                         if manual {
                             self.strip = Strip::Error(error.clone());
@@ -437,38 +402,6 @@ impl Updater {
         ui.heading("Updates");
         ui.label(format!("This version: {}", version::display_text()));
 
-        match self.token_saved {
-            None => {
-                ui.weak("Reading the GitHub token…");
-            }
-            Some(false) => {
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    "Add a GitHub token to get updates.",
-                );
-                self.token_field(ui, settings);
-            }
-            Some(true) => {
-                ui.colored_label(
-                    good_color(ui),
-                    "GitHub token saved in Windows Credential Manager.",
-                );
-                ui.horizontal_wrapped(|ui| {
-                    self.expiry_label(ui);
-                    if ui.link("Replace").clicked() {
-                        self.replacing_token = !self.replacing_token;
-                    }
-                    if ui.link("Remove").clicked() {
-                        self.replacing_token = false;
-                        let _ = self.commands.send(Command::RemoveToken);
-                    }
-                });
-                if self.replacing_token {
-                    self.token_field(ui, settings);
-                }
-            }
-        }
-
         changed |= ui
             .checkbox(
                 &mut settings.update_check_on_start,
@@ -485,9 +418,8 @@ impl Updater {
 
         ui.horizontal_wrapped(|ui| {
             let busy = self.checking || matches!(self.strip, Strip::Downloading { .. });
-            let can_check = self.token_saved == Some(true) && !busy;
             if ui
-                .add_enabled(can_check, egui::Button::new("Check for updates"))
+                .add_enabled(!busy, egui::Button::new("Check for updates"))
                 .clicked()
             {
                 self.checking = true;
@@ -514,65 +446,6 @@ impl Updater {
         }
         changed
     }
-
-    /// The paste field, Save button and the steps to make a token.
-    fn token_field(&mut self, ui: &mut egui::Ui, settings: &Settings) {
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.token_input)
-                    .password(true)
-                    .hint_text("github_pat_…")
-                    .desired_width(260.0),
-            );
-            let token = self.token_input.trim();
-            if ui
-                .add_enabled(!token.is_empty(), egui::Button::new("Save token"))
-                .clicked()
-            {
-                self.checking = true;
-                let _ = self.commands.send(Command::SaveToken {
-                    token: token.to_string(),
-                    include_prereleases: settings.update_include_prereleases,
-                });
-                // Forget it on the UI side straight away.
-                self.token_input.clear();
-                self.replacing_token = false;
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.weak("Make one at ");
-            if ui.link("github.com/settings/personal-access-tokens/new").clicked()
-                && let Err(error) = crate::shell::open_url(NEW_TOKEN_URL)
-            {
-                self.status = Some((Tone::Bad, error));
-            }
-            ui.weak(
-                ". Repository access: \"Only select repositories\", pick Athena. Permissions: Contents, Read-only. Nothing else.",
-            );
-        });
-    }
-
-    fn expiry_label(&self, ui: &mut egui::Ui) {
-        let Some(date) = &self.token_expires else {
-            ui.weak("Expiry date not known yet.");
-            return;
-        };
-        match days_until(date) {
-            Some(days) if days < 0 => {
-                ui.colored_label(ui.visuals().error_fg_color, format!("Expired on {date}."));
-            }
-            Some(days) if days <= EXPIRY_WARNING_DAYS => {
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    format!("Expires in {days} days, make a new token."),
-                );
-            }
-            _ => {
-                ui.weak(format!("Expires {date}."));
-            }
-        }
-    }
 }
 
 /// This exe's version for comparing. A local build counts as the version
@@ -591,18 +464,17 @@ fn run_worker(
     events: Sender<Event>,
     cancel: Arc<AtomicBool>,
 ) {
-    // The token lives here in memory only while Athena runs.
-    let mut saved_token: Option<String> = None;
     let send = |event: Event| {
         let _ = events.send(event);
         ctx.request_repaint();
     };
     let client = github::client();
 
-    let check = |token: &str, include_prereleases: bool, manual: bool| {
+    let check = |include_prereleases: bool, manual: bool| {
         let result = match &client {
-            Ok(client) => github::check(client, token, include_prereleases)
-                .map_err(|error| format!("{error:#}")),
+            Ok(client) => {
+                github::check(client, include_prereleases).map_err(|error| format!("{error:#}"))
+            }
             Err(error) => Err(format!("{error:#}")),
         };
         send(Event::Checked { manual, result });
@@ -616,67 +488,21 @@ fn run_worker(
                 check: wanted,
                 include_prereleases,
             } => {
-                match token::load() {
-                    Ok(token) => {
-                        saved_token = token;
-                        send(Event::TokenStatus {
-                            saved: saved_token.is_some(),
-                            error: None,
-                        });
-                    }
-                    Err(error) => send(Event::TokenStatus {
-                        saved: false,
-                        error: Some(format!("{error:#}")),
-                    }),
+                // Older versions kept a GitHub token; it isn't needed any
+                // more. Failing to remove it only matters to Credential
+                // Manager's tidiness, so the error is dropped.
+                let _ = token::remove_old();
+                if wanted {
+                    check(include_prereleases, false);
                 }
-                if wanted && let Some(token) = &saved_token {
-                    check(token, include_prereleases, false);
-                }
-            }
-            Command::SaveToken {
-                token,
-                include_prereleases,
-            } => match token::save(&token) {
-                Ok(()) => {
-                    send(Event::TokenStatus {
-                        saved: true,
-                        error: None,
-                    });
-                    // Check right away, which also shows whether the token works.
-                    check(&token, include_prereleases, true);
-                    saved_token = Some(token);
-                }
-                Err(error) => send(Event::Checked {
-                    manual: false,
-                    result: Err(format!("{error:#}")),
-                }),
-            },
-            Command::RemoveToken => {
-                let error = token::remove().err().map(|error| format!("{error:#}"));
-                if error.is_none() {
-                    saved_token = None;
-                }
-                send(Event::TokenStatus {
-                    saved: saved_token.is_some(),
-                    error,
-                });
             }
             Command::Check {
                 include_prereleases,
-            } => match &saved_token {
-                Some(token) => check(token, include_prereleases, true),
-                None => send(Event::Checked {
-                    manual: true,
-                    result: Err("Add a GitHub token first.".into()),
-                }),
-            },
+            } => check(include_prereleases, true),
             Command::Download(release) => {
-                let result = match (&client, &saved_token) {
-                    (Ok(client), Some(token)) => {
-                        download_and_stage(client, token, &release, &data_dir, &cancel, &send)
-                    }
-                    (Err(error), _) => Err(format!("{error:#}")),
-                    (_, None) => Err("Add a GitHub token first.".into()),
+                let result = match &client {
+                    Ok(client) => download_and_stage(client, &release, &data_dir, &cancel, &send),
+                    Err(error) => Err(format!("{error:#}")),
                 };
                 send(match result {
                     Ok(()) => Event::Staged {
@@ -691,7 +517,6 @@ fn run_worker(
 
 fn download_and_stage(
     client: &reqwest::blocking::Client,
-    token: &str,
     release: &Release,
     data_dir: &std::path::Path,
     cancel: &AtomicBool,
@@ -701,7 +526,7 @@ fn download_and_stage(
     std::fs::create_dir_all(&update_dir)
         .map_err(|error| format!("can't create {}: {error}", update_dir.display()))?;
     let zip_path = update_dir.join(install::DOWNLOAD_FILE);
-    let result = github::download(client, token, release, &zip_path, cancel, |done, total| {
+    let result = github::download(client, release, &zip_path, cancel, |done, total| {
         send(Event::Progress { done, total })
     })
     .and_then(|()| install::stage(&zip_path, data_dir, &release.version_text));
@@ -734,35 +559,9 @@ fn utc_clock() -> String {
     format!("{:02}:{:02}", of_day / 3600, of_day % 3600 / 60)
 }
 
-/// Whole days from today (UTC) until a `YYYY-MM-DD` date.
-fn days_until(date: &str) -> Option<i64> {
-    let today = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64 / 86_400;
-    Some(date_to_days(date)? - today)
-}
-
-/// Days since 1970-01-01 for a `YYYY-MM-DD` date.
-fn date_to_days(date: &str) -> Option<i64> {
-    let mut parts = date.split('-').map(|part| part.parse::<i64>().ok());
-    let (year, month, day) = (parts.next()??, parts.next()??, parts.next()??);
-    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    Some(crate::modules::mining::gamelog::days_from_civil(
-        year, month, day,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reads_expiry_dates() {
-        assert_eq!(date_to_days("1970-01-01"), Some(0));
-        assert_eq!(date_to_days("2027-11-10"), Some(21_132));
-        assert_eq!(date_to_days("2027-13-10"), None);
-        assert_eq!(date_to_days("soon"), None);
-    }
 
     #[test]
     fn shows_megabytes() {
